@@ -1,0 +1,23 @@
+# AnyMouse-Vectoring .gitignore
+
+# Binaries
+octant_daemon
+
+# Object files and Linux kernel modules
+*.o
+*.ko
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary and editor files
+.rbxsync-trash/
+.DS_Store
+*.swp
+*.bak
+*~
+
+# Local custom profiles
+profile.json

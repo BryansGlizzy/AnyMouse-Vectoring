@@ -33,8 +33,8 @@ Anisotropic, 8-octant polar sensitivity calibration driven by real-time ballisti
    - [CachyOS / Arch udev Configuration (`70-mouse-webhid.rules`)](#cachyos--arch-udev-configuration-70-mouse-webhidrules)
    - [Sniffing Protocol via WebHID](#sniffing-protocol-via-webhid)
 10. [Developer & Agent Context Reference](#10-developer--agent-context-reference)
-11. [C Daemon Implementation & Live IPC (`octant_daemon`)](#11-c-daemon-implementation--live-ipc-octant_daemon)
-12. [Interactive GUI Studio (`gui.py`)](#12-interactive-gui-studio-guipy)
+11. [Unified C Engine Architecture (`./anymouse`)](#11-unified-c-engine-architecture-anymouse)
+12. [Native GTK4 + Cairo Studio & `FpsAimForge` Phase 2 Telemetry](#12-native-gtk4--cairo-studio--fpsaimforge-phase-2-telemetry)
 
 ---
 
@@ -307,16 +307,16 @@ Submovement detection requires computing $v(t) = \frac{\sqrt{\Delta x^2 + \Delta
 ```
 +-----------------------------------------------------------------------------+
 |                               PHASE 1 (Prototype)                           |
-|  [Mouse 3200 CPI] -> /dev/input/eventX -> [libevdev daemon]                 |
-|                                                  | (process_mouse_delta)    |
-|  [Aim Trainer] --- Unix Domain Socket --------> /dev/uinput (Virtual Mouse) |
+|  [Mouse 3200 CPI] -> /dev/input/eventX -> [./anymouse RT thread]            |
+|                                                  | (scale_vector)           |
+|  [Calibration thread] -- atomic octant_weights[8] --> /dev/uinput (Virtual) |
 +-----------------------------------------------------------------------------+
                                       |
                                       v
 +-----------------------------------------------------------------------------+
 |                               PHASE 2 (Calibration)                         |
-|  Dedicated 2D Center-Out Flick Drill (Raylib/Bevy/Godot)                    |
-|  Computes P_1, Landing Ratios r_i, updates weights via IPC socket          |
+|  FpsAimForge in-process plugin (libanymouse_faf.so) + 8-octant drills       |
+|  Telemetry over /dev/shm; computes P_1, r_i; updates weights between rounds |
 +-----------------------------------------------------------------------------+
                                       |
                                       v
@@ -342,12 +342,12 @@ Submovement detection requires computing $v(t) = \frac{\sqrt{\Delta x^2 + \Delta
 - Intercept raw events using `ioctl(fd, EVIOCGRAB, 1)` on `/dev/input/by-id/usb-...-event-mouse` to detach the physical mouse from Wayland / X11 / Gamescope.
 - Create a virtual `/dev/uinput` mouse with matching input capabilities (`EV_REL`, `REL_X`, `REL_Y`, `REL_WHEEL`, `BTN_LEFT`, `BTN_RIGHT`, etc.).
 - Run vector math loop on `EV_SYN` (`SYN_REPORT`).
-- Bind a local Unix Domain Socket (`/tmp/octant_weights.sock`) or POSIX shared memory (`shm_open`) to hot-reload `float octant_weights[8]` from the calibration client without dropping ticks.
+- Hot-reload `_Atomic float octant_weights[8]` directly in process memory (GUI and calibration threads write, the real-time thread reads with relaxed atomics), so no socket is needed and no ticks are dropped. The earlier UDP/Unix-socket design was removed during the C consolidation.
 
-### Phase 2: 2D Radial Calibration Engine
-- Standalone calibration client built in Raylib, Bevy (Rust), or Godot.
-- Implements 40-flick center-out protocol with randomized octants and $\pm 8^\circ$ jitter.
-- Tracks ballistic inflection points, evaluates median landing ratio $\tilde{r}_k$, and streams updated weights over IPC socket.
+### Phase 2: `FpsAimForge` (FAF) Native Telemetry Plugin & 8-Octant Calibration Engine
+- **In-Process Native Plugin (`libanymouse_faf.so`):** Hooks `FpsAimForge`'s 13 `Scenario` / `BaseScenario` vtables in-process (`src/faf_plugin.c`) via a lightweight Steam launcher wrapper (`src/faf_launcher.c`) with zero external memory sniffing.
+- **Custom 8-Octant Calibration Bundle (`faf/AnyMouse.bundle.json`):** Installed into `~/.local/share/FpsAimForge/bundles/AnyMouse.bundle.json`, providing `AnyMouse 8-Octant Center-Out`, `AnyMouse 8-Octant Center-Out Ghost`, `AnyMouse 8-Octant Wide Flick`, and the `AnyMouse Calibration Suite` playlist.
+- **True 3D Submovement Telemetry (`/dev/shm/anymouse_faf_telemetry`):** Tracks $1000\text{ Hz}$ 3D camera `(yaw, pitch)` trajectories against exact 3D target centers $\mathbf{T}$ from `TargetManager`, isolates the primary ballistic submovement $\mathbf{P}_1$, evaluates per-octant median landing ratios $\tilde{r}_k$, and applies damped inter-round weight updates ($\alpha = 0.35$, $\pm 5\%$ clamp) at round completion. (KovaaK's UE4.26 offsets in `src/kovaaks_offsets.h` are retained in sunset/standby mode behind `ANYMOUSE_ENABLE_KOVAAKS=1` for future Windows testing.)
 
 ### Phase 3: Mouse MCU Firmware Integration (Attack Shark R3 / nRF52840)
 Deploy vectoring directly to the internal microcontroller:
@@ -482,88 +482,57 @@ Use the resulting `/dev/input/by-id/usb-...-event-mouse` symlink in daemon confi
 
 ---
 
-## 11. C Daemon Implementation & Live IPC (`octant_daemon`)
+## 11. Unified C Engine Architecture (`./anymouse`)
 
-The repository includes a production-grade, zero-dependency C implementation ([`octant_daemon.c`](file:///home/future/Desktop/AnyMouse-Vectoring/octant_daemon.c)) designed for microsecond-level latency on CachyOS / Arch Linux.
+The repository compiles into a single, self-contained, multi-threaded POSIX C binary (`./anymouse`) with zero Python runtime or multi-process IPC dependencies:
 
-### Why POSIX C for the Low-Level Hot-Path?
-- **Zero Kernel Overhead:** Direct interface with `<linux/input.h>` and `<linux/uinput.h>` through raw kernel syscalls without crate abstraction overhead or runtime garbage collection.
-- **Zero Heap Allocations:** All event buffers and remainder state structs reside on the thread stack and data segment.
-- **Fast SIMD Compilation:** Compiles in $< 0.3\text{ seconds}$ with `-O3 -march=native -ffast-math -flto` to an $18\text{ KB}$ binary.
-- **Cross-Platform Portable Math:** The `scale_vector()` function and remainder state logic can be directly copied into the Attack Shark R3's ARM Cortex-M4F firmware or an RP2040 dongle in Phases 3 and 4.
-
-### Latency Optimization Mechanisms
-1. **`SCHED_FIFO` Real-Time Kernel Priority:** Elevates the process thread to real-time priority (80/99) and locks all process memory pages into RAM using `mlockall(MCL_CURRENT | MCL_FUTURE)`. This guarantees the CachyOS kernel scheduler wakes the daemon within microseconds of a hardware USB packet interrupt.
-2. **Batch Event Draining (Up to 64 Events per Syscall):** Rather than performing individual `read()` and `write()` syscalls for each axis event, the daemon drains the entire kernel evdev buffer in a single syscall, mutates $(\Delta x, \Delta y)$ in CPU registers, and flushes the entire frame (`EV_REL`, `EV_KEY`, `EV_SYN`) to `/dev/uinput` in a single batched `write()`.
-3. **Zero-Lock Non-Blocking UDP IPC (Port `42069`):** Uses non-blocking `poll()` across the evdev file descriptor and a local UDP loopback socket (`127.0.0.1:42069`). An external aim trainer or CLI tool can blast 32-byte updates (`float weights[8]`) mid-swipe without any mutex contention or dropped poll ticks.
+- [`src/core.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/core.h) & [`src/main.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/main.c): Shared process state (`_Atomic float octant_weights[8]`, `_Atomic int hardware_cpi`, lock-free `SPSC` ring buffer `tick_ring[65536]`, presets, and JSON profile persistence).
+- [`src/evdev_rt.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/evdev_rt.c): **Thread 1 (`SCHED_FIFO` priority 80 + `mlockall`)** — Real-time kernel `evdev` interceptor (`EVIOCGRAB`) and virtual `/dev/uinput` mouse emitter. Executes `scale_vector()` with Cosine $C^1$ smooth interpolation and sub-pixel error diffusion (`rem_x`, `rem_y`) using lock-free `memory_order_relaxed` atomic weight reads, and pushes every `SYN_REPORT` frame into the lock-free `SPSC` ring buffer.
+- [`src/hid_driver.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/hid_driver.c): Native C `/dev/hidraw*` OpenMouse protocol driver for **Finalmouse UltralightX** (`0x361D:0x0100`) and **Attack Shark R3 / GearHub** (`0x3151:0x402D`). Queries live hardware CPI, polling rate (Hz), battery % and voltage (mV), Motion Sync state, and RSSI signal strength, and writes physical sensor CPI directly over USB HID reports.
+- [`src/faf_telemetry.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_telemetry.h), [`src/faf_plugin.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_plugin.c) (`libanymouse_faf.so`), & [`src/faf_launcher.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_launcher.c): **Phase 2 `FpsAimForge` (FAF) Native In-Process Telemetry Plugin** — Hooks `FpsAimForge`'s 13 `Scenario` / `BaseScenario` vtables in-process to capture $1000\text{ Hz}$ 3D camera `(yaw, pitch)` trajectories, exact 3D target coordinates from `TargetManager`, and round lifecycle events (`MENU`, `WAITING_FOR_CLICK`, `START_COUNTDOWN`, `RUNNING`, `DONE`) over POSIX shared memory (`/dev/shm/anymouse_faf_telemetry`). Includes custom calibration scenarios in [`faf/AnyMouse.bundle.json`](file:///home/future/Desktop/AnyMouse-Vectoring/faf/AnyMouse.bundle.json) (`AnyMouse 8-Octant Center-Out`, `AnyMouse 8-Octant Center-Out Ghost`, `AnyMouse 8-Octant Wide Flick`).
+- [`src/calibration.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/calibration.c) & [`src/kovaaks_offsets.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/kovaaks_offsets.h): **Thread 2 (Ballistic Submovement & Aim-Trainer Telemetry Engine)** — Consumes verified 3D ballistic submovement events ($\mathbf{P}_1$ vs. true target center $\mathbf{T}$) from `FpsAimForge` over `/dev/shm/anymouse_faf_telemetry` with strict active-round session gating, computes per-octant median landing ratios $\tilde{r}_k$, and applies damped inter-round weight updates ($\alpha = 0.35$, $\pm 5\%$ clamp) at round completion. (Retains KovaaK's UE4.26 offsets in sunset/standby mode behind `ANYMOUSE_ENABLE_KOVAAKS=1` for future Windows testing.)
+- [`src/gui_gtk4.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/gui_gtk4.c): **Thread 3 (Native GTK4 + Cairo Studio GUI)** — Interactive polar radar chart, hardware sensor controls, and real-time `FpsAimForge` ballistic telemetry dashboard.
 
 ### Building & Running
 
-#### 1. Compile
+#### 1. Compile & Install `FpsAimForge` Plugin + Scenario Bundle
 ```bash
 make
-# Or manually:
-gcc -O3 -march=native -ffast-math -flto -Wall -Wextra octant_daemon.c -o octant_daemon -lm
 ```
 
-#### 2. Run the Daemon
-Launch with `sudo` (required for `EVIOCGRAB`, `SCHED_FIFO`, and `/dev/input/event*` access):
-
+#### 2. Run the Unified Application (GUI + RT Engine + `FpsAimForge` Telemetry)
 ```bash
-# Using the launcher script (auto-detects Finalmouse ULX or Attack Shark R3):
+# Launch with elevated evdev/uinput permissions while preserving Wayland/X11 GUI session:
 ./start_daemon.sh
-
-# Or run target mouse via Makefile:
+# Or via Makefile:
+make run
 make run-ulx       # Finalmouse ULX @ 0.25x scale (3200 CPI -> 800 effective DPI)
 make run-shark     # Attack Shark R3 @ 0.25x scale
-
-# Or direct invocation:
-sudo ./octant_daemon /dev/input/by-id/usb-Finalmouse_UltralightX_dongle_BE1E28B86F3859BD-event-mouse 0.25
 ```
 
-### Live On-The-Fly Octant Tuning
-
-While `octant_daemon` is running, update the 8-octant multipliers in real time without stopping or restarting:
-
-#### Using `send_weights.py`
+#### 3. CLI & Hardware Probe Modes
 ```bash
-# Apply predefined test presets:
-./send_weights.py --preset vertical_boost    # Boosts North / NE / NW flick sensitivity
-./send_weights.py --preset neutral           # Resets all 8 octants to 0.25
-./send_weights.py --preset horizontal_boost  # Boosts lateral East/West swipes
+# Query live hardware mouse telemetry over /dev/hidraw and exit:
+./anymouse --probe-hw
+# Or:
+make probe-hw
 
-# Set uniform sensitivity:
-./send_weights.py 0.30
-
-# Specify custom 8-octant array (E, NE, N, NW, W, SW, S, SE):
-./send_weights.py 0.25 0.35 0.45 0.35 0.25 0.25 0.25 0.25
-```
-
-#### Raw Python One-Liner
-```bash
-python3 -c 'import socket, struct; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.sendto(struct.pack("8f", 0.25, 0.35, 0.45, 0.35, 0.25, 0.25, 0.25, 0.25), ("127.0.0.1", 42069))'
+# Run in headless CLI daemon mode with automatic damped calibration enabled:
+./start_daemon.sh --headless --auto-calibrate
 ```
 
 ---
 
-## 12. Interactive GUI Studio (`gui.py`)
+## 12. Native GTK4 + Cairo Studio & `FpsAimForge` Phase 2 Telemetry
 
-A desktop GUI ([`gui.py`](file:///home/future/Desktop/AnyMouse-Vectoring/gui.py)) provides a dynamic visual interface for tuning 8-octant sensitivity in real time.
-
-```bash
-# Launch via Python:
-./gui.py
-# Or via send_weights.py:
-./send_weights.py --gui
-# Or via Makefile:
-make gui
-```
+The built-in GTK4 + Cairo studio ([`src/gui_gtk4.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/gui_gtk4.c)) provides a zero-latency interface connected directly to the real-time vectoring and calibration threads in shared memory:
 
 ### Key Features
-- **Interactive Polar Radar Chart:** Displays a glowing polygon of the current 8-octant sensitivity envelope. Drag any of the 8 spoke handles directly on the radar to reshape your sensitivity curve on the fly.
-- **Real-Time Slider & SpinBox Tuning:** 8 granular sliders and DoubleSpinBoxes ($0.01$ step increments) with instantaneous effective DPI readouts (e.g., $3200\text{ CPI} \times 0.25 = 800\text{ DPI}$).
-- **Hardware Sensor CPI Sync:** Select your mouse's locked native CPI ($1600$, $3200$, $6400$, etc.) to calculate true effective DPI across all directions.
-- **Master Scaling & Symmetry Linking:** Proportionally scale the entire profile or lock horizontal ($E \leftrightarrow W, NE \leftrightarrow NW$) and vertical ($N \leftrightarrow S$) symmetry with one click.
-- **Preset Quick-Bar:** Instant switching between `Neutral (0.25x)`, `Vertical Boost`, `Horizontal Boost`, `Diagonal ULX`, and `Low (0.125x)`.
-- **Profile Save/Load:** Export and import custom sensitivity profiles as JSON files.
-- **Zero-Latency UDP Streaming:** Emits 32-byte UDP updates to `127.0.0.1:42069` on every drag event with zero polling overhead.
+- **Interactive Polar Radar Chart (Cairo):** Displays a glowing polygon of the current 8-octant sensitivity envelope with 8 draggable spoke handles AND a live **Ballistic Telemetry Vector Overlay** showing the last flick's primary submovement landing point $\mathbf{P}_1$ (amber dot) vs. final target vector $\mathbf{T}$ (green marker).
+- **Direct In-Memory Atomic Tuning:** Dragging radar handles or sliders updates `_Atomic float octant_weights[8]` directly in process memory with zero socket serialization overhead.
+- **Native OpenMouse Hardware Sync:** Auto-detects Finalmouse UltralightX / Attack Shark R3 over `/dev/hidraw*`, displaying live polling rate (`2000 Hz`), battery percentage & voltage, Motion Sync state, RSSI dBm, and one-click `Set 3200 CPI` / `Set 6400 CPI` hardware buttons + CPI dropdown.
+- **Phase 2 `FpsAimForge` (FAF) Telemetry & Auto-Calibration Panel:**
+  - Connects to `libanymouse_faf.so` inside `FpsAimForge` over `/dev/shm/anymouse_faf_telemetry` with strict active-round session gating (`FAF_STATE_RUNNING`).
+  - Displays live scenario name, round timer, hits/shots/accuracy, per-octant median landing ratios $\tilde{r}_k$, trial progress ($n/5$), peak angular velocity $\omega_{\text{peak}}$, and angular axis skew $\Delta\theta_{\text{err}}$.
+  - Supports automatic inter-round or one-click damped weight updates ($\alpha = 0.35$, $\pm 5\%$ max step clamp per round).
+- **Master Scaling, Symmetry Linking & JSON Profiles:** Proportionally scale all octants, link horizontal ($E \leftrightarrow W, NE \leftrightarrow NW, SE \leftrightarrow SW$) or vertical ($N \leftrightarrow S$) symmetry, switch presets, and export/import `profile.json`.

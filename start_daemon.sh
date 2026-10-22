@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# start_daemon.sh - Helper script to launch octant_daemon with proper permissions
+# start_daemon.sh - Helper script to launch the unified './anymouse' C binary
+# Preserves Wayland/X11 display environment variables when elevating via sudo so the GTK4 GUI works seamlessly.
 set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN="$DIR/octant_daemon"
+BIN="$DIR/anymouse"
 
 ULX_DEV="/dev/input/by-id/usb-Finalmouse_UltralightX_dongle_BE1E28B86F3859BD-event-mouse"
 SHARK_DEV="/dev/input/by-id/usb-_2.4G_Wireless_Mouse-event-mouse"
 
 # Ensure binary is compiled
 if [ ! -f "$BIN" ]; then
-    echo "[*] Compiling octant_daemon..."
+    echo "[*] Compiling unified anymouse binary..."
     make -C "$DIR"
 fi
 
@@ -38,30 +39,16 @@ if [ ! -c /dev/uinput ]; then
     exit 1
 fi
 
-# Detect device if not supplied
-DEVICE="$1"
-SCALE="${2:-0.25}"
-
-if [ -z "$DEVICE" ]; then
-    if [ -e "$ULX_DEV" ]; then
-        DEVICE="$ULX_DEV"
-        echo "[*] Detected Finalmouse UltralightX dongle."
-    elif [ -e "$SHARK_DEV" ]; then
-        DEVICE="$SHARK_DEV"
-        echo "[*] Detected Attack Shark R3 2.4G receiver."
-    else
-        echo "[!] Neither ULX nor Attack Shark was automatically detected in /dev/input/by-id/."
-        echo "Available mouse event devices:"
-        ls -l /dev/input/by-id/ | grep -E "mouse" || true
-        exit 1
-    fi
-fi
-
-echo "[*] Launching: sudo $BIN \"$DEVICE\" $SCALE"
-echo "[*] Press Ctrl+C at any time to cleanly ungrab the device and exit."
+echo "[*] Launching unified AnyMouse engine: $BIN $*"
+echo "[*] Press Ctrl+C or close the window at any time to cleanly ungrab the mouse and exit."
 
 if [ "$(id -u)" -eq 0 ]; then
-    exec "$BIN" "$DEVICE" "$SCALE"
+    exec "$BIN" "$@"
 else
-    exec sudo "$BIN" "$DEVICE" "$SCALE"
+    exec sudo -E env \
+        DISPLAY="${DISPLAY:-}" \
+        WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
+        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-}" \
+        XAUTHORITY="${XAUTHORITY:-}" \
+        "$BIN" "$@"
 fi

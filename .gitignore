@@ -1,11 +1,18 @@
 # AnyMouse-Vectoring .gitignore
 
 # Binaries
+anymouse
+libanymouse_faf.so
+faf_launcher
 octant_daemon
 
 # Object files and Linux kernel modules
 *.o
 *.ko
+*.so
+
+# Upstream reference sources
+FpsAimForge-src/
 
 # Python cache
 __pycache__/
@@ -21,3 +28,6 @@ __pycache__/
 
 # Local custom profiles
 profile.json
+
+# External tooling
+rea/

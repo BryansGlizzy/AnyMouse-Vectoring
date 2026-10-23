@@ -75,7 +75,10 @@ void core_apply_preset(const char *preset_name) {
 }
 
 bool core_save_profile_json(const char *filepath) {
-    FILE *f = fopen(filepath, "w");
+    /* Write beside the target and rename, so a crash can't leave a truncated profile */
+    char tmp[PATH_MAX + 16];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", filepath);
+    FILE *f = fopen(tmp, "w");
     if (!f) return false;
 
     int cpi = atomic_load(&g_state.hardware_cpi);
@@ -92,8 +95,40 @@ bool core_save_profile_json(const char *filepath) {
             (int)lroundf(w[4] * cpi), (int)lroundf(w[5] * cpi),
             (int)lroundf(w[6] * cpi), (int)lroundf(w[7] * cpi));
     fprintf(f, "}\n");
-    fclose(f);
+    bool ok = (fclose(f) == 0);
+    if (ok && rename(tmp, filepath) != 0) ok = false;
+    if (!ok) {
+        unlink(tmp);
+        return false;
+    }
+    config_chown_to_user(filepath);
     return true;
+}
+
+/* The profile lives in the user's config dir; a profile.json beside the binary
+ * (the pre-autosave location) is still read once so existing work carries over. */
+bool core_autoload_profile(char *used_path, size_t sz) {
+    char path[PATH_MAX + 32];
+    if (config_profile_path(path, sizeof(path), false) && core_load_profile_json(path)) {
+        snprintf(used_path, sz, "%s", path);
+        return true;
+    }
+    char dir[PATH_MAX];
+    if (config_exe_dir(dir, sizeof(dir))) {
+        snprintf(path, sizeof(path), "%s/profile.json", dir);
+        if (core_load_profile_json(path)) {
+            snprintf(used_path, sz, "%s", path);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool core_autosave_profile(char *used_path, size_t sz) {
+    char path[PATH_MAX + 32];
+    if (!config_profile_path(path, sizeof(path), true)) return false;
+    snprintf(used_path, sz, "%s", path);
+    return core_save_profile_json(path);
 }
 
 bool core_load_profile_json(const char *filepath) {
@@ -196,6 +231,7 @@ int main(int argc, char **argv) {
     float base_scale = 0.25f;
     const char *dev_path = NULL;
     const char *preset = NULL;
+    bool scale_given = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -221,6 +257,7 @@ int main(int argc, char **argv) {
             float v = strtof(argv[i], NULL);
             if (v >= 0.01f && v <= 4.0f) {
                 base_scale = v;
+                scale_given = true;
             }
         }
     }
@@ -232,6 +269,16 @@ int main(int argc, char **argv) {
 
     if (action) {
         return run_cli_action(action);
+    }
+
+    /* Restore the last session's weights unless the command line asked for specific ones.
+     * Those explicit overrides are session-only and are not written back on exit. */
+    bool persist_profile = !preset && !scale_given;
+    if (persist_profile && !probe_only) {
+        char used[PATH_MAX + 32];
+        if (core_autoload_profile(used, sizeof(used))) {
+            printf("[PROFILE] Restored last state from %s\n", used);
+        }
     }
     if (preset) {
         core_apply_preset(preset);
@@ -291,5 +338,14 @@ int main(int argc, char **argv) {
 
     pthread_join(rt_tid, NULL);
     pthread_join(cal_tid, NULL);
+
+    if (persist_profile) {
+        char used[PATH_MAX + 32];
+        if (core_autosave_profile(used, sizeof(used))) {
+            printf("[PROFILE] Saved current state to %s\n", used);
+        } else {
+            fprintf(stderr, "[WARN] Could not save profile on exit\n");
+        }
+    }
     return 0;
 }

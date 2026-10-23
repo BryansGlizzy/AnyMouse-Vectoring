@@ -208,6 +208,8 @@ void  core_init(float initial_scale, const char *dev_path_override);
 void  core_apply_preset(const char *preset_name);
 bool  core_save_profile_json(const char *filepath);
 bool  core_load_profile_json(const char *filepath);
+bool  core_autoload_profile(char *used_path, size_t sz);  /* Restore last saved state at startup */
+bool  core_autosave_profile(char *used_path, size_t sz);  /* Persist current state to the user's profile */
 
 /* Thread 1: Real-time evdev + uinput vectoring engine (src/evdev_rt.c) */
 void *evdev_rt_thread(void *arg);
@@ -229,6 +231,7 @@ void  config_chown_to_user(const char *path);
 bool  config_mkdirs_for_user(const char *dir);
 void  config_load(void);
 bool  config_save(void);
+bool  config_profile_path(char *out, size_t out_sz, bool create_dir);
 
 /* Hardware HIDraw driver (src/hid_driver.c) */
 bool  hid_query_active_mouse(mouse_hw_status_t *out_status);

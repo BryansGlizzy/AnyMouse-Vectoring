@@ -86,20 +86,32 @@ bool config_mkdirs_for_user(const char *dir) {
     return true;
 }
 
-static bool config_path(char *out, size_t out_sz, bool create_dir) {
-    char dir[PATH_MAX + 32];
+static bool config_dir(char *dir, size_t dir_sz, bool create_dir) {
     uid_t uid;
     gid_t gid;
     const char *xdg = getenv("XDG_CONFIG_HOME");
     if (!sudo_ids(&uid, &gid) && xdg && xdg[0] == '/') {
-        snprintf(dir, sizeof(dir), "%s/anymouse", xdg);
+        snprintf(dir, dir_sz, "%s/anymouse", xdg);
     } else {
         char home[PATH_MAX];
         if (!config_user_home(home, sizeof(home))) return false;
-        snprintf(dir, sizeof(dir), "%s/.config/anymouse", home);
+        snprintf(dir, dir_sz, "%s/.config/anymouse", home);
     }
-    if (create_dir && !config_mkdirs_for_user(dir)) return false;
+    return !create_dir || config_mkdirs_for_user(dir);
+}
+
+static bool config_path(char *out, size_t out_sz, bool create_dir) {
+    char dir[PATH_MAX + 32];
+    if (!config_dir(dir, sizeof(dir), create_dir)) return false;
     snprintf(out, out_sz, "%s/config", dir);
+    return true;
+}
+
+/* Where the octant profile lives: <config dir>/profile.json (owned by the invoking user) */
+bool config_profile_path(char *out, size_t out_sz, bool create_dir) {
+    char dir[PATH_MAX + 32];
+    if (!config_dir(dir, sizeof(dir), create_dir)) return false;
+    snprintf(out, out_sz, "%s/profile.json", dir);
     return true;
 }
 

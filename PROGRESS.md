@@ -9,7 +9,7 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 | Phase | Description | Status | Current Milestone |
 | :---: | :--- | :---: | :--- |
 | **Phase 1** | OS-Level Vectoring Daemon (Linux `evdev` + `uinput`) | **Complete** | Consolidated into unified C binary (`./anymouse`) with `EVIOCGID` 1:1 KWin parity |
-| **Phase 1.5** | Native Mouse Hardware Protocol Integration (`OpenMouse`) | **Complete** | Direct C `/dev/hidraw` telemetry & CPI write in [`src/hid_driver.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/hid_driver.c) |
+| **Phase 1.5** | Native Mouse Hardware Protocol Integration (`OpenMouse`) + Universal PnP | **Complete** | Auto-detect any mouse, Finalmouse ULX CPI/polling, Attack Shark R3 polling (hardware-verified), Steam auto-install, auto-saved profile |
 | **Phase 2** | `FpsAimForge` (FAF) Native Telemetry Plugin & Ballistic Calibration (KovaaK's Sunset/Retained) | **Verified / Active** | Live 3D submovement capture verified in Steam `FpsAimForge` (`libanymouse_faf.so` + `/dev/shm/anymouse_faf_telemetry`) |
 | **Phase 3** | Mouse MCU On-Board Firmware (Attack Shark R3) | **Planned** | Testing ZMK/UFA (`aroum/ufa`) and Ghidra trampoline patching |
 | **Phase 4** | Universal Hardware USB Pass-Through Dongle (RP2040) | **Concept / Design** | Dual-core USB-Host MitM pass-through board |
@@ -171,31 +171,36 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
   - **Hotplug:** the RT thread now loops over select → clone → grab, releases on unplug, waits for the device to return, and moves back to a better mouse when one is plugged in (inotify on `/dev/input`).
   - **Safety:** after 50 consecutive uinput write failures the grab is released, so a dead virtual mouse can't strand the pointer.
 - **GUI:** mouse dropdown with rescan, identify-by-motion and manual path fallback (persisted in `~/.config/anymouse/config`), a polling-rate dropdown, and an FpsAimForge install/repair row. Ctrl+C now closes the GUI cleanly (previously SIGINT left the GTK loop running).
-- **Polling rate ([`src/hid_driver.c`](src/hid_driver.c)):** Finalmouse ULX 500–8000 Hz (cmd 17, u16le). Attack Shark R3 125–8000 Hz via the GearHub relay and an `OPTIONPARAM0` read-modify-write with read-back verification, per `OpenMouse-Project/mouse-protocol`. The R3 path is **not yet hardware-tested**. Correction to the 2026-10-21 entry: Attack Shark R3 CPI *writes* were never implemented; only the Finalmouse writes CPI.
+- **Polling rate ([`src/hid_driver.c`](src/hid_driver.c)):** Finalmouse ULX 500–8000 Hz (cmd 17, u16le). Attack Shark R3 125–8000 Hz via the GearHub relay and an `OPTIONPARAM0` read-modify-write with read-back verification, per `OpenMouse-Project/mouse-protocol`. Hardware-verified on the R3 on 2026-10-22 (1k ↔ 2k switching confirmed in the GUI and on the mouse). Correction to the 2026-10-21 entry: Attack Shark R3 CPI *writes* were never implemented; only the Finalmouse writes CPI.
 - **Steam auto-install ([`src/steam_install.c`](src/steam_install.c)):** `--install-faf` / `--uninstall-faf` / `--faf-status` locate FpsAimForge (app `5165380`) through `libraryfolders.vdf` and the appmanifest. The launcher now resolves `FpsAimForge.bin` and the plugin relative to itself, so no paths are compiled in, and it carries a marker so the installer can detect Steam updates and repair them. Pre-marker launchers are recognised, so the existing install migrated in place with `FpsAimForge.bin` byte-identical.
 - **Fix (same day): polling dropdown froze the GUI on the Attack Shark R3.** The rate handler ran the multi-second relay write on the GTK thread and rebuilt the dropdown's items from inside its own popover selection. The popover re-fired selections, so the GUI looped write → re-read → rebuild while repeatedly rewriting the R3 settings block. The written rate itself was correct.
   - **Fix:** all vendor HID I/O now runs on one `hw-io` worker thread with results applied via `g_idle_add`. The rate list is only rebuilt when the supported rates change. Writes are skipped while a job is in flight or when the selection equals the rate the mouse reports. R3 relay reads retry once.
   - **Also fixed:** a 2-event stack overflow of `out_buf` in the RT thread when an evdev frame splits across reads.
+- **Profile persistence:** weights are restored on launch and saved on exit to `~/.config/anymouse/profile.json` (atomic write, user-owned under sudo; the repo-local `profile.json` is read once as a fallback). `--preset` / explicit scale runs don't overwrite it. The Master Vector Scaling widgets now follow the loaded weights (they previously only changed the underlying values).
 - **`--install-udev`:** optional `uaccess` rules + `uinput` autoload so the engine can run without sudo (`ANYMOUSE_NO_SUDO=1 ./start_daemon.sh`).
 
 ---
 
-## Where We Left Off (2026-10-21 Nightly Handoff)
+## Where We Left Off (2026-10-23 Handoff)
 
 ### Current Working State
 1. **Unified C Engine ([`./anymouse`](file:///home/future/Desktop/AnyMouse-Vectoring/anymouse)):**
    - Real-time `evdev` $\to$ `uinput` 8-octant Cosine $C^1$ vectoring with `EVIOCGID` cloning ($1:1$ KWin Wayland Flat profile parity).
-   - Native `/dev/hidraw` OpenMouse driver for Finalmouse ULX (`0x361D:0x0100`) and Attack Shark R3 (`0x3151:0x402D`) with working CPI buttons and dropdown.
+   - Automatic mouse discovery with hotplug, a GUI mouse picker (auto / identify / manual path), and the chosen device persisted in `~/.config/anymouse/config`.
+   - Native `/dev/hidraw` OpenMouse driver: Finalmouse ULX (`0x361D:0x0100`) CPI + polling rate; Attack Shark R3 (`0x3151:0x402D`) polling rate (CPI writes not implemented yet). All vendor HID I/O runs on a worker thread so the GUI never blocks.
+   - Weights auto-restore on launch and auto-save on exit (`~/.config/anymouse/profile.json`).
    - Native GTK4 + Cairo Studio GUI with live Polar Radar Chart and $\mathbf{P}_1$ vs. $\mathbf{T}$ vector overlay.
 2. **`FpsAimForge` (FAF) Phase 2 Integration:**
-   - [`libanymouse_faf.so`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_plugin.c) + [`faf_launcher`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_launcher.c) installed into `/mnt/iscsi-nvme/SteamLibrary/steamapps/common/FpsAimForge/FpsAimForge` (original binary backed up at `FpsAimForge.bin`).
+   - [`libanymouse_faf.so`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_plugin.c) + [`faf_launcher`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_launcher.c) are installed by `anymouse --install-faf` (or the GUI button), which finds FpsAimForge in any Steam library; the original binary is kept at `FpsAimForge.bin`, and a Steam update is detected as "needs repair".
+   - Every flick is logged to `logs/flicks.csv`; scenarios run 60 s.
    - Custom calibration bundle [`faf/AnyMouse.bundle.json`](file:///home/future/Desktop/AnyMouse-Vectoring/faf/AnyMouse.bundle.json) installed at `~/.local/share/FpsAimForge/bundles/AnyMouse.bundle.json` (`AnyMouse 8-Octant Center-Out`, `AnyMouse 8-Octant Center-Out Ghost`, `AnyMouse 8-Octant Wide Flick`, and `AnyMouse Calibration Suite` playlist).
    - KovaaK's UE4.26 code ([`src/kovaaks_offsets.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/kovaaks_offsets.h)) preserved in standby mode behind `ANYMOUSE_ENABLE_KOVAAKS=1` for future Windows testing.
 
 ### Next Session Resume Steps
-1. Start AnyMouse Studio: `sudo ./start_daemon.sh` (or `make run`).
+1. Start AnyMouse Studio: `sudo ./start_daemon.sh` (or `make run`). Your last weights are restored automatically.
 2. Launch **`FpsAimForge`** from Steam and play **`AnyMouse 8-Octant Center-Out`** (or **`AnyMouse Calibration Suite`**).
-3. Observe per-octant median landing ratios $\tilde{r}_k$ populate across all 8 octants during active rounds and test **Inter-Round Auto-Adapt** ($\alpha = 0.35$, $\pm 5\%$ clamp) across consecutive rounds, then save the converged weights to `profile.json`.
+3. Observe per-octant median landing ratios $\tilde{r}_k$ across rounds (they were within noise of 1.0 by round 8–12 on 2026-10-22) and check **Ghost** and **Wide Flick** with auto-adapt off. Weights save on exit; use `logs/flicks.csv` to review history.
+4. Next engineering items: Attack Shark R3 CPI writes, then the Windows research spike.
 
 ---
 
@@ -210,9 +215,11 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 
 ### Checkpoint 1.5: Universal Release (Linux → Windows)
 - [x] Auto-detect any connected mouse; GUI dropdown + identify + manual fallback; hotplug.
-- [x] Polling-rate control in the GUI (Finalmouse ULX; Attack Shark R3 pending hardware test).
+- [x] Polling-rate control in the GUI (Finalmouse ULX and Attack Shark R3).
 - [x] Steam library auto-detection and FpsAimForge plugin/bundle installer with Steam-update repair.
-- [ ] Hardware-test Attack Shark R3 polling-rate writes; implement R3 CPI writes (`SET 0x54` DPI table).
+- [x] Hardware-test Attack Shark R3 polling-rate writes (1k ↔ 2k verified 2026-10-22).
+- [x] Auto-save / auto-restore of the octant profile (`~/.config/anymouse/profile.json`).
+- [ ] Implement R3 CPI writes (`SET 0x54` DPI table).
 - [ ] Windows research spike: input interception method (Interception driver vs. virtual HID vs. vectoring-only), FpsAimForge on Windows, anti-cheat implications, `hidapi` port.
 
 ### Checkpoint 2: Attack Shark R3 On-Board Firmware (Phase 3)

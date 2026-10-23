@@ -404,6 +404,7 @@ static void sync_ui_from_state(void) {
     g_ui.updating_ui = true;
 
     int cpi = atomic_load_explicit(&g_state.hardware_cpi, memory_order_relaxed);
+    double sum = 0.0;
     for (int i = 0; i < 8; i++) {
         float w = atomic_load_explicit(&g_state.octant_weights[i], memory_order_relaxed);
         gtk_range_set_value(GTK_RANGE(g_ui.oct_scales[i]), w * 1000.0);
@@ -413,7 +414,14 @@ static void sync_ui_from_state(void) {
         char dpi_buf[32];
         snprintf(dpi_buf, sizeof(dpi_buf), "%d DPI", eff_dpi);
         gtk_label_set_text(GTK_LABEL(g_ui.oct_dpi_lbls[i]), dpi_buf);
+        sum += w;
     }
+
+    /* The Master Vector Scaling widgets show the mean weight (equal to the uniform scalar
+     * whenever the octants are uniform), so loaded or calibrated profiles are reflected. */
+    double mean = sum / 8.0;
+    gtk_spin_button_set_value(GTK_SPIN_BUTTON(g_ui.master_spin), mean);
+    gtk_range_set_value(GTK_RANGE(g_ui.master_scale), mean * 100.0);
 
     gtk_widget_queue_draw(g_ui.drawing_area);
     g_ui.updating_ui = false;
@@ -893,22 +901,26 @@ static void on_reset_calib_clicked(GtkButton *btn, gpointer user_data) {
 static void on_save_profile_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     (void)user_data;
-    if (core_save_profile_json("profile.json")) {
-        gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), "💾 Saved to profile.json");
+    char path[PATH_MAX + 32], msg[PATH_MAX + 64];
+    if (core_autosave_profile(path, sizeof(path))) {
+        snprintf(msg, sizeof(msg), "💾 Saved to %s", path);
     } else {
-        gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), "❌ Failed to save profile.json");
+        snprintf(msg, sizeof(msg), "❌ Failed to save profile");
     }
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), msg);
 }
 
 static void on_load_profile_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     (void)user_data;
-    if (core_load_profile_json("profile.json")) {
-        gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), "📂 Loaded profile.json");
+    char path[PATH_MAX + 32], msg[PATH_MAX + 64];
+    if (core_autoload_profile(path, sizeof(path))) {
+        snprintf(msg, sizeof(msg), "📂 Loaded %s", path);
         sync_ui_from_state();
     } else {
-        gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), "⚠️ No profile.json found");
+        snprintf(msg, sizeof(msg), "⚠️ No saved profile found");
     }
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), msg);
 }
 
 /* Periodic 100ms UI Refresh Timer (reads lock-free atomics & telemetry mutex) */
@@ -1342,11 +1354,11 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
 
     /* 7. Bottom Profile Save/Load Bar */
     GtkWidget *bot_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
-    GtkWidget *btn_save = gtk_button_new_with_label("💾 Save Profile (profile.json)");
+    GtkWidget *btn_save = gtk_button_new_with_label("💾 Save Profile (auto-saved on exit)");
     g_signal_connect(btn_save, "clicked", G_CALLBACK(on_save_profile_clicked), NULL);
     gtk_box_append(GTK_BOX(bot_hbox), btn_save);
 
-    GtkWidget *btn_load = gtk_button_new_with_label("📂 Load Profile (profile.json)");
+    GtkWidget *btn_load = gtk_button_new_with_label("📂 Reload Saved Profile");
     g_signal_connect(btn_load, "clicked", G_CALLBACK(on_load_profile_clicked), NULL);
     gtk_box_append(GTK_BOX(bot_hbox), btn_load);
 

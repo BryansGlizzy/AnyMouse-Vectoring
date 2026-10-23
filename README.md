@@ -493,6 +493,9 @@ The repository compiles into a single, self-contained, multi-threaded POSIX C bi
 - [`src/calibration.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/calibration.c) & [`src/kovaaks_offsets.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/kovaaks_offsets.h): **Thread 2 (Ballistic Submovement & Aim-Trainer Telemetry Engine)** — Consumes verified 3D ballistic submovement events ($\mathbf{P}_1$ vs. true target center $\mathbf{T}$) from `FpsAimForge` over `/dev/shm/anymouse_faf_telemetry` with strict active-round session gating, computes per-octant median landing ratios $\tilde{r}_k$, and applies damped inter-round weight updates ($\alpha = 0.35$, $\pm 5\%$ clamp) at round completion. (Retains KovaaK's UE4.26 offsets in sunset/standby mode behind `ANYMOUSE_ENABLE_KOVAAKS=1` for future Windows testing.)
 - [`src/gui_gtk4.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/gui_gtk4.c): **Thread 3 (Native GTK4 + Cairo Studio GUI)** — Interactive polar radar chart, hardware sensor controls, and real-time `FpsAimForge` ballistic telemetry dashboard.
 
+### Flick Log
+Every plugin event is appended to `logs/flicks.csv` next to the binary (override with `ANYMOUSE_LOG_DIR`). Columns: `unix_time, scenario, round_id, octant, accepted, is_hit, target_angle_deg, target_dist_deg, p1_dist_deg, radial_ratio, angular_error_deg, peak_vel_deg_s, duration_ms, cm_per_360, hardware_cpi, auto_calibrate, w0..w7` (the weights in effect when the flick was consumed). `accepted=0` marks flicks the calibrator filtered out. The file is owned by the invoking user when launched via `sudo`, and `logs/` is git-ignored.
+
 ### Building & Running
 
 #### 1. Compile & Install `FpsAimForge` Plugin + Scenario Bundle

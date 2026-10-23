@@ -850,6 +850,9 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     GtkWidget *calib_ctrl_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     g_ui.chk_auto_calib = gtk_check_button_new_with_label("Inter-Round Auto-Adapt (α=0.35, ±5% clamp on Round End)");
     g_signal_connect(g_ui.chk_auto_calib, "toggled", G_CALLBACK(on_auto_calib_toggled), NULL);
+    /* Reflect --auto-calibrate passed on the command line */
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(g_ui.chk_auto_calib),
+                                atomic_load_explicit(&g_state.auto_calibrate, memory_order_relaxed));
     gtk_box_append(GTK_BOX(calib_ctrl_hbox), g_ui.chk_auto_calib);
 
     GtkWidget *btn_apply_calib = gtk_button_new_with_label("⚡ Apply Damped Update");

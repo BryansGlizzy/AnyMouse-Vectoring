@@ -31,3 +31,6 @@ profile.json
 
 # External tooling
 rea/
+
+# Per-flick CSV logs
+logs/

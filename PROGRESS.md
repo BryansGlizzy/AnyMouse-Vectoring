@@ -160,6 +160,11 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 - **Milestone:** Brought [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/README.md) in line with the current architecture: removed the obsolete UDP/Unix-socket weight channel and the Raylib/Bevy/Godot trainer from the Section 7 diagram and Phase 1 notes (weights now live in process memory as `_Atomic float octant_weights[8]`), and fixed the Section 12 table-of-contents entry to say `FpsAimForge`.
 - **Repository:** Committed the unified C engine (`src/`), the `FpsAimForge` bundle (`faf/`), and the removal of the legacy Python/`octant_daemon.c` files. Files named in earlier log entries (`gui.py`, `mouse_protocol.py`, `send_weights.py`, `octant_daemon.c`) are kept in that history as the prototype stage and no longer exist in the tree.
 
+### [2026-10-22] - Flick CSV Log, GUI Auto-Adapt Sync & Longer Rounds
+- Added a persistent per-flick CSV log (`logs/flicks.csv`, see README) so calibration history survives the 256-slot ring and restarts.
+- Fixed the GUI so the "Inter-Round Auto-Adapt" checkbox reflects `--auto-calibrate` at startup.
+- Extended all three `AnyMouse` scenarios from 45 s to 60 s to reach the 5-trial per-octant gate more reliably.
+
 ---
 
 ## Where We Left Off (2026-10-21 Nightly Handoff)

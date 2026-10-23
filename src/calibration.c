@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -525,6 +526,73 @@ static void record_ballistic_flick(uint64_t ts_ns, float p1_x, float p1_y,
     pthread_mutex_unlock(&g_state.telemetry_mutex);
 }
 
+/*
+ * Persistent per-flick CSV log (<binary dir>/logs/flicks.csv, or $ANYMOUSE_LOG_DIR).
+ * One row per plugin event, including ones the calibrator rejects (accepted=0),
+ * so runs survive ring wrap-around and restarts. Opened lazily, append-only.
+ */
+static FILE *g_flick_log = NULL;
+static bool  g_flick_log_failed = false;
+
+static void open_flick_log(void) {
+    char dir[PATH_MAX];
+    const char *env = getenv("ANYMOUSE_LOG_DIR");
+    if (env && env[0]) {
+        snprintf(dir, sizeof(dir), "%s", env);
+    } else {
+        char exe[PATH_MAX];
+        ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        if (n <= 0) { g_flick_log_failed = true; return; }
+        exe[n] = '\0';
+        char *slash = strrchr(exe, '/');
+        if (slash) *slash = '\0';
+        snprintf(dir, sizeof(dir), "%s/logs", exe);
+    }
+    mkdir(dir, 0755);
+
+    char path[PATH_MAX + 32];
+    snprintf(path, sizeof(path), "%s/flicks.csv", dir);
+    g_flick_log = fopen(path, "a");
+    if (!g_flick_log) { g_flick_log_failed = true; return; }
+
+    /* Running under sudo: hand the files back to the invoking user */
+    const char *su = getenv("SUDO_UID"), *sg = getenv("SUDO_GID");
+    if (su && sg) {
+        if (chown(dir, (uid_t)atoi(su), (gid_t)atoi(sg)) != 0) { /* best effort */ }
+        if (chown(path, (uid_t)atoi(su), (gid_t)atoi(sg)) != 0) { /* best effort */ }
+    }
+
+    fseek(g_flick_log, 0, SEEK_END);
+    if (ftell(g_flick_log) == 0) {
+        fprintf(g_flick_log, "unix_time,scenario,round_id,octant,accepted,is_hit,target_angle_deg,"
+                             "target_dist_deg,p1_dist_deg,radial_ratio,angular_error_deg,"
+                             "peak_vel_deg_s,duration_ms,cm_per_360,hardware_cpi,auto_calibrate,"
+                             "w0,w1,w2,w3,w4,w5,w6,w7\n");
+    }
+}
+
+static void log_flick_event(const faf_submovement_event_t *ev, const char *scenario,
+                            float cm_per_360) {
+    if (g_flick_log_failed) return;
+    if (!g_flick_log) {
+        open_flick_log();
+        if (!g_flick_log) return;
+    }
+    bool accepted = ev->radial_ratio >= 0.35f && ev->radial_ratio <= 2.20f &&
+                    fabsf(ev->angular_error_deg) <= 40.0f;
+    fprintf(g_flick_log, "%ld,\"%s\",%u,%d,%d,%d,%.2f,%.3f,%.3f,%.4f,%.2f,%.1f,%.1f,%.2f,%d,%d",
+            (long)time(NULL), scenario, ev->round_id, ev->octant & 7, accepted ? 1 : 0,
+            ev->is_hit, ev->target_angle_deg, ev->target_dist_deg, ev->p1_dist_deg,
+            ev->radial_ratio, ev->angular_error_deg, ev->peak_vel_deg_s, ev->duration_ms,
+            cm_per_360, atomic_load_explicit(&g_state.hardware_cpi, memory_order_relaxed),
+            atomic_load_explicit(&g_state.auto_calibrate, memory_order_relaxed) ? 1 : 0);
+    for (int k = 0; k < 8; k++) {
+        fprintf(g_flick_log, ",%.4f",
+                atomic_load_explicit(&g_state.octant_weights[k], memory_order_relaxed));
+    }
+    fputc('\n', g_flick_log);
+}
+
 /* Record a verified 3D ballistic submovement event directly from FpsAimForge plugin */
 static void record_faf_submovement(const faf_submovement_event_t *ev) {
     if (!ev) return;
@@ -643,8 +711,10 @@ static bool poll_faf_telemetry(anymouse_faf_shm_t *shm, uint32_t *prev_rounds_co
     while (r < w) {
         faf_submovement_event_t ev = shm->events[r & FAF_EVENT_RING_MASK];
         r++;
+        log_flick_event(&ev, shm->scenario_name, shm->cm_per_360);
         record_faf_submovement(&ev);
     }
+    if (g_flick_log) fflush(g_flick_log);
     atomic_store_explicit(&shm->read_idx, r, memory_order_release);
 
     kovaaks_session_state_t mapped_state = KOVAAKS_STATE_MENU_OR_LOBBY;

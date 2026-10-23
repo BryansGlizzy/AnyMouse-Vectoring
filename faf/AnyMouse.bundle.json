@@ -4,7 +4,7 @@
    "name": "8-Octant Center-Out",
    "def": {
     "description": "AnyMouse Phase 2 Calibration Drill: Click the center home target (0,0), then execute a single decisive ballistic flick to the newly spawned octant target (E, NE, N, NW, W, SW, S, SE).",
-    "durationSeconds": 45,
+    "durationSeconds": 60,
     "shotType": {
      "clickSingle": true,
      "accuracyPenalty": "ACCURACY_PENALTY_SQRT"
@@ -218,7 +218,7 @@
    "name": "8-Octant Center-Out Ghost",
    "def": {
     "description": "AnyMouse Phase 2 Calibration Drill (Ghost Preview): Shows the upcoming target as a ghost while alternating between Center (0,0) and the 8 polar octants.",
-    "durationSeconds": 45,
+    "durationSeconds": 60,
     "shotType": {
      "clickSingle": true,
      "removeClosestOnMiss": true,
@@ -430,7 +430,7 @@
    "name": "8-Octant Wide Flick",
    "def": {
     "description": "AnyMouse Wide-Angle 8-Octant Calibration Drill for forearm + wrist ballistic transitions.",
-    "durationSeconds": 45,
+    "durationSeconds": 60,
     "shotType": {
      "clickSingle": true,
      "accuracyPenalty": "ACCURACY_PENALTY_SQRT"

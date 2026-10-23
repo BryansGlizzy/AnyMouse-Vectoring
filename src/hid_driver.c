@@ -259,6 +259,13 @@ static bool gh_get(int fd, uint8_t cmd_id, uint8_t out[GEARHUB_REPORT_SIZE]) {
     return !all_zero && out[0] == cmd_id;
 }
 
+/* The receiver occasionally answers a relay exchange with an empty or stale buffer; retry once */
+static bool gh_get_retry(int fd, uint8_t cmd_id, uint8_t out[GEARHUB_REPORT_SIZE]) {
+    if (gh_get(fd, cmd_id, out)) return true;
+    usleep(100000);
+    return gh_get(fd, cmd_id, out);
+}
+
 static int gh_decode_rate(uint8_t code) {
     for (size_t i = 0; i < sizeof(GEARHUB_RATE_CODES) / sizeof(GEARHUB_RATE_CODES[0]); i++) {
         if (GEARHUB_RATE_CODES[i].code == code) return GEARHUB_RATE_CODES[i].hz;
@@ -270,7 +277,7 @@ static int gh_read_polling_rate(const char *node) {
     int fd = open(node, O_RDWR);
     if (fd < 0) return 0;
     uint8_t opt0[GEARHUB_REPORT_SIZE];
-    int hz = gh_get(fd, GH_CMD_GET_OPTIONPARAM0, opt0) ? gh_decode_rate(opt0[GH_OPT0_REPORT_RATE]) : 0;
+    int hz = gh_get_retry(fd, GH_CMD_GET_OPTIONPARAM0, opt0) ? gh_decode_rate(opt0[GH_OPT0_REPORT_RATE]) : 0;
     close(fd);
     return hz;
 }
@@ -289,7 +296,7 @@ static bool gh_write_polling_rate(const char *node, int hz) {
     bool ok = false;
     uint8_t current[GEARHUB_REPORT_SIZE];
     /* Never write a settings block we could not read back intact */
-    if (gh_get(fd, GH_CMD_GET_OPTIONPARAM0, current) && gh_decode_rate(current[GH_OPT0_REPORT_RATE]) != 0) {
+    if (gh_get_retry(fd, GH_CMD_GET_OPTIONPARAM0, current) && gh_decode_rate(current[GH_OPT0_REPORT_RATE]) != 0) {
         uint8_t block[GEARHUB_REPORT_SIZE];
         memset(block, 0, sizeof(block));
         memcpy(&block[8], &current[8], GEARHUB_REPORT_SIZE - 8);
@@ -301,7 +308,7 @@ static bool gh_write_polling_rate(const char *node, int hz) {
         if (gh_select_mouse(fd) && gh_wait_ready(fd, true) && gh_send(fd, block, sizeof(block))) {
             usleep(50000);
             uint8_t verify[GEARHUB_REPORT_SIZE];
-            ok = gh_get(fd, GH_CMD_GET_OPTIONPARAM0, verify) && verify[GH_OPT0_REPORT_RATE] == code;
+            ok = gh_get_retry(fd, GH_CMD_GET_OPTIONPARAM0, verify) && verify[GH_OPT0_REPORT_RATE] == code;
         }
     }
     close(fd);

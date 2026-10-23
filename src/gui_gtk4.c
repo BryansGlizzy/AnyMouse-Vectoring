@@ -47,6 +47,7 @@ typedef struct {
     GtkStringList *rate_model;
     int        rate_values[8];
     int        rate_count;
+    int        current_rate_hz;   /* Last rate the mouse reported (0 = unknown) */
 
     /* Device selection widgets */
     GtkWidget *device_dropdown;
@@ -489,35 +490,47 @@ static void on_preset_clicked(GtkButton *btn, gpointer user_data) {
 
 static void rescan_devices(bool force);
 
+static int g_hw_busy = 0; /* Outstanding hardware jobs (GTK thread only) */
+
 static void update_rate_dropdown(const mouse_hw_status_t *st) {
-    g_ui.updating_ui = true;
-    guint n_items = g_list_model_get_n_items(G_LIST_MODEL(g_ui.rate_model));
-    gtk_string_list_splice(g_ui.rate_model, 0, n_items, NULL);
-    g_ui.rate_count = 0;
-    guint sel = GTK_INVALID_LIST_POSITION;
+    int rates[8];
+    int count = 0;
     if (st->node[0] && st->accessible) {
-        for (int i = 0; st->supported_rates[i] && i < 8; i++) {
-            char b[32];
-            snprintf(b, sizeof(b), "%d Hz", st->supported_rates[i]);
-            gtk_string_list_append(g_ui.rate_model, b);
-            if (st->supported_rates[i] == st->polling_rate_hz) sel = (guint)i;
-            g_ui.rate_values[g_ui.rate_count++] = st->supported_rates[i];
-        }
+        for (int i = 0; st->supported_rates[i] && i < 8; i++) rates[count++] = st->supported_rates[i];
     }
-    if (g_ui.rate_count == 0) gtk_string_list_append(g_ui.rate_model, "Not supported");
-    gtk_drop_down_set_selected(GTK_DROP_DOWN(g_ui.rate_dropdown),
-                               g_ui.rate_count ? sel : 0);
-    gtk_widget_set_sensitive(g_ui.rate_dropdown, g_ui.rate_count > 0);
+
+    g_ui.updating_ui = true;
+    /* Rebuild the item list only when the supported rates change */
+    bool same = (count == g_ui.rate_count) && (count == 0 || memcmp(rates, g_ui.rate_values, sizeof(int) * (size_t)count) == 0);
+    if (!same || g_list_model_get_n_items(G_LIST_MODEL(g_ui.rate_model)) == 0) {
+        guint n_items = g_list_model_get_n_items(G_LIST_MODEL(g_ui.rate_model));
+        gtk_string_list_splice(g_ui.rate_model, 0, n_items, NULL);
+        for (int i = 0; i < count; i++) {
+            char b[32];
+            snprintf(b, sizeof(b), "%d Hz", rates[i]);
+            gtk_string_list_append(g_ui.rate_model, b);
+            g_ui.rate_values[i] = rates[i];
+        }
+        g_ui.rate_count = count;
+        if (count == 0) gtk_string_list_append(g_ui.rate_model, "Not supported");
+    }
+    /* An unreadable rate (0) keeps the current selection rather than jumping to the first item */
+    guint sel = (same && st->polling_rate_hz == 0) ? gtk_drop_down_get_selected(GTK_DROP_DOWN(g_ui.rate_dropdown)) : 0;
+    for (int i = 0; i < count; i++) {
+        if (rates[i] == st->polling_rate_hz) sel = (guint)i;
+    }
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(g_ui.rate_dropdown), sel);
+    gtk_widget_set_sensitive(g_ui.rate_dropdown, count > 0 && g_hw_busy == 0);
+    if (st->polling_rate_hz > 0 || count == 0) g_ui.current_rate_hz = st->polling_rate_hz;
     g_ui.updating_ui = false;
 }
 
-static void refresh_hardware_widgets(void) {
-    mouse_hw_status_t st;
-    bool ok = hid_query_active_mouse(&st);
-
+/* Apply a hardware snapshot produced by the HID worker (GTK thread, outside any widget signal) */
+static void apply_hw_status(const mouse_hw_status_t *in, bool ok) {
+    mouse_hw_status_t st = *in;
     bool hw_ok = st.node[0] != '\0' && st.accessible;
-    gtk_widget_set_sensitive(g_ui.btn_cpi_3200, hw_ok && st.vid == 0x361D);
-    gtk_widget_set_sensitive(g_ui.btn_cpi_6400, hw_ok && st.vid == 0x361D);
+    gtk_widget_set_sensitive(g_ui.btn_cpi_3200, hw_ok && st.vid == 0x361D && g_hw_busy == 0);
+    gtk_widget_set_sensitive(g_ui.btn_cpi_6400, hw_ok && st.vid == 0x361D && g_hw_busy == 0);
     update_rate_dropdown(&st);
 
     if (!ok && st.node[0] == '\0') {
@@ -573,6 +586,82 @@ static void refresh_hardware_widgets(void) {
     sync_ui_from_state();
 }
 
+/* ---------- Hardware I/O worker ----------
+ * Vendor HID exchanges can take seconds (the Attack Shark 2.4G relay polls the
+ * receiver with 100 ms waits), so they never run on the GTK thread: running them
+ * inside a dropdown's selection handler froze its popover. One worker executes
+ * jobs in order and hands results back through an idle callback. */
+typedef enum { HW_JOB_QUERY, HW_JOB_SET_RATE, HW_JOB_SET_CPI } hw_job_kind_t;
+
+typedef struct {
+    hw_job_kind_t     kind;
+    int               value;
+    bool              ok;
+    mouse_hw_status_t st;
+    bool              st_ok;
+} hw_job_t;
+
+static GAsyncQueue *g_hw_queue = NULL;
+static _Atomic int  g_hw_queries_pending = 0;
+
+static gboolean on_hw_job_done(gpointer data) {
+    hw_job_t *job = data;
+    g_hw_busy--;
+    char msg[96] = "";
+    if (job->kind == HW_JOB_SET_RATE) {
+        snprintf(msg, sizeof(msg), job->ok ? "⚡ Polling rate set to %d Hz" : "❌ Mouse rejected polling rate %d Hz",
+                 job->value);
+    } else if (job->kind == HW_JOB_SET_CPI) {
+        if (job->ok) snprintf(msg, sizeof(msg), "🎯 Sensor CPI set to %d", job->value);
+        else if (job->st.vid == 0x361D) snprintf(msg, sizeof(msg), "❌ Mouse rejected CPI %d", job->value);
+    }
+    if (msg[0]) gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), msg);
+    apply_hw_status(&job->st, job->st_ok); /* Shows what the mouse actually reports back */
+    g_free(job);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer hw_worker(gpointer data) {
+    (void)data;
+    for (;;) {
+        hw_job_t *job = g_async_queue_pop(g_hw_queue);
+        switch (job->kind) {
+            case HW_JOB_QUERY:
+                atomic_fetch_sub(&g_hw_queries_pending, 1);
+                break;
+            case HW_JOB_SET_RATE:
+                job->ok = hid_set_mouse_polling_rate(job->value);
+                break;
+            case HW_JOB_SET_CPI:
+                job->ok = hid_set_mouse_cpi(job->value);
+                break;
+        }
+        job->st_ok = hid_query_active_mouse(&job->st);
+        g_idle_add(on_hw_job_done, job);
+    }
+    return NULL;
+}
+
+static void hw_submit(hw_job_kind_t kind, int value) {
+    /* Coalesce refreshes: one queued query already covers any later request */
+    if (kind == HW_JOB_QUERY && atomic_fetch_add(&g_hw_queries_pending, 1) > 0) {
+        atomic_fetch_sub(&g_hw_queries_pending, 1);
+        return;
+    }
+    hw_job_t *job = g_new0(hw_job_t, 1);
+    job->kind = kind;
+    job->value = value;
+    g_hw_busy++;
+    gtk_widget_set_sensitive(g_ui.rate_dropdown, FALSE);
+    gtk_widget_set_sensitive(g_ui.btn_cpi_3200, FALSE);
+    gtk_widget_set_sensitive(g_ui.btn_cpi_6400, FALSE);
+    g_async_queue_push(g_hw_queue, job);
+}
+
+static void refresh_hardware_widgets(void) {
+    hw_submit(HW_JOB_QUERY, 0);
+}
+
 static void on_cpi_dropdown_changed(GObject *obj, GParamSpec *pspec, gpointer user_data) {
     (void)pspec;
     (void)user_data;
@@ -581,11 +670,8 @@ static void on_cpi_dropdown_changed(GObject *obj, GParamSpec *pspec, gpointer us
     if (sel < sizeof(CPI_OPTIONS) / sizeof(CPI_OPTIONS[0])) {
         int cpi = CPI_OPTIONS[sel];
         atomic_store_explicit(&g_state.hardware_cpi, cpi, memory_order_relaxed);
-        if (hid_set_mouse_cpi(cpi)) {
-            refresh_hardware_widgets();
-        } else {
-            sync_ui_from_state();
-        }
+        sync_ui_from_state();
+        hw_submit(HW_JOB_SET_CPI, cpi);
     }
 }
 
@@ -596,14 +682,13 @@ static void on_rate_dropdown_changed(GObject *obj, GParamSpec *pspec, gpointer u
     guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(obj));
     if (sel >= (guint)g_ui.rate_count) return;
     int hz = g_ui.rate_values[sel];
+    /* Only an explicit change of value reaches the mouse: never re-write the current rate,
+     * and never stack writes while one is in flight (each one rewrites the settings block) */
+    if (g_hw_busy > 0 || hz == g_ui.current_rate_hz) return;
     char msg[96];
-    if (hid_set_mouse_polling_rate(hz)) {
-        snprintf(msg, sizeof(msg), "⚡ Polling rate set to %d Hz", hz);
-    } else {
-        snprintf(msg, sizeof(msg), "❌ Mouse rejected polling rate %d Hz", hz);
-    }
+    snprintf(msg, sizeof(msg), "⏳ Setting polling rate to %d Hz...", hz);
     gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), msg);
-    refresh_hardware_widgets(); /* Show what the mouse actually reports back */
+    hw_submit(HW_JOB_SET_RATE, hz);
 }
 
 /* ---------- Mouse device selection ---------- */
@@ -772,10 +857,7 @@ static void on_faf_install_clicked(GtkButton *btn, gpointer user_data) {
 
 static void on_set_device_cpi_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
-    int cpi = GPOINTER_TO_INT(user_data);
-    if (hid_set_mouse_cpi(cpi)) {
-        refresh_hardware_widgets();
-    }
+    hw_submit(HW_JOB_SET_CPI, GPOINTER_TO_INT(user_data));
 }
 
 static void on_refresh_hw_clicked(GtkButton *btn, gpointer user_data) {
@@ -1272,6 +1354,9 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_add_css_class(g_ui.lbl_profile_status, "badge-green");
     gtk_box_append(GTK_BOX(bot_hbox), g_ui.lbl_profile_status);
     gtk_box_append(GTK_BOX(right_vbox), bot_hbox);
+
+    g_hw_queue = g_async_queue_new();
+    g_thread_unref(g_thread_new("hw-io", hw_worker, NULL));
 
     rescan_devices(true);
     refresh_hardware_widgets();

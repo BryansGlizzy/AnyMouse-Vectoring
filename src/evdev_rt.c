@@ -293,7 +293,8 @@ void *evdev_rt_thread(void *arg) {
 
     struct pollfd fds[3];
     struct input_event ev_buf[64];
-    struct input_event out_buf[64];
+    /* A frame split across reads re-emits REL_X + REL_Y at its SYN: up to 2 extra events */
+    struct input_event out_buf[64 + 2];
     int32_t acc_dx = 0, acc_dy = 0;
     uint8_t button_mask = 0;
 

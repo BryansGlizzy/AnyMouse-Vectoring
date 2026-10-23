@@ -6,8 +6,8 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$DIR/anymouse"
 
-ULX_DEV="/dev/input/by-id/usb-Finalmouse_UltralightX_dongle_BE1E28B86F3859BD-event-mouse"
-SHARK_DEV="/dev/input/by-id/usb-_2.4G_Wireless_Mouse-event-mouse"
+# The mouse is auto-detected (or chosen in the GUI). Pass a /dev/input path to force one.
+# Set ANYMOUSE_NO_SUDO=1 after `make install-udev` to run without sudo (no SCHED_FIFO).
 
 # Ensure binary is compiled
 if [ ! -f "$BIN" ]; then
@@ -42,7 +42,7 @@ fi
 echo "[*] Launching unified AnyMouse engine: $BIN $*"
 echo "[*] Press Ctrl+C or close the window at any time to cleanly ungrab the mouse and exit."
 
-if [ "$(id -u)" -eq 0 ]; then
+if [ "$(id -u)" -eq 0 ] || [ "${ANYMOUSE_NO_SUDO:-0}" = "1" ]; then
     exec "$BIN" "$@"
 else
     exec sudo -E env \

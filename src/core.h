@@ -4,6 +4,8 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <limits.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
 
@@ -12,8 +14,8 @@
 #define INV_OCTANT_STEP (4.0f / PI)
 #define UDP_PORT 42069
 
-#define DEFAULT_DEV_ULX         "/dev/input/by-id/usb-Finalmouse_UltralightX_dongle_BE1E28B86F3859BD-event-mouse"
-#define DEFAULT_DEV_ATTACKSHARK "/dev/input/by-id/usb-_2.4G_Wireless_Mouse-event-mouse"
+/* Maximum mice tracked by the universal device scanner (src/devices.c) */
+#define DEVICES_MAX 32
 
 /* Lock-free SPSC ring buffer capacity (power of 2: 65536 ticks) */
 #define TICK_RING_SIZE 65536U
@@ -47,6 +49,18 @@ typedef struct {
     uint8_t  octant_idx;    /* Dominant octant [0..7] */
 } tick_event_t;
 
+/* A physical pointing device discovered under /sys/class/input */
+typedef struct {
+    char     event_path[64];    /* /dev/input/eventN */
+    char     byid_path[256];    /* Stable /dev/input/by-id link, "" if none */
+    char     name[128];
+    char     usb_parent[128];   /* usbN/N-P, shared by every interface of one USB device */
+    uint16_t vid;
+    uint16_t pid;
+    bool     hw_supported;      /* Known vendor protocol (CPI / polling control) */
+    int      score;             /* Auto-selection rank, highest wins */
+} mouse_device_t;
+
 /* Hardware telemetry decoded directly over /dev/hidrawX (OpenMouse protocol) */
 typedef struct {
     bool     connected;
@@ -66,6 +80,7 @@ typedef struct {
     char     serial[32];
     char     mouse_fw[32];
     char     dongle_fw[32];
+    int      supported_rates[8];  /* Polling rates the device accepts, 0-terminated */
 } mouse_hw_status_t;
 
 /* Per-octant ballistic submovement calibration statistics */
@@ -155,9 +170,15 @@ typedef struct {
     _Atomic int      trials_per_round;
     _Atomic uint64_t total_ticks_processed;
 
-    /* Device configuration */
-    char             evdev_path[256];
-    char             evdev_error[128];
+    /* Device configuration (strings guarded by device_mutex) */
+    pthread_mutex_t  device_mutex;
+    char             evdev_path[256];     /* Device the RT engine currently holds / last tried */
+    char             evdev_error[160];
+    char             active_name[128];
+    char             requested_path[256]; /* "" = automatic selection */
+    _Atomic uint32_t device_request_gen;  /* Bumped to make the RT engine re-select */
+    _Atomic int      active_vid;          /* 0 when no device is grabbed */
+    _Atomic int      active_pid;
 
     /* Lock-free SPSC ring buffer: Thread 1 (evdev) -> Thread 2 (calibration) */
     tick_event_t     tick_ring[TICK_RING_SIZE];
@@ -191,11 +212,50 @@ bool  core_load_profile_json(const char *filepath);
 /* Thread 1: Real-time evdev + uinput vectoring engine (src/evdev_rt.c) */
 void *evdev_rt_thread(void *arg);
 
+/* Universal mouse discovery & selection (src/devices.c) */
+int   devices_enumerate(mouse_device_t *out, int max);
+bool  devices_pick_auto(mouse_device_t *out);
+bool  devices_lookup(const char *path, mouse_device_t *out);
+bool  devices_is_hw_supported(uint16_t vid, uint16_t pid);
+const char *devices_preferred_path(const mouse_device_t *d);
+int   devices_identify_by_motion(mouse_device_t *out, int timeout_ms);
+void  devices_request_switch(const char *path);
+void  devices_get_request(char *out, size_t out_sz);
+
+/* Persistent user config & invoking-user helpers (src/config.c) */
+bool  config_user_home(char *out, size_t out_sz);
+bool  config_exe_dir(char *out, size_t out_sz);
+void  config_chown_to_user(const char *path);
+bool  config_mkdirs_for_user(const char *dir);
+void  config_load(void);
+bool  config_save(void);
+
 /* Hardware HIDraw driver (src/hid_driver.c) */
 bool  hid_query_active_mouse(mouse_hw_status_t *out_status);
 bool  hid_set_mouse_cpi(int cpi);
 bool  hid_set_mouse_motion_sync(bool enabled);
 bool  hid_set_mouse_polling_rate(int hz);
+
+/* FpsAimForge Steam detection & plugin/bundle installer (src/steam_install.c) */
+typedef enum {
+    FAF_INSTALL_GAME_NOT_FOUND = 0,  /* No Steam library contains FpsAimForge */
+    FAF_INSTALL_NOT_INSTALLED,       /* Game found, AnyMouse launcher not installed */
+    FAF_INSTALL_NEEDS_REPAIR,        /* Steam updated the game and replaced our launcher */
+    FAF_INSTALL_OUTDATED,            /* Installed, but plugin/bundle differ from this build */
+    FAF_INSTALL_OK
+} faf_install_state_t;
+
+typedef struct {
+    faf_install_state_t state;
+    char game_dir[PATH_MAX];
+    char bundle_dir[PATH_MAX];
+    char detail[256];
+} faf_install_info_t;
+
+bool  faf_install_detect(faf_install_info_t *out);
+bool  faf_install_apply(char *msg, size_t msg_sz);
+bool  faf_install_remove(char *msg, size_t msg_sz);
+bool  udev_install_rules(char *msg, size_t msg_sz);
 
 /* Thread 2: Ballistic Submovement & KovaaK's Telemetry Engine (src/calibration.c) */
 void *calibration_thread(void *arg);

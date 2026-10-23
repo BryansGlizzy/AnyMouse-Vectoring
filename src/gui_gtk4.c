@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static const char *DARK_CSS =
     "window, .main-bg { background-color: #111318; color: #e2e8f0; font-family: 'Inter', 'Segoe UI', sans-serif; font-size: 13px; }\n"
@@ -40,6 +41,29 @@ typedef struct {
     GtkWidget *badge_sync;
     GtkWidget *badge_rssi;
     GtkWidget *cpi_dropdown;
+    GtkWidget *btn_cpi_3200;
+    GtkWidget *btn_cpi_6400;
+    GtkWidget *rate_dropdown;
+    GtkStringList *rate_model;
+    int        rate_values[8];
+    int        rate_count;
+
+    /* Device selection widgets */
+    GtkWidget *device_dropdown;
+    GtkStringList *device_model;
+    GtkWidget *device_entry;
+    GtkWidget *btn_identify;
+    mouse_device_t devices[DEVICES_MAX];
+    int        device_count;
+    int        last_active_vid;
+    int        last_active_pid;
+    bool       last_grabbed;
+    int        tick_count;
+
+    /* FpsAimForge installer widgets */
+    GtkWidget *lbl_faf_install;
+    GtkWidget *btn_faf_install;
+    GtkWidget *btn_faf_remove;
 
     /* Master & Symmetry controls */
     GtkWidget *master_scale;
@@ -463,12 +487,49 @@ static void on_preset_clicked(GtkButton *btn, gpointer user_data) {
     sync_ui_from_state();
 }
 
+static void rescan_devices(bool force);
+
+static void update_rate_dropdown(const mouse_hw_status_t *st) {
+    g_ui.updating_ui = true;
+    guint n_items = g_list_model_get_n_items(G_LIST_MODEL(g_ui.rate_model));
+    gtk_string_list_splice(g_ui.rate_model, 0, n_items, NULL);
+    g_ui.rate_count = 0;
+    guint sel = GTK_INVALID_LIST_POSITION;
+    if (st->node[0] && st->accessible) {
+        for (int i = 0; st->supported_rates[i] && i < 8; i++) {
+            char b[32];
+            snprintf(b, sizeof(b), "%d Hz", st->supported_rates[i]);
+            gtk_string_list_append(g_ui.rate_model, b);
+            if (st->supported_rates[i] == st->polling_rate_hz) sel = (guint)i;
+            g_ui.rate_values[g_ui.rate_count++] = st->supported_rates[i];
+        }
+    }
+    if (g_ui.rate_count == 0) gtk_string_list_append(g_ui.rate_model, "Not supported");
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(g_ui.rate_dropdown),
+                               g_ui.rate_count ? sel : 0);
+    gtk_widget_set_sensitive(g_ui.rate_dropdown, g_ui.rate_count > 0);
+    g_ui.updating_ui = false;
+}
+
 static void refresh_hardware_widgets(void) {
     mouse_hw_status_t st;
     bool ok = hid_query_active_mouse(&st);
 
+    bool hw_ok = st.node[0] != '\0' && st.accessible;
+    gtk_widget_set_sensitive(g_ui.btn_cpi_3200, hw_ok && st.vid == 0x361D);
+    gtk_widget_set_sensitive(g_ui.btn_cpi_6400, hw_ok && st.vid == 0x361D);
+    update_rate_dropdown(&st);
+
     if (!ok && st.node[0] == '\0') {
-        gtk_label_set_text(GTK_LABEL(g_ui.lbl_mouse_ident), "🖱️ No OpenMouse HID device detected");
+        bool generic = atomic_load(&g_state.evdev_grabbed) &&
+                       !devices_is_hw_supported((uint16_t)atomic_load(&g_state.active_vid),
+                                                (uint16_t)atomic_load(&g_state.active_pid));
+        gtk_label_set_text(GTK_LABEL(g_ui.lbl_mouse_ident), generic
+            ? "🖱️ Generic mouse: vectoring active, no vendor protocol for CPI / polling control (set CPI below manually)"
+            : "🖱️ No supported vendor HID interface detected");
+        const char *dash[] = { "⚡ Polling: -- Hz", "🔋 Battery: --%", "🎯 Motion Sync: --", "📶 Signal: -- dBm" };
+        GtkWidget *badges[] = { g_ui.badge_rate, g_ui.badge_bat, g_ui.badge_sync, g_ui.badge_rssi };
+        for (int i = 0; i < 4; i++) gtk_label_set_text(GTK_LABEL(badges[i]), dash[i]);
     } else {
         char ident[256];
         if (st.serial[0] != '\0') {
@@ -526,6 +587,187 @@ static void on_cpi_dropdown_changed(GObject *obj, GParamSpec *pspec, gpointer us
             sync_ui_from_state();
         }
     }
+}
+
+static void on_rate_dropdown_changed(GObject *obj, GParamSpec *pspec, gpointer user_data) {
+    (void)pspec;
+    (void)user_data;
+    if (g_ui.updating_ui) return;
+    guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(obj));
+    if (sel >= (guint)g_ui.rate_count) return;
+    int hz = g_ui.rate_values[sel];
+    char msg[96];
+    if (hid_set_mouse_polling_rate(hz)) {
+        snprintf(msg, sizeof(msg), "⚡ Polling rate set to %d Hz", hz);
+    } else {
+        snprintf(msg, sizeof(msg), "❌ Mouse rejected polling rate %d Hz", hz);
+    }
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), msg);
+    refresh_hardware_widgets(); /* Show what the mouse actually reports back */
+}
+
+/* ---------- Mouse device selection ---------- */
+
+static bool same_device_path(const char *a, const char *b) {
+    char ra[PATH_MAX], rb[PATH_MAX];
+    if (!a[0] || !b[0]) return false;
+    if (realpath(a, ra) && realpath(b, rb)) return strcmp(ra, rb) == 0;
+    return strcmp(a, b) == 0;
+}
+
+static void select_requested_in_dropdown(void) {
+    char req[256];
+    devices_get_request(req, sizeof(req));
+    guint sel = 0;
+    if (req[0]) {
+        sel = GTK_INVALID_LIST_POSITION;
+        for (int i = 0; i < g_ui.device_count; i++) {
+            if (same_device_path(req, g_ui.devices[i].event_path)) sel = (guint)(i + 1);
+        }
+        if (sel == GTK_INVALID_LIST_POSITION) {
+            /* Manual path that isn't present right now: show it as its own entry */
+            char item[300];
+            snprintf(item, sizeof(item), "Manual: %s (not connected)", req);
+            gtk_string_list_append(g_ui.device_model, item);
+            sel = (guint)(g_ui.device_count + 1);
+        }
+    }
+    g_ui.updating_ui = true;
+    gtk_drop_down_set_selected(GTK_DROP_DOWN(g_ui.device_dropdown), sel);
+    g_ui.updating_ui = false;
+}
+
+/* Rebuild the mouse list; when !force, only if the set of connected mice changed */
+static void rescan_devices(bool force) {
+    mouse_device_t list[DEVICES_MAX];
+    int n = devices_enumerate(list, DEVICES_MAX);
+    if (!force && n == g_ui.device_count) {
+        bool same = true;
+        for (int i = 0; i < n && same; i++) {
+            same = strcmp(list[i].event_path, g_ui.devices[i].event_path) == 0;
+        }
+        if (same) return;
+    }
+    memcpy(g_ui.devices, list, sizeof(list[0]) * (size_t)n);
+    g_ui.device_count = n;
+
+    g_ui.updating_ui = true;
+    guint n_items = g_list_model_get_n_items(G_LIST_MODEL(g_ui.device_model));
+    gtk_string_list_splice(g_ui.device_model, 0, n_items, NULL);
+    char auto_lbl[200];
+    snprintf(auto_lbl, sizeof(auto_lbl), "Auto (best match%s%s)", n ? ": " : "", n ? list[0].name : ", none found");
+    gtk_string_list_append(g_ui.device_model, auto_lbl);
+    for (int i = 0; i < n; i++) {
+        char item[300];
+        snprintf(item, sizeof(item), "%s  [%04x:%04x]%s  %s", list[i].name, list[i].vid, list[i].pid,
+                 list[i].hw_supported ? " ★" : "", list[i].event_path);
+        gtk_string_list_append(g_ui.device_model, item);
+    }
+    g_ui.updating_ui = false;
+    select_requested_in_dropdown();
+}
+
+static void switch_to_device(const char *path) {
+    devices_request_switch(path);
+    config_save();
+    char msg[300];
+    snprintf(msg, sizeof(msg), "🖱️ Switching to %s", (path && path[0]) ? path : "automatic selection");
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), msg);
+}
+
+static void on_device_dropdown_changed(GObject *obj, GParamSpec *pspec, gpointer user_data) {
+    (void)pspec;
+    (void)user_data;
+    if (g_ui.updating_ui) return;
+    guint sel = gtk_drop_down_get_selected(GTK_DROP_DOWN(obj));
+    if (sel == 0) {
+        switch_to_device("");
+    } else if (sel <= (guint)g_ui.device_count) {
+        switch_to_device(devices_preferred_path(&g_ui.devices[sel - 1]));
+    }
+}
+
+static void on_device_rescan_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    (void)user_data;
+    rescan_devices(true);
+}
+
+static void on_device_entry_apply(GtkWidget *widget, gpointer user_data) {
+    (void)widget;
+    (void)user_data;
+    const char *path = gtk_editable_get_text(GTK_EDITABLE(g_ui.device_entry));
+    if (!path || !path[0]) return;
+    if (access(path, F_OK) != 0) {
+        gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), "❌ That device path does not exist");
+        return;
+    }
+    switch_to_device(path);
+    rescan_devices(true);
+}
+
+typedef struct {
+    mouse_device_t dev;
+    bool found;
+} identify_result_t;
+
+static gboolean on_identify_done(gpointer data) {
+    identify_result_t *res = data;
+    gtk_widget_set_sensitive(g_ui.btn_identify, TRUE);
+    gtk_button_set_label(GTK_BUTTON(g_ui.btn_identify), "🎯 Identify");
+    if (res->found) {
+        switch_to_device(devices_preferred_path(&res->dev));
+        rescan_devices(true);
+        char msg[200];
+        snprintf(msg, sizeof(msg), "🎯 Identified: %s", res->dev.name);
+        gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), msg);
+    } else {
+        gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), "⚠️ No mouse movement detected; try again");
+    }
+    g_free(res);
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer identify_worker(gpointer data) {
+    (void)data;
+    identify_result_t *res = g_new0(identify_result_t, 1);
+    res->found = devices_identify_by_motion(&res->dev, 4000) == 0;
+    g_idle_add(on_identify_done, res);
+    return NULL;
+}
+
+static void on_identify_clicked(GtkButton *btn, gpointer user_data) {
+    (void)user_data;
+    gtk_widget_set_sensitive(GTK_WIDGET(btn), FALSE);
+    gtk_button_set_label(btn, "Move the mouse you want (4s)...");
+    g_thread_unref(g_thread_new("identify", identify_worker, NULL));
+}
+
+/* ---------- FpsAimForge install / repair ---------- */
+
+static void refresh_faf_install_widgets(void) {
+    faf_install_info_t info;
+    faf_install_detect(&info);
+    static const char *icons[] = { "⚫", "🟡", "🟠", "🟠", "🟢" };
+    static const char *actions[] = { "Install", "Install", "Repair", "Update", "Reinstall" };
+    char buf[600];
+    snprintf(buf, sizeof(buf), "%s FpsAimForge: %s%s%s", icons[info.state], info.detail,
+             info.game_dir[0] ? " · " : "", info.game_dir);
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_faf_install), buf);
+    gtk_button_set_label(GTK_BUTTON(g_ui.btn_faf_install), actions[info.state]);
+    gtk_widget_set_sensitive(g_ui.btn_faf_install, info.state != FAF_INSTALL_GAME_NOT_FOUND);
+    gtk_widget_set_sensitive(g_ui.btn_faf_remove,
+                             info.state == FAF_INSTALL_OK || info.state == FAF_INSTALL_OUTDATED);
+}
+
+static void on_faf_install_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    bool remove = GPOINTER_TO_INT(user_data) != 0;
+    char msg[512], status[600];
+    bool ok = remove ? faf_install_remove(msg, sizeof(msg)) : faf_install_apply(msg, sizeof(msg));
+    snprintf(status, sizeof(status), "%s %s", ok ? "✅" : "❌", msg);
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), status);
+    refresh_faf_install_widgets();
 }
 
 static void on_set_device_cpi_clicked(GtkButton *btn, gpointer user_data) {
@@ -591,18 +833,40 @@ static void on_load_profile_clicked(GtkButton *btn, gpointer user_data) {
 static gboolean on_ui_tick(gpointer user_data) {
     (void)user_data;
     if (!g_ui.window) return G_SOURCE_REMOVE;
+    /* SIGINT/SIGTERM only clear keep_running; close the window from the GTK thread */
+    if (!atomic_load_explicit(&g_state.keep_running, memory_order_relaxed)) {
+        g_application_quit(g_application_get_default());
+        return G_SOURCE_REMOVE;
+    }
 
     bool grabbed = atomic_load_explicit(&g_state.evdev_grabbed, memory_order_relaxed);
     uint64_t ticks = atomic_load_explicit(&g_state.total_ticks_processed, memory_order_relaxed);
-    char rt_buf[160];
+    char rt_buf[512];
+    char active_name[128], err[160];
+    pthread_mutex_lock(&g_state.device_mutex);
+    snprintf(active_name, sizeof(active_name), "%s", g_state.active_name);
+    snprintf(err, sizeof(err), "%s", g_state.evdev_error);
+    pthread_mutex_unlock(&g_state.device_mutex);
     if (grabbed) {
-        snprintf(rt_buf, sizeof(rt_buf), "🟢 RT Engine: Grabbed (%llu ticks, In-Memory Atomic)",
-                 (unsigned long long)ticks);
+        snprintf(rt_buf, sizeof(rt_buf), "🟢 RT Engine: Vectoring \"%s\" (%llu ticks)",
+                 active_name, (unsigned long long)ticks);
     } else {
-        snprintf(rt_buf, sizeof(rt_buf), "🟡 RT Engine: Monitor Mode (%s)",
-                 g_state.evdev_error[0] ? g_state.evdev_error : "run with sudo for EVIOCGRAB");
+        snprintf(rt_buf, sizeof(rt_buf), "🟡 RT Engine: %s",
+                 err[0] ? err : "Selecting mouse...");
     }
     gtk_label_set_text(GTK_LABEL(g_ui.lbl_rt_status), rt_buf);
+
+    /* Follow hotplug / device switches: re-query hardware when the grabbed mouse changes */
+    int avid = atomic_load(&g_state.active_vid), apid = atomic_load(&g_state.active_pid);
+    if (avid != g_ui.last_active_vid || apid != g_ui.last_active_pid || grabbed != g_ui.last_grabbed) {
+        g_ui.last_active_vid = avid;
+        g_ui.last_active_pid = apid;
+        g_ui.last_grabbed = grabbed;
+        refresh_hardware_widgets();
+    }
+    if (++g_ui.tick_count % 20 == 0) {
+        rescan_devices(false);
+    }
 
     pthread_mutex_lock(&g_state.telemetry_mutex);
     calib_telemetry_t cal = g_state.calib;
@@ -728,6 +992,36 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_frame_set_child(GTK_FRAME(hw_frame), hw_vbox);
     gtk_box_append(GTK_BOX(left_vbox), hw_frame);
 
+    GtkWidget *dev_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    gtk_box_append(GTK_BOX(dev_hbox), gtk_label_new("Mouse:"));
+    g_ui.device_model = gtk_string_list_new(NULL);
+    g_ui.device_dropdown = gtk_drop_down_new(G_LIST_MODEL(g_ui.device_model), NULL);
+    gtk_widget_set_hexpand(g_ui.device_dropdown, TRUE);
+    g_signal_connect(g_ui.device_dropdown, "notify::selected", G_CALLBACK(on_device_dropdown_changed), NULL);
+    gtk_box_append(GTK_BOX(dev_hbox), g_ui.device_dropdown);
+
+    GtkWidget *btn_rescan = gtk_button_new_with_label("🔄 Rescan");
+    g_signal_connect(btn_rescan, "clicked", G_CALLBACK(on_device_rescan_clicked), NULL);
+    gtk_box_append(GTK_BOX(dev_hbox), btn_rescan);
+
+    g_ui.btn_identify = gtk_button_new_with_label("🎯 Identify");
+    gtk_widget_set_tooltip_text(g_ui.btn_identify, "Pick the mouse by moving it for a few seconds");
+    g_signal_connect(g_ui.btn_identify, "clicked", G_CALLBACK(on_identify_clicked), NULL);
+    gtk_box_append(GTK_BOX(dev_hbox), g_ui.btn_identify);
+    gtk_box_append(GTK_BOX(hw_vbox), dev_hbox);
+
+    GtkWidget *manual_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    g_ui.device_entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(g_ui.device_entry),
+                                   "Manual fallback: /dev/input/by-id/...-event-mouse or /dev/input/eventN");
+    gtk_widget_set_hexpand(g_ui.device_entry, TRUE);
+    g_signal_connect(g_ui.device_entry, "activate", G_CALLBACK(on_device_entry_apply), NULL);
+    gtk_box_append(GTK_BOX(manual_hbox), g_ui.device_entry);
+    GtkWidget *btn_use = gtk_button_new_with_label("Use Path");
+    g_signal_connect(btn_use, "clicked", G_CALLBACK(on_device_entry_apply), NULL);
+    gtk_box_append(GTK_BOX(manual_hbox), btn_use);
+    gtk_box_append(GTK_BOX(hw_vbox), manual_hbox);
+
     g_ui.lbl_mouse_ident = gtk_label_new("🖱️ Detecting Mouse...");
     gtk_widget_set_halign(g_ui.lbl_mouse_ident, GTK_ALIGN_START);
     gtk_box_append(GTK_BOX(hw_vbox), g_ui.lbl_mouse_ident);
@@ -765,13 +1059,19 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     g_signal_connect(g_ui.cpi_dropdown, "notify::selected", G_CALLBACK(on_cpi_dropdown_changed), NULL);
     gtk_box_append(GTK_BOX(cpi_hbox), g_ui.cpi_dropdown);
 
-    GtkWidget *btn_3200 = gtk_button_new_with_label("Set 3200 CPI");
-    g_signal_connect(btn_3200, "clicked", G_CALLBACK(on_set_device_cpi_clicked), GINT_TO_POINTER(3200));
-    gtk_box_append(GTK_BOX(cpi_hbox), btn_3200);
+    g_ui.btn_cpi_3200 = gtk_button_new_with_label("Set 3200 CPI");
+    g_signal_connect(g_ui.btn_cpi_3200, "clicked", G_CALLBACK(on_set_device_cpi_clicked), GINT_TO_POINTER(3200));
+    gtk_box_append(GTK_BOX(cpi_hbox), g_ui.btn_cpi_3200);
 
-    GtkWidget *btn_6400 = gtk_button_new_with_label("Set 6400 CPI");
-    g_signal_connect(btn_6400, "clicked", G_CALLBACK(on_set_device_cpi_clicked), GINT_TO_POINTER(6400));
-    gtk_box_append(GTK_BOX(cpi_hbox), btn_6400);
+    g_ui.btn_cpi_6400 = gtk_button_new_with_label("Set 6400 CPI");
+    g_signal_connect(g_ui.btn_cpi_6400, "clicked", G_CALLBACK(on_set_device_cpi_clicked), GINT_TO_POINTER(6400));
+    gtk_box_append(GTK_BOX(cpi_hbox), g_ui.btn_cpi_6400);
+
+    gtk_box_append(GTK_BOX(cpi_hbox), gtk_label_new("Polling:"));
+    g_ui.rate_model = gtk_string_list_new(NULL);
+    g_ui.rate_dropdown = gtk_drop_down_new(G_LIST_MODEL(g_ui.rate_model), NULL);
+    g_signal_connect(g_ui.rate_dropdown, "notify::selected", G_CALLBACK(on_rate_dropdown_changed), NULL);
+    gtk_box_append(GTK_BOX(cpi_hbox), g_ui.rate_dropdown);
 
     GtkWidget *btn_refresh = gtk_button_new_with_label("🔄 Refresh");
     g_signal_connect(btn_refresh, "clicked", G_CALLBACK(on_refresh_hw_clicked), NULL);
@@ -865,6 +1165,22 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(calib_ctrl_hbox), btn_reset_calib);
     gtk_box_append(GTK_BOX(kov_vbox), calib_ctrl_hbox);
 
+    GtkWidget *faf_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    g_ui.lbl_faf_install = gtk_label_new("FpsAimForge: checking Steam libraries...");
+    gtk_widget_set_halign(g_ui.lbl_faf_install, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(g_ui.lbl_faf_install, TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(g_ui.lbl_faf_install), PANGO_ELLIPSIZE_END);
+    gtk_box_append(GTK_BOX(faf_hbox), g_ui.lbl_faf_install);
+    g_ui.btn_faf_install = gtk_button_new_with_label("Install");
+    gtk_widget_set_tooltip_text(g_ui.btn_faf_install,
+                                "Install the AnyMouse launcher, telemetry plugin and calibration scenarios into FpsAimForge");
+    g_signal_connect(g_ui.btn_faf_install, "clicked", G_CALLBACK(on_faf_install_clicked), GINT_TO_POINTER(0));
+    gtk_box_append(GTK_BOX(faf_hbox), g_ui.btn_faf_install);
+    g_ui.btn_faf_remove = gtk_button_new_with_label("Uninstall");
+    g_signal_connect(g_ui.btn_faf_remove, "clicked", G_CALLBACK(on_faf_install_clicked), GINT_TO_POINTER(1));
+    gtk_box_append(GTK_BOX(faf_hbox), g_ui.btn_faf_remove);
+    gtk_box_append(GTK_BOX(kov_vbox), faf_hbox);
+
     /* 5. Master Vector Scaling Frame */
     GtkWidget *master_frame = gtk_frame_new("Master Vector Scaling & Symmetry");
     GtkWidget *master_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
@@ -957,7 +1273,9 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(bot_hbox), g_ui.lbl_profile_status);
     gtk_box_append(GTK_BOX(right_vbox), bot_hbox);
 
+    rescan_devices(true);
     refresh_hardware_widgets();
+    refresh_faf_install_widgets();
     g_timeout_add(100, on_ui_tick, NULL);
 
     gtk_window_present(GTK_WINDOW(win));

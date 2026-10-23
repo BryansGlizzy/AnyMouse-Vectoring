@@ -165,6 +165,16 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 - Fixed the GUI so the "Inter-Round Auto-Adapt" checkbox reflects `--auto-calibrate` at startup.
 - Extended all three `AnyMouse` scenarios from 45 s to 60 s to reach the 5-trial per-octant gate more reliably.
 
+### [2026-10-22] - Universal Mouse Auto-Detect, Polling-Rate Control & Steam Auto-Install
+- **Universal plug & play ([`src/devices.c`](src/devices.c)):** Replaced the hard-coded Finalmouse/Attack Shark `by-id` paths with sysfs discovery of every physical pointing device.
+  - **Ranking:** known vendor protocol +100, keyboard/macro-pad auxiliary mouse interfaces −40. Our own uinput clone is excluded by its `/sys/devices/virtual` location.
+  - **Hotplug:** the RT thread now loops over select → clone → grab, releases on unplug, waits for the device to return, and moves back to a better mouse when one is plugged in (inotify on `/dev/input`).
+  - **Safety:** after 50 consecutive uinput write failures the grab is released, so a dead virtual mouse can't strand the pointer.
+- **GUI:** mouse dropdown with rescan, identify-by-motion and manual path fallback (persisted in `~/.config/anymouse/config`), a polling-rate dropdown, and an FpsAimForge install/repair row. Ctrl+C now closes the GUI cleanly (previously SIGINT left the GTK loop running).
+- **Polling rate ([`src/hid_driver.c`](src/hid_driver.c)):** Finalmouse ULX 500–8000 Hz (cmd 17, u16le). Attack Shark R3 125–8000 Hz via the GearHub relay and an `OPTIONPARAM0` read-modify-write with read-back verification, per `OpenMouse-Project/mouse-protocol`. The R3 path is **not yet hardware-tested**. Correction to the 2026-10-21 entry: Attack Shark R3 CPI *writes* were never implemented; only the Finalmouse writes CPI.
+- **Steam auto-install ([`src/steam_install.c`](src/steam_install.c)):** `--install-faf` / `--uninstall-faf` / `--faf-status` locate FpsAimForge (app `5165380`) through `libraryfolders.vdf` and the appmanifest. The launcher now resolves `FpsAimForge.bin` and the plugin relative to itself, so no paths are compiled in, and it carries a marker so the installer can detect Steam updates and repair them. Pre-marker launchers are recognised, so the existing install migrated in place with `FpsAimForge.bin` byte-identical.
+- **`--install-udev`:** optional `uaccess` rules + `uinput` autoload so the engine can run without sudo (`ANYMOUSE_NO_SUDO=1 ./start_daemon.sh`).
+
 ---
 
 ## Where We Left Off (2026-10-21 Nightly Handoff)
@@ -194,6 +204,13 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 - [x] Build and install native `FpsAimForge` in-process plugin (`libanymouse_faf.so`), Steam launcher wrapper (`faf_launcher`), and custom 8-octant scenario bundle (`AnyMouse.bundle.json`).
 - [x] Verify live 3D ballistic submovement capture in Steam's `FpsAimForge` and resolve `/dev/shm` `fs.protected_regular` permissions.
 - [ ] Run full multi-round convergence testing in `AnyMouse 8-Octant Center-Out` and fine-tune submovement thresholds / learning rate $\alpha$ if needed.
+
+### Checkpoint 1.5: Universal Release (Linux → Windows)
+- [x] Auto-detect any connected mouse; GUI dropdown + identify + manual fallback; hotplug.
+- [x] Polling-rate control in the GUI (Finalmouse ULX; Attack Shark R3 pending hardware test).
+- [x] Steam library auto-detection and FpsAimForge plugin/bundle installer with Steam-update repair.
+- [ ] Hardware-test Attack Shark R3 polling-rate writes; implement R3 CPI writes (`SET 0x54` DPI table).
+- [ ] Windows research spike: input interception method (Interception driver vs. virtual HID vs. vectoring-only), FpsAimForge on Windows, anti-cheat implications, `hidapi` port.
 
 ### Checkpoint 2: Attack Shark R3 On-Board Firmware (Phase 3)
 - [ ] Test SWD pinout on Attack Shark R3 PCB.

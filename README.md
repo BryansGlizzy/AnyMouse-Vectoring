@@ -473,12 +473,15 @@ Before running vector calibration, ensure the physical mouse profile is locked:
 - [x] **Angle Snapping:** **OFF** (prevents sensor from overriding diagonal vectors).
 - [x] **Ripple Control / Smoothing:** **OFF** (preserves raw velocity profiles).
 
-### Identifying Persistent Device Paths
-For the Phase 1 interceptor daemon:
-```bash
-ls -l /dev/input/by-id/ | grep -E "mouse|Finalmouse|2.4G"
-```
-Use the resulting `/dev/input/by-id/usb-...-event-mouse` symlink in daemon configurations to ensure deterministic node binding across reboots.
+### Mouse Auto-Detection (Universal Plug & Play)
+The engine finds mice by itself; no device path needs to be configured ([`src/devices.c`](src/devices.c)):
+- **Candidates:** every physical `/dev/input/event*` node with `REL_X`, `REL_Y` and `BTN_LEFT`. Nodes under `/sys/devices/virtual/input/` are skipped. That is essential, because the engine's own uinput output clones the real mouse's name and VID:PID.
+- **Ranking:** a known vendor protocol (Finalmouse ULX, Attack Shark R3) gets +100, "mouse" in the name +10, a scroll wheel +5, a right button +5, and a stable `/dev/input/by-id` link +2. Keyboards and macro pads that expose an auxiliary mouse interface (another interface on the same USB device has `KEY_A` + `EV_REP`) get −40.
+- **Hotplug:** an unplugged mouse is released and the engine waits for it to return. In auto mode, plugging in a higher-ranked mouse (e.g. re-plugging a dongle) moves the grab back to it. The engine watches `/dev/input` with inotify, so sysfs is only scanned on hotplug, never on a timer in the real-time thread.
+- **Selection:** in the GUI, use the **Mouse** dropdown (Auto, or any detected mouse), **🎯 Identify** (move the mouse you want for 4 s), or type a path into the manual fallback. The choice is saved to `~/.config/anymouse/config`. On the CLI, pass a `/dev/input/...` path to override auto-detection.
+- `./anymouse --list-devices` prints the ranking, with `*` marking the auto-selected mouse.
+
+Any mouse works for vectoring. CPI and polling-rate control need a supported vendor protocol; for other mice, set the CPI dropdown to your mouse's real CPI so the effective-DPI readouts are correct.
 
 ---
 
@@ -488,7 +491,11 @@ The repository compiles into a single, self-contained, multi-threaded POSIX C bi
 
 - [`src/core.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/core.h) & [`src/main.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/main.c): Shared process state (`_Atomic float octant_weights[8]`, `_Atomic int hardware_cpi`, lock-free `SPSC` ring buffer `tick_ring[65536]`, presets, and JSON profile persistence).
 - [`src/evdev_rt.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/evdev_rt.c): **Thread 1 (`SCHED_FIFO` priority 80 + `mlockall`)** — Real-time kernel `evdev` interceptor (`EVIOCGRAB`) and virtual `/dev/uinput` mouse emitter. Executes `scale_vector()` with Cosine $C^1$ smooth interpolation and sub-pixel error diffusion (`rem_x`, `rem_y`) using lock-free `memory_order_relaxed` atomic weight reads, and pushes every `SYN_REPORT` frame into the lock-free `SPSC` ring buffer.
-- [`src/hid_driver.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/hid_driver.c): Native C `/dev/hidraw*` OpenMouse protocol driver for **Finalmouse UltralightX** (`0x361D:0x0100`) and **Attack Shark R3 / GearHub** (`0x3151:0x402D`). Queries live hardware CPI, polling rate (Hz), battery % and voltage (mV), Motion Sync state, and RSSI signal strength, and writes physical sensor CPI directly over USB HID reports.
+- [`src/hid_driver.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/hid_driver.c): Native C `/dev/hidraw*` OpenMouse protocol driver for **Finalmouse UltralightX** (`0x361D:0x0100`) and **Attack Shark R3 / GearHub** (`0x3151:0x402D`). It controls whichever mouse the engine holds and picks the vendor configuration interface from the HID report descriptor (usage page `0xFF00`/`0x01` for Finalmouse, `0xFFFF`/`0x02` for GearHub).
+  - **Finalmouse:** reads CPI, polling rate, battery, Motion Sync and RSSI; writes CPI and polling rate (500 to 8000 Hz).
+  - **Attack Shark R3:** reads and writes polling rate (125 to 8000 Hz) through the 2.4G receiver relay (`F6 05` → `F7` → command → `FC`, feature report `0x00`). The write is a read-modify-write of the `OPTIONPARAM0` settings block that is verified by reading it back. CPI writing is not implemented for the R3 yet.
+- [`src/devices.c`](src/devices.c) & [`src/config.c`](src/config.c): Universal mouse discovery, ranking, identify-by-motion, and the persisted device choice (`~/.config/anymouse/config`, owned by the invoking user even under `sudo`).
+- [`src/steam_install.c`](src/steam_install.c): Finds FpsAimForge (Steam app `5165380`) in every Steam library and installs, repairs or removes the integration (see below).
 - [`src/faf_telemetry.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_telemetry.h), [`src/faf_plugin.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_plugin.c) (`libanymouse_faf.so`), & [`src/faf_launcher.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_launcher.c): **Phase 2 `FpsAimForge` (FAF) Native In-Process Telemetry Plugin** — Hooks `FpsAimForge`'s 13 `Scenario` / `BaseScenario` vtables in-process to capture $1000\text{ Hz}$ 3D camera `(yaw, pitch)` trajectories, exact 3D target coordinates from `TargetManager`, and round lifecycle events (`MENU`, `WAITING_FOR_CLICK`, `START_COUNTDOWN`, `RUNNING`, `DONE`) over POSIX shared memory (`/dev/shm/anymouse_faf_telemetry`). Includes custom calibration scenarios in [`faf/AnyMouse.bundle.json`](file:///home/future/Desktop/AnyMouse-Vectoring/faf/AnyMouse.bundle.json) (`AnyMouse 8-Octant Center-Out`, `AnyMouse 8-Octant Center-Out Ghost`, `AnyMouse 8-Octant Wide Flick`).
 - [`src/calibration.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/calibration.c) & [`src/kovaaks_offsets.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/kovaaks_offsets.h): **Thread 2 (Ballistic Submovement & Aim-Trainer Telemetry Engine)** — Consumes verified 3D ballistic submovement events ($\mathbf{P}_1$ vs. true target center $\mathbf{T}$) from `FpsAimForge` over `/dev/shm/anymouse_faf_telemetry` with strict active-round session gating, computes per-octant median landing ratios $\tilde{r}_k$, and applies damped inter-round weight updates ($\alpha = 0.35$, $\pm 5\%$ clamp) at round completion. (Retains KovaaK's UE4.26 offsets in sunset/standby mode behind `ANYMOUSE_ENABLE_KOVAAKS=1` for future Windows testing.)
 - [`src/gui_gtk4.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/gui_gtk4.c): **Thread 3 (Native GTK4 + Cairo Studio GUI)** — Interactive polar radar chart, hardware sensor controls, and real-time `FpsAimForge` ballistic telemetry dashboard.
@@ -500,7 +507,7 @@ Every plugin event is appended to `logs/flicks.csv` next to the binary (override
 
 #### 1. Compile & Install `FpsAimForge` Plugin + Scenario Bundle
 ```bash
-make
+make          # builds everything, then runs `./anymouse --install-faf`
 ```
 
 #### 2. Run the Unified Application (GUI + RT Engine + `FpsAimForge` Telemetry)
@@ -509,8 +516,8 @@ make
 ./start_daemon.sh
 # Or via Makefile:
 make run
-make run-ulx       # Finalmouse ULX @ 0.25x scale (3200 CPI -> 800 effective DPI)
-make run-shark     # Attack Shark R3 @ 0.25x scale
+# Force a specific mouse instead of auto-detection:
+./start_daemon.sh /dev/input/by-id/usb-...-event-mouse
 ```
 
 #### 3. CLI & Hardware Probe Modes
@@ -520,9 +527,24 @@ make run-shark     # Attack Shark R3 @ 0.25x scale
 # Or:
 make probe-hw
 
+# List detected mice in auto-selection order:
+./anymouse --list-devices
+
 # Run in headless CLI daemon mode with automatic damped calibration enabled:
 ./start_daemon.sh --headless --auto-calibrate
 ```
+
+#### 4. FpsAimForge Integration (Steam Auto-Detect)
+`./anymouse --install-faf` (also run by `make`, or the **Install / Repair** button in the GUI):
+- **Finds the game:** reads every library in `libraryfolders.vdf` for native, Flatpak and Snap Steam, then finds FpsAimForge through `appmanifest_5165380.acf`. Nothing is hard-coded.
+- **Installs:** moves the real binary to `FpsAimForge.bin`, installs the launcher as `FpsAimForge` and the plugin as `libanymouse_faf.so` in the game folder, and copies `AnyMouse.bundle.json` into the FpsAimForge `bundles` folder. Files are written atomically and owned by your user.
+- **Steam updates:** when Steam updates the game it restores the original `FpsAimForge`. Detection reports **needs repair**, and installing again puts the launcher back.
+- **Safety:** the installer refuses to move a suspiciously small `FpsAimForge` over `FpsAimForge.bin`.
+- `./anymouse --faf-status` shows the state (not installed / needs repair / update available / up to date). `./anymouse --uninstall-faf` restores the original binary.
+
+#### 5. Running Without sudo (optional)
+`sudo ./anymouse --install-udev` (or `make install-udev`) installs `/etc/udev/rules.d/70-anymouse.rules` and loads `uinput` at boot. The rules give the logged-in seat user (`uaccess`) access to mice, `/dev/uinput` and the two vendor HID interfaces. After that, `ANYMOUSE_NO_SUDO=1 ./start_daemon.sh` runs as your user.
+- **Trade-offs:** any program you run can then read mouse input and create virtual input devices. Without root, the real-time thread uses `SCHED_FIFO` only if your rtprio limits allow it.
 
 ---
 
@@ -533,7 +555,9 @@ The built-in GTK4 + Cairo studio ([`src/gui_gtk4.c`](file:///home/future/Desktop
 ### Key Features
 - **Interactive Polar Radar Chart (Cairo):** Displays a glowing polygon of the current 8-octant sensitivity envelope with 8 draggable spoke handles AND a live **Ballistic Telemetry Vector Overlay** showing the last flick's primary submovement landing point $\mathbf{P}_1$ (amber dot) vs. final target vector $\mathbf{T}$ (green marker).
 - **Direct In-Memory Atomic Tuning:** Dragging radar handles or sliders updates `_Atomic float octant_weights[8]` directly in process memory with zero socket serialization overhead.
-- **Native OpenMouse Hardware Sync:** Auto-detects Finalmouse UltralightX / Attack Shark R3 over `/dev/hidraw*`, displaying live polling rate (`2000 Hz`), battery percentage & voltage, Motion Sync state, RSSI dBm, and one-click `Set 3200 CPI` / `Set 6400 CPI` hardware buttons + CPI dropdown.
+- **Mouse Selection:** **Mouse** dropdown (Auto or any detected mouse, ★ = hardware controls), **🔄 Rescan**, **🎯 Identify** (move the mouse you want), and a manual path fallback. The list refreshes itself on hotplug.
+- **Native OpenMouse Hardware Sync:** for the selected mouse, shows live polling rate, battery percentage & voltage, Motion Sync state and RSSI dBm. Includes `Set 3200 CPI` / `Set 6400 CPI` hardware buttons, a CPI dropdown, and a **Polling** dropdown limited to the rates the mouse accepts. After a write, it shows the rate the mouse reports back.
+- **FpsAimForge Install / Repair:** shows the integration status and can install, repair after a Steam update, update, or uninstall.
 - **Phase 2 `FpsAimForge` (FAF) Telemetry & Auto-Calibration Panel:**
   - Connects to `libanymouse_faf.so` inside `FpsAimForge` over `/dev/shm/anymouse_faf_telemetry` with strict active-round session gating (`FAF_STATE_RUNNING`).
   - Displays live scenario name, round timer, hits/shots/accuracy, per-octant median landing ratios $\tilde{r}_k$, trial progress ($n/5$), peak angular velocity $\omega_{\text{peak}}$, and angular axis skew $\Delta\theta_{\text{err}}$.

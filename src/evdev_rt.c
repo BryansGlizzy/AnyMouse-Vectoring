@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/inotify.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -172,6 +173,95 @@ static int setup_udp_socket(void) {
     return sfd;
 }
 
+static uint64_t monotonic_ms(void) {
+    return monotonic_ns() / 1000000ULL;
+}
+
+static void set_rt_error(const char *msg) {
+    pthread_mutex_lock(&g_state.device_mutex);
+    bool changed = strcmp(g_state.evdev_error, msg) != 0;
+    snprintf(g_state.evdev_error, sizeof(g_state.evdev_error), "%s", msg);
+    pthread_mutex_unlock(&g_state.device_mutex);
+    if (changed && msg[0]) fprintf(stderr, "[WARN] %s\n", msg); /* Retries repeat every second */
+}
+
+/* Decide which device to hold: the user's explicit choice, otherwise the best-ranked mouse */
+static bool resolve_target_device(char *path, size_t path_sz, mouse_device_t *dev) {
+    char req[256];
+    devices_get_request(req, sizeof(req));
+    memset(dev, 0, sizeof(*dev));
+    if (req[0]) {
+        snprintf(path, path_sz, "%s", req);
+        if (!devices_lookup(req, dev)) {
+            snprintf(dev->name, sizeof(dev->name), "%s", req);
+        }
+        return access(req, F_OK) == 0;
+    }
+    if (!devices_pick_auto(dev)) return false;
+    snprintf(path, path_sz, "%s", devices_preferred_path(dev));
+    return true;
+}
+
+static void release_device(int *evfd, int *ufd) {
+    if (*evfd >= 0) {
+        ioctl(*evfd, EVIOCGRAB, 0);
+        close(*evfd);
+        *evfd = -1;
+    }
+    if (*ufd >= 0) {
+        ioctl(*ufd, UI_DEV_DESTROY);
+        close(*ufd);
+        *ufd = -1;
+    }
+    atomic_store(&g_state.evdev_grabbed, false);
+    atomic_store(&g_state.active_vid, 0);
+    atomic_store(&g_state.active_pid, 0);
+    rem_x = 0.0f;
+    rem_y = 0.0f;
+}
+
+/* Open the physical mouse, clone it via uinput, then grab it. Returns false with an error message set. */
+static bool acquire_device(const char *path, const mouse_device_t *dev, int *evfd, int *ufd) {
+    char err[160];
+    *evfd = open(path, O_RDONLY | O_NONBLOCK);
+    if (*evfd < 0) {
+        snprintf(err, sizeof(err), "open(%s) failed: %s (run with sudo or install udev rules)",
+                 path, strerror(errno));
+        set_rt_error(err);
+        return false;
+    }
+    *ufd = setup_uinput_device(*evfd);
+    if (*ufd < 0) {
+        snprintf(err, sizeof(err), "open(/dev/uinput) failed: %s", strerror(errno));
+        set_rt_error(err);
+        close(*evfd);
+        *evfd = -1;
+        return false;
+    }
+    /* Wait 150ms for compositor/udev to register virtual mouse before grabbing hardware */
+    usleep(150000);
+    if (ioctl(*evfd, EVIOCGRAB, 1) < 0) {
+        snprintf(err, sizeof(err), "EVIOCGRAB(%s) failed: %s", path, strerror(errno));
+        set_rt_error(err);
+        release_device(evfd, ufd);
+        return false;
+    }
+
+    struct input_id id;
+    if (ioctl(*evfd, EVIOCGID, &id) == 0) {
+        atomic_store(&g_state.active_vid, id.vendor);
+        atomic_store(&g_state.active_pid, id.product);
+    }
+    pthread_mutex_lock(&g_state.device_mutex);
+    snprintf(g_state.evdev_path, sizeof(g_state.evdev_path), "%s", path);
+    snprintf(g_state.active_name, sizeof(g_state.active_name), "%s", dev->name[0] ? dev->name : path);
+    g_state.evdev_error[0] = '\0';
+    pthread_mutex_unlock(&g_state.device_mutex);
+    atomic_store(&g_state.evdev_grabbed, true);
+    printf("[ACTIVE] Grabbed hardware mouse: %s (%s)\n", dev->name, path);
+    return true;
+}
+
 void *evdev_rt_thread(void *arg) {
     (void)arg;
 
@@ -187,54 +277,83 @@ void *evdev_rt_thread(void *arg) {
     int sfd = setup_udp_socket();
     int evfd = -1;
     int ufd  = -1;
+    uint32_t seen_gen = atomic_load(&g_state.device_request_gen);
+    uint64_t next_attempt_ms = 0;
+    int uinput_write_failures = 0;
+    int held_score = 0;
 
-    evfd = open(g_state.evdev_path, O_RDONLY | O_NONBLOCK);
-    if (evfd < 0) {
-        snprintf(g_state.evdev_error, sizeof(g_state.evdev_error),
-                 "open(%s) failed: %s (run with sudo or input group)",
-                 g_state.evdev_path, strerror(errno));
-        fprintf(stderr, "[WARN] %s\n", g_state.evdev_error);
-    } else {
-        ufd = setup_uinput_device(evfd);
-        if (ufd < 0) {
-            snprintf(g_state.evdev_error, sizeof(g_state.evdev_error),
-                     "open(/dev/uinput) failed: %s", strerror(errno));
-            fprintf(stderr, "[WARN] %s\n", g_state.evdev_error);
-            close(evfd);
-            evfd = -1;
-        } else {
-            /* Wait 150ms for compositor/udev to register virtual mouse before grabbing hardware */
-            usleep(150000);
-            if (ioctl(evfd, EVIOCGRAB, 1) < 0) {
-                snprintf(g_state.evdev_error, sizeof(g_state.evdev_error),
-                         "EVIOCGRAB failed: %s", strerror(errno));
-                fprintf(stderr, "[WARN] %s\n", g_state.evdev_error);
-                ioctl(ufd, UI_DEV_DESTROY);
-                close(ufd);
-                close(evfd);
-                ufd = -1;
-                evfd = -1;
-            } else {
-                atomic_store(&g_state.evdev_grabbed, true);
-                g_state.evdev_error[0] = '\0';
-                printf("[ACTIVE] Grabbed hardware mouse: %s\n", g_state.evdev_path);
-            }
-        }
+    /* Hotplug watch: lets auto mode move back to a better mouse (e.g. a re-plugged dongle)
+     * without polling sysfs from this real-time thread. */
+    int ifd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (ifd >= 0 && inotify_add_watch(ifd, "/dev/input", IN_CREATE) < 0) {
+        close(ifd);
+        ifd = -1;
     }
+    uint64_t rescan_at_ms = 0;
 
-    struct pollfd fds[2];
+    struct pollfd fds[3];
     struct input_event ev_buf[64];
     struct input_event out_buf[64];
     int32_t acc_dx = 0, acc_dy = 0;
     uint8_t button_mask = 0;
 
     while (atomic_load_explicit(&g_state.keep_running, memory_order_relaxed)) {
+        /* Device (re)selection: GUI switch request, unplug, or nothing grabbed yet */
+        uint32_t gen = atomic_load(&g_state.device_request_gen);
+        if (gen != seen_gen) {
+            seen_gen = gen;
+            release_device(&evfd, &ufd);
+            next_attempt_ms = 0;
+        }
+        if (evfd < 0 && monotonic_ms() >= next_attempt_ms) {
+            char path[256];
+            mouse_device_t dev;
+            if (!resolve_target_device(path, sizeof(path), &dev)) {
+                char err[160];
+                char req[256];
+                devices_get_request(req, sizeof(req));
+                if (req[0]) snprintf(err, sizeof(err), "Waiting for %s to be connected...", req);
+                else        snprintf(err, sizeof(err), "No mouse detected; waiting for one to be plugged in...");
+                set_rt_error(err);
+            } else if (acquire_device(path, &dev, &evfd, &ufd)) {
+                acc_dx = acc_dy = 0;
+                button_mask = 0;
+                uinput_write_failures = 0;
+                held_score = dev.score;
+            }
+            if (evfd < 0) next_attempt_ms = monotonic_ms() + 1000;
+        }
+
+        /* A device appeared while in auto mode: switch if it outranks the one we hold */
+        if (rescan_at_ms && monotonic_ms() >= rescan_at_ms) {
+            rescan_at_ms = 0;
+            char req[256];
+            devices_get_request(req, sizeof(req));
+            mouse_device_t best;
+            char held_real[PATH_MAX], best_real[PATH_MAX];
+            if (evfd >= 0 && !req[0] && devices_pick_auto(&best) && best.score > held_score &&
+                realpath(g_state.evdev_path, held_real) && realpath(best.event_path, best_real) &&
+                strcmp(held_real, best_real) != 0) {
+                printf("[INFO] Better mouse connected (%s); switching.\n", best.name);
+                release_device(&evfd, &ufd);
+                next_attempt_ms = 0;
+                continue;
+            }
+        }
+
         int nfds = 0;
+        int ev_idx = -1, udp_idx = -1, ino_idx = -1;
         if (evfd >= 0) {
+            ev_idx = nfds;
             fds[nfds++] = (struct pollfd){ .fd = evfd, .events = POLLIN };
         }
         if (sfd >= 0) {
+            udp_idx = nfds;
             fds[nfds++] = (struct pollfd){ .fd = sfd, .events = POLLIN };
+        }
+        if (ifd >= 0) {
+            ino_idx = nfds;
+            fds[nfds++] = (struct pollfd){ .fd = ifd, .events = POLLIN };
         }
 
         if (nfds == 0) {
@@ -245,8 +364,18 @@ void *evdev_rt_thread(void *arg) {
         int ret = poll(fds, (nfds_t)nfds, 100);
         if (ret <= 0) continue;
 
+        if (ino_idx >= 0 && (fds[ino_idx].revents & POLLIN)) {
+            char ibuf[4096];
+            while (read(ifd, ibuf, sizeof(ibuf)) > 0) { /* drain */ }
+            /* Give udev time to create by-id links and apply permissions */
+            rescan_at_ms = monotonic_ms() + 800;
+        }
+
         /* 1. Hot-path: Mouse evdev hardware events */
-        if (evfd >= 0 && (fds[0].revents & POLLIN)) {
+        if (ev_idx >= 0 && (fds[ev_idx].revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            set_rt_error("Mouse disconnected; waiting for it to come back...");
+            release_device(&evfd, &ufd);
+        } else if (ev_idx >= 0 && (fds[ev_idx].revents & POLLIN)) {
             ssize_t rd = read(evfd, ev_buf, sizeof(ev_buf));
             if (rd > 0) {
                 int count = (int)(rd / (ssize_t)sizeof(struct input_event));
@@ -311,17 +440,25 @@ void *evdev_rt_thread(void *arg) {
 
                 if (out_idx > 0 && ufd >= 0) {
                     ssize_t wr = write(ufd, out_buf, (size_t)out_idx * sizeof(struct input_event));
-                    (void)wr;
+                    if (wr < 0 && errno != EAGAIN) {
+                        /* A dead virtual mouse would leave the user without a pointer: let go */
+                        if (++uinput_write_failures >= 50) {
+                            set_rt_error("Virtual mouse stopped accepting events; released the grab");
+                            release_device(&evfd, &ufd);
+                            next_attempt_ms = monotonic_ms() + 1000;
+                        }
+                    } else {
+                        uinput_write_failures = 0;
+                    }
                 }
             } else if (rd < 0 && errno == ENODEV) {
-                fprintf(stderr, "\n[WARN] Mouse unplugged or went to sleep.\n");
-                break;
+                set_rt_error("Mouse unplugged or went to sleep; waiting for it to come back...");
+                release_device(&evfd, &ufd);
             }
         }
 
         /* 2. Optional External UDP listener (for CLI/FpsAimForge compatibility) */
-        int udp_idx = (evfd >= 0) ? 1 : 0;
-        if (sfd >= 0 && (fds[udp_idx].revents & POLLIN)) {
+        if (udp_idx >= 0 && (fds[udp_idx].revents & POLLIN)) {
             float incoming[8];
             ssize_t n = recv(sfd, incoming, sizeof(incoming), 0);
             if (n == sizeof(incoming)) {
@@ -341,18 +478,13 @@ void *evdev_rt_thread(void *arg) {
         }
     }
 
-    if (evfd >= 0) {
-        ioctl(evfd, EVIOCGRAB, 0);
-        close(evfd);
-    }
-    if (ufd >= 0) {
-        ioctl(ufd, UI_DEV_DESTROY);
-        close(ufd);
-    }
+    release_device(&evfd, &ufd);
     if (sfd >= 0) {
         close(sfd);
     }
-    atomic_store(&g_state.evdev_grabbed, false);
+    if (ifd >= 0) {
+        close(ifd);
+    }
     printf("[EXIT] evdev_rt_thread released mouse grab cleanly.\n");
     return NULL;
 }

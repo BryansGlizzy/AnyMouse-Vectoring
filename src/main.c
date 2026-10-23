@@ -29,6 +29,7 @@ static void sig_handler(int sig) {
 void core_init(float initial_scale, const char *dev_path_override) {
     memset(&g_state, 0, sizeof(g_state));
     pthread_mutex_init(&g_state.telemetry_mutex, NULL);
+    pthread_mutex_init(&g_state.device_mutex, NULL);
 
     for (int i = 0; i < 8; i++) {
         atomic_store(&g_state.octant_weights[i], initial_scale);
@@ -42,14 +43,9 @@ void core_init(float initial_scale, const char *dev_path_override) {
     atomic_store(&g_state.ring_head, 0U);
     atomic_store(&g_state.ring_tail, 0U);
 
+    /* "" = let the RT engine auto-select the best-ranked mouse (src/devices.c) */
     if (dev_path_override && dev_path_override[0] != '\0') {
-        snprintf(g_state.evdev_path, sizeof(g_state.evdev_path), "%s", dev_path_override);
-    } else if (access(DEFAULT_DEV_ULX, F_OK) == 0) {
-        snprintf(g_state.evdev_path, sizeof(g_state.evdev_path), "%s", DEFAULT_DEV_ULX);
-    } else if (access(DEFAULT_DEV_ATTACKSHARK, F_OK) == 0) {
-        snprintf(g_state.evdev_path, sizeof(g_state.evdev_path), "%s", DEFAULT_DEV_ATTACKSHARK);
-    } else {
-        snprintf(g_state.evdev_path, sizeof(g_state.evdev_path), "%s", DEFAULT_DEV_ULX);
+        snprintf(g_state.requested_path, sizeof(g_state.requested_path), "%s", dev_path_override);
     }
 }
 
@@ -148,13 +144,54 @@ static void print_usage(const char *prog) {
     printf("  --preset <name>      Start with preset (neutral, vertical_boost, horizontal_boost, diagonal_ulx, low)\n");
     printf("  --cpi <value>        Set physical mouse sensor CPI on startup (e.g. 3200 or 6400)\n");
     printf("  --probe-hw           Query connected mouse hardware telemetry over /dev/hidraw and exit\n");
+    printf("  --list-devices       List detected mice (auto-selection order) and exit\n");
+    printf("  --faf-status         Show FpsAimForge (Steam) plugin & bundle install status and exit\n");
+    printf("  --install-faf        Install/repair the FpsAimForge launcher, plugin and AnyMouse bundle\n");
+    printf("  --uninstall-faf      Restore the original FpsAimForge binary and remove the AnyMouse files\n");
+    printf("  --install-udev       (root) Install udev rules so AnyMouse runs without sudo\n");
+    printf("\nDEVICE_PATH overrides auto-detection (e.g. /dev/input/by-id/usb-...-event-mouse).\n");
     printf("  -h, --help           Show this help message\n");
+}
+
+static int run_cli_action(const char *action) {
+    char msg[512];
+    if (strcmp(action, "--list-devices") == 0) {
+        mouse_device_t list[DEVICES_MAX];
+        int n = devices_enumerate(list, DEVICES_MAX);
+        if (n == 0) {
+            printf("No mice detected under /sys/class/input.\n");
+            return 1;
+        }
+        printf("Detected mice (first = auto-selected):\n");
+        for (int i = 0; i < n; i++) {
+            printf("  %s %-40s %04x:%04x score=%-4d %s%s\n", i == 0 ? "*" : " ",
+                   list[i].name, list[i].vid, list[i].pid, list[i].score,
+                   devices_preferred_path(&list[i]),
+                   list[i].hw_supported ? "  [hardware controls]" : "");
+        }
+        return 0;
+    }
+    if (strcmp(action, "--faf-status") == 0) {
+        faf_install_info_t info;
+        faf_install_detect(&info);
+        printf("FpsAimForge: %s\n", info.detail);
+        if (info.game_dir[0])   printf("  Game dir  : %s\n", info.game_dir);
+        if (info.bundle_dir[0]) printf("  Bundle dir: %s\n", info.bundle_dir);
+        return info.state == FAF_INSTALL_OK ? 0 : 1;
+    }
+    bool ok;
+    if (strcmp(action, "--install-faf") == 0)        ok = faf_install_apply(msg, sizeof(msg));
+    else if (strcmp(action, "--uninstall-faf") == 0) ok = faf_install_remove(msg, sizeof(msg));
+    else                                             ok = udev_install_rules(msg, sizeof(msg));
+    printf("%s %s\n", ok ? "[OK]" : "[FAIL]", msg);
+    return ok ? 0 : 1;
 }
 
 int main(int argc, char **argv) {
     bool headless = false;
     bool auto_cal = false;
     bool probe_only = false;
+    const char *action = NULL;
     int  startup_cpi = 0;
     float base_scale = 0.25f;
     const char *dev_path = NULL;
@@ -170,6 +207,10 @@ int main(int argc, char **argv) {
             auto_cal = true;
         } else if (strcmp(argv[i], "--probe-hw") == 0) {
             probe_only = true;
+        } else if (strcmp(argv[i], "--list-devices") == 0 || strcmp(argv[i], "--faf-status") == 0 ||
+                   strcmp(argv[i], "--install-faf") == 0 || strcmp(argv[i], "--uninstall-faf") == 0 ||
+                   strcmp(argv[i], "--install-udev") == 0) {
+            action = argv[i];
         } else if (strcmp(argv[i], "--preset") == 0 && i + 1 < argc) {
             preset = argv[++i];
         } else if (strcmp(argv[i], "--cpi") == 0 && i + 1 < argc) {
@@ -185,6 +226,13 @@ int main(int argc, char **argv) {
     }
 
     core_init(base_scale, dev_path);
+    if (!dev_path) {
+        config_load();
+    }
+
+    if (action) {
+        return run_cli_action(action);
+    }
     if (preset) {
         core_apply_preset(preset);
     }

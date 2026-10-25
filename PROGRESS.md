@@ -1,6 +1,6 @@
 # AnyMouse-Vectoring: Development Progress & Milestones
 
-Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/README.md) tracking operational checkpoints, active implementations, architecture decisions, and roadmap progression with chronological timestamps.
+Sister document to [`README.md`](README.md) tracking operational checkpoints, active implementations, architecture decisions, and roadmap progression with chronological timestamps.
 
 ---
 
@@ -12,7 +12,7 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 | **Phase 1.5** | Native Mouse Hardware Protocol Integration (`OpenMouse`) + Universal PnP | **Complete** | Auto-detect any mouse, Finalmouse ULX CPI/polling, Attack Shark R3 polling (hardware-verified), Steam auto-install, auto-saved profile |
 | **Phase 2** | `FpsAimForge` (FAF) Native Telemetry Plugin & Ballistic Calibration (KovaaK's Sunset/Retained) | **Verified / Active** | Live 3D submovement capture verified in Steam `FpsAimForge` (`libanymouse_faf.so` + `/dev/shm/anymouse_faf_telemetry`) |
 | **Phase 3** | Mouse MCU On-Board Firmware (Attack Shark R3) | **Planned** | Testing ZMK/UFA (`aroum/ufa`) and Ghidra trampoline patching |
-| **Phase 4** | Universal Hardware USB Pass-Through Dongle (RP2040) | **Concept / Design** | Dual-core USB-Host MitM pass-through board |
+| **Phase 4** | Universal Hardware USB Pass-Through Dongle (ESP32-P4) | **Planning (active)** | Board verified; see `firmware/esp32p4-dongle/PLAN.md` |
 
 ---
 
@@ -27,7 +27,7 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
   - Sub-pixel remainder accumulation (error diffusion) to prevent integer truncation truncation dead-zones during slow micro-adjustments.
   - Telemetry metric: Primary ballistic submovement inflection detection ($v(t) < 0.15 \cdot v_{\text{peak}}$) + radial landing ratio projection ($r_i = \frac{\mathbf{P}_1 \cdot \mathbf{T}}{\|\mathbf{T}\|^2}$) with damped learning rate update rule.
 - **Hardware Realities Defined:** Disproved feasibility of mid-swipe optical sensor CPI register changes (SPI bus contention, frame stalls, 50 CPI steps, 2-axis only). Established standard: Lock hardware optical sensor to high fixed CPI (3200 or 6400) and scale displacement vectors in software/firmware.
-- **Artifact Created:** Complete foundational documentation in [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/README.md).
+- **Artifact Created:** Complete foundational documentation in [`README.md`](README.md).
 
 ---
 
@@ -44,12 +44,12 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 ---
 
 ### [2026-10-20 22:51] - Phase 1 Real-Time C Daemon Implementation
-- **Milestone:** Created zero-dependency, low-latency POSIX C daemon ([`octant_daemon.c`](file:///home/future/Desktop/AnyMouse-Vectoring/octant_daemon.c)):
+- **Milestone:** Created zero-dependency, low-latency POSIX C daemon (`octant_daemon.c`):
   - Interface directly with `<linux/input.h>` and `<linux/uinput.h>` using exclusive grab (`ioctl(EVIOCGRAB)`).
   - `SCHED_FIFO` real-time scheduling priority ($80$) and memory page locking (`mlockall`) for microsecond-level wake latency on CachyOS.
   - Batched kernel event draining: Reads up to $64$ events per `read()` syscall, transforms vectors in CPU registers, and flushes frame via a single `write()` syscall.
   - Non-blocking UDP IPC socket on `127.0.0.1:42069`: Listens for 32-byte updates (`float weights[8]`) mid-swipe with zero mutex contention.
-- **Compilation:** Compiled with `gcc -O3 -march=native -ffast-math -flto -Wall -Wextra -lm` into an $18\text{ KB}$ native binary ([`octant_daemon`](file:///home/future/Desktop/AnyMouse-Vectoring/octant_daemon)).
+- **Compilation:** Compiled with `gcc -O3 -march=native -ffast-math -flto -Wall -Wextra -lm` into an $18\text{ KB}$ native binary (`octant_daemon`).
 
 ---
 
@@ -58,21 +58,21 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 - **Root Cause Identified:** CachyOS kernel packages were upgraded to `7.2.10-1-cachyos`, but the active running kernel was `7.2.9-2-cachyos`. The package upgrade deleted `/usr/lib/modules/7.2.9-2-cachyos/`, causing `modprobe uinput` to fail on the un-rebooted system.
 - **Resolution:**
   - Extracted the matching binary `uinput.ko` directly from `/var/cache/pacman/pkg/linux-cachyos-7.2.9-2-x86_64_v4.pkg.tar.zst`.
-  - Created [`start_daemon.sh`](file:///home/future/Desktop/AnyMouse-Vectoring/start_daemon.sh) with automatic kernel module loading (`insmod uinput.ko`) and device auto-detection.
-  - Updated [`Makefile`](file:///home/future/Desktop/AnyMouse-Vectoring/Makefile) with build and run targets (`make run-ulx`, `make run-shark`).
+  - Created [`start_daemon.sh`](start_daemon.sh) with automatic kernel module loading (`insmod uinput.ko`) and device auto-detection.
+  - Updated [`Makefile`](Makefile) with build and run targets (`make run-ulx`, `make run-shark`).
 - **Verification:** Successfully executed `sudo ./start_daemon.sh`, verified hardware grab, and confirmed live UDP updates with `send_weights.py` (`vertical_boost` and `neutral` presets).
 
 ---
 
 ### [2026-10-20 23:05] - Interactive PyQt6 Polar Studio GUI
-- **Milestone:** Implemented complete graphical calibration interface ([`gui.py`](file:///home/future/Desktop/AnyMouse-Vectoring/gui.py)):
+- **Milestone:** Implemented complete graphical calibration interface (`gui.py`):
   - **Interactive Polar Radar Widget:** Real-time polygon rendering of the 8-octant sensitivity shape with interactive mouse drag handles on all 8 spokes.
   - **Granular Controls:** 8 individual sliders and DoubleSpinBoxes with dynamic Effective DPI readouts ($DPI = CPI \times weight$).
   - **Hardware Sensor Configurator:** Selectable hardware baseline CPI ($1600$, $3200$, $6400$, etc.).
   - **Master Scaling & Symmetry Linking:** Global multiplier slider + toggles for Left/Right and Up/Down mirror symmetry.
   - **Preset Management:** One-click application of `Neutral`, `Vertical Boost`, `Horizontal Boost`, `Diagonal ULX`, and `Low`.
   - **Profile Persistence:** JSON profile export and import.
-  - **Seamless IPC Integration:** Added `--gui` flag to [`send_weights.py`](file:///home/future/Desktop/AnyMouse-Vectoring/send_weights.py) and added `make gui` target. Every UI adjustment emits instantaneous UDP packets to port $42069$.
+  - **Seamless IPC Integration:** Added `--gui` flag to `send_weights.py` and added `make gui` target. Every UI adjustment emits instantaneous UDP packets to port $42069$.
 
 ---
 
@@ -89,7 +89,7 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
     - Command `0x12`: Motion Sync hardware status (`bool`).
   - **Attack Shark R3 / GearHub (`0x3151:0x402D`):** Uses Bit7 checksum framing (`byte[7] = 255 - (sum(bytes 0..6) & 0xFF)`) with 2.4 GHz relay handshaking (`0xF6 0x05` $\to$ `0xF7` $\to$ command $\to$ `0xFC`).
 - **Implementation & Live Telemetry Verification:**
-  - Created [`mouse_protocol.py`](file:///home/future/Desktop/AnyMouse-Vectoring/mouse_protocol.py): Scans `/sys/class/hidraw/`, queries hardware over raw Linux file descriptors, and decodes telemetry in $< 50\text{ ms}$.
+  - Created `mouse_protocol.py`: Scans `/sys/class/hidraw/`, queries hardware over raw Linux file descriptors, and decodes telemetry in $< 50\text{ ms}$.
   - Verified live on connected hardware:
     - Detected: `Finalmouse UltralightX (Serial: MA234903747) on /dev/hidraw6`
     - Sensor DPI: `3200 CPI`
@@ -98,7 +98,7 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
     - Motion Sync: `ON`
     - RSSI: `-19 dBm`
 - **GUI Integration:**
-  - Updated [`gui.py`](file:///home/future/Desktop/AnyMouse-Vectoring/gui.py) with dynamic hardware badges (device identity, polling rate, battery, Motion Sync, RSSI).
+  - Updated `gui.py` with dynamic hardware badges (device identity, polling rate, battery, Motion Sync, RSSI).
   - Physical CPI auto-sync: Automatically updates the locked sensor CPI dropdown and calculates true Effective DPI for all 8 octants.
   - Added direct hardware control buttons (`Set 3200 CPI`, `Set 6400 CPI`) to write physical sensor registers via HID reports directly from the app.
   - Background `QTimer` refreshes telemetry every 8 seconds.
@@ -106,26 +106,26 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 ---
 
 ### [2026-10-21 17:08] - Unified Multi-Threaded C Consolidation (`./anymouse`)
-- **Milestone:** Eliminated all split Python scripts (`gui.py`, `mouse_protocol.py`, `send_weights.py`) and inter-process UDP requirements by consolidating the entire stack into a single $86\text{ KB}$ multi-threaded POSIX C binary ([`./anymouse`](file:///home/future/Desktop/AnyMouse-Vectoring/anymouse)):
-  - **Shared Lock-Free Core ([`src/core.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/core.h), [`src/main.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/main.c)):** Uses `_Atomic float octant_weights[8]`, `_Atomic int hardware_cpi`, and a $65,536$-slot lock-free Single-Producer Single-Consumer (`SPSC`) ring buffer (`tick_ring`) in shared process memory.
-  - **Thread 1 — Real-Time Vectoring Hot-Path ([`src/evdev_rt.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/evdev_rt.c)):** Runs at `SCHED_FIFO` priority 80 with `mlockall()`, performs `EVIOCGRAB`, executes Cosine $C^1$ interpolation and sub-pixel error diffusion (`scale_vector()`), writes to `/dev/uinput`, and pushes every `SYN_REPORT` frame to `tick_ring` lock-free.
-  - **Native C OpenMouse `/dev/hidraw` Driver ([`src/hid_driver.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/hid_driver.c)):** Direct C port of the Finalmouse ULX (`0x361D:0x0100`) and Attack Shark R3 (`0x3151:0x402D`) HIDraw telemetry reader and hardware CPI writer (both preset buttons and CPI dropdown write directly to the mouse sensor).
-  - **Thread 3 — Native GTK4 + Cairo Studio GUI ([`src/gui_gtk4.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/gui_gtk4.c)):** Hardware-accelerated Cairo polar radar chart with draggable handles, live $\mathbf{P}_1$ vs. $\mathbf{T}$ vector overlay, uniform octant scalar controls (`1:1 (1.0x)`, `Half (0.50x)`, `Quarter (0.25x)`), symmetry linkers, and JSON profile persistence.
+- **Milestone:** Eliminated all split Python scripts (`gui.py`, `mouse_protocol.py`, `send_weights.py`) and inter-process UDP requirements by consolidating the entire stack into a single $86\text{ KB}$ multi-threaded POSIX C binary (`./anymouse`):
+  - **Shared Lock-Free Core ([`src/core.h`](src/core.h), [`src/main.c`](src/main.c)):** Uses `_Atomic float octant_weights[8]`, `_Atomic int hardware_cpi`, and a $65,536$-slot lock-free Single-Producer Single-Consumer (`SPSC`) ring buffer (`tick_ring`) in shared process memory.
+  - **Thread 1 — Real-Time Vectoring Hot-Path ([`src/evdev_rt.c`](src/evdev_rt.c)):** Runs at `SCHED_FIFO` priority 80 with `mlockall()`, performs `EVIOCGRAB`, executes Cosine $C^1$ interpolation and sub-pixel error diffusion (`scale_vector()`), writes to `/dev/uinput`, and pushes every `SYN_REPORT` frame to `tick_ring` lock-free.
+  - **Native C OpenMouse `/dev/hidraw` Driver ([`src/hid_driver.c`](src/hid_driver.c)):** Direct C port of the Finalmouse ULX (`0x361D:0x0100`) and Attack Shark R3 (`0x3151:0x402D`) HIDraw telemetry reader and hardware CPI writer (both preset buttons and CPI dropdown write directly to the mouse sensor).
+  - **Thread 3 — Native GTK4 + Cairo Studio GUI ([`src/gui_gtk4.c`](src/gui_gtk4.c)):** Hardware-accelerated Cairo polar radar chart with draggable handles, live $\mathbf{P}_1$ vs. $\mathbf{T}$ vector overlay, uniform octant scalar controls (`1:1 (1.0x)`, `Half (0.50x)`, `Quarter (0.25x)`), symmetry linkers, and JSON profile persistence.
 - **Resolved KDE Plasma / KWin Wayland $2\times$ Acceleration Quirk:**
   - **Root Cause:** In `~/.config/kcminputrc`, the physical Finalmouse ULX (`Vendor=13853`, `Product=256`, `Name="Finalmouse UltralightX dongle Mouse"`) was configured with `PointerAccelerationProfile=1` (Flat / unaccelerated) and `PointerAcceleration=-0.200`. Because the virtual `uinput` device previously used `Product=0x0101` (`257`), KWin Wayland treated it as an unconfigured mouse and applied `libinput`'s default Adaptive acceleration curve (`Profile=2`, $2.0\times$ incline).
-  - **Fix:** Updated [`setup_uinput_device()`](file:///home/future/Desktop/AnyMouse-Vectoring/src/evdev_rt.c) to clone the exact `EVIOCGID` (`bustype`, `vendor`, `product`, `version`) and `EVIOCGNAME` from the grabbed physical mouse so KWin Wayland applies the exact same Flat (`Profile=1`) settings for true $1:1$ sensitivity parity.
+  - **Fix:** Updated [`setup_uinput_device()`](src/evdev_rt.c) to clone the exact `EVIOCGID` (`bustype`, `vendor`, `product`, `version`) and `EVIOCGNAME` from the grabbed physical mouse so KWin Wayland applies the exact same Flat (`Profile=1`) settings for true $1:1$ sensitivity parity.
 
 ---
 
 ### [2026-10-21 17:55] - Phase 2 KovaaK's UE4.26 Static Analysis & Session-Gated Telemetry
-- **Milestone:** Installed [`morluto/rea`](https://github.com/morluto/rea) (`v6.7.0`) and **Ghidra 12.1.2**, extracted UE4.26 (`++UE4+Release-4.26`) reflection tables from [`FPSAimTrainer-Win64-Shipping.exe`](file:///mnt/iscsi-nvme/SteamLibrary/steamapps/common/FPSAimTrainer/FPSAimTrainer/Binaries/Win64/FPSAimTrainer-Win64-Shipping.exe) (`Build 3.8.7`), and implemented strict session-gated round-to-round telemetry in [`src/kovaaks_offsets.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/kovaaks_offsets.h) and [`src/calibration.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/calibration.c).
+- **Milestone:** Installed [`morluto/rea`](https://github.com/morluto/rea) (`v6.7.0`) and **Ghidra 12.1.2**, extracted UE4.26 (`++UE4+Release-4.26`) reflection tables from `FPSAimTrainer-Win64-Shipping.exe` (`Build 3.8.7`), and implemented strict session-gated round-to-round telemetry in [`src/kovaaks_offsets.h`](src/kovaaks_offsets.h) and [`src/calibration.c`](src/calibration.c).
 - **Verified UE4.26 & `/Script/GameSkillsTrainer` Offsets:**
   - **Global Pointers (`.data`):** `GWorld` at RVA `0x05533750` (`VA 0x145533750`), `FNamePool` at RVA `0x053C3340` (`VA 0x1453C3340`).
   - **Engine Hierarchy:** `UWorld::PersistentLevel` (`0x30`), `UWorld::GameState` (`0x120`), `UWorld::OwningGameInstance` (`0x180`), `UGameInstance::LocalPlayers` (`0x38`), `UPlayer::PlayerController` (`0x30`), `AController::ControlRotation` (`0x288`), `APlayerController::AcknowledgedPawn` (`0x2A0`), `APlayerController::PlayerCameraManager` (`0x2B8`), `APlayerCameraManager::CameraCachePrivate.POV` (`0x1AF0`).
   - **`AMetaGameState` (`GameState`):** `TArray<AMetaCharacter*> Characters` at `+0x02F0` (enumerates the player character plus all spawned bot characters).
   - **`AMetaPlayerController` (`PlayerController`):** `UserYawSensitivity` (`+0x0608`), `UserPitchSensitivity` (`+0x060C`), `MyCharacter` (`+0x0618`), `PauseMenuLocation` (`+0x0678`, `0` during active unpaused gameplay), `LastEnemyAttacked` (`+0x06A8`).
   - **`AMetaCharacter` (Player & Bots):** `RootComponent` (`+0x0130` $\to$ `RelativeLocation` at `+0x011C`), `KillCount` (`+0x09C8`), `KillStatistics` (`+0x09D0`), `TotalOverShots` (`+0x09E0`), `DamageDone` (`+0x0A20`), `LastScore` (`+0x0A28`), `ChallengeStartTime` (`+0x0A38`, `FDateTime` ticks), `LastShotFiredTime` (`+0x0A78`), `Health` (`+0x0E58`, $> 0$ when bot is alive).
-- **Strict Session Gating & Inter-Round Lifecycle ([`src/calibration.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/calibration.c)):**
+- **Strict Session Gating & Inter-Round Lifecycle ([`src/calibration.c`](src/calibration.c)):**
   - Tracks 4 explicit states: `KOVAAKS_STATE_OFFLINE`, `KOVAAKS_STATE_MENU_OR_LOBBY` (`bot_count == 0`), `KOVAAKS_STATE_PAUSED` (`PauseMenuLocation != 0`), and `KOVAAKS_STATE_ACTIVE_ROUND` (`MyCharacter != NULL && bot_count > 0 && PauseMenuLocation == 0`).
   - **Zero Desktop False-Positives:** When not in `KOVAAKS_STATE_ACTIVE_ROUND`, `tick_ring` is immediately flushed (`ring_tail = ring_head`) so desktop mouse movements are never tracked.
   - **Round-to-Round Aggregation & Adaptation:** Detects Challenge round start/restart via `ChallengeStartTime` (`+0x0A38`) and `KillCount` (`+0x09C8`) transitions, and detects Challenge completion via `inotify` on `FPSAimTrainer/stats/*.csv`, applying damped weight updates ($\alpha = 0.35$, $\pm 5\%$ clamp) strictly **between rounds**.
@@ -133,13 +133,13 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 ---
 
 ### [2026-10-21 18:50] - Phase 2 Transition to `FpsAimForge` (FAF) Native Telemetry Plugin & Custom 8-Octant Suite
-- **Milestone:** Transitioned primary Linux Phase 2 calibration from KovaaK's (due to Linux anti-cheat incompatibility; KovaaK's code in [`src/kovaaks_offsets.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/kovaaks_offsets.h) and [`src/calibration.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/calibration.c) is preserved/sunset behind `ANYMOUSE_ENABLE_KOVAAKS=1` for future Windows testing) to **`FpsAimForge` (`v0.7.0`)**, a native Linux C++23/SDL3 open-source aim trainer installed on Steam.
-- **Native In-Process Telemetry Plugin ([`src/faf_plugin.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_plugin.c) $\to$ `libanymouse_faf.so`):**
+- **Milestone:** Transitioned primary Linux Phase 2 calibration from KovaaK's (due to Linux anti-cheat incompatibility; KovaaK's code in [`src/kovaaks_offsets.h`](src/kovaaks_offsets.h) and [`src/calibration.c`](src/calibration.c) is preserved/sunset behind `ANYMOUSE_ENABLE_KOVAAKS=1` for future Windows testing) to **`FpsAimForge` (`v0.7.0`)**, a native Linux C++23/SDL3 open-source aim trainer installed on Steam.
+- **Native In-Process Telemetry Plugin ([`src/faf_plugin.c`](src/faf_plugin.c) $\to$ `libanymouse_faf.so`):**
   - Hooks `FpsAimForge`'s 13 `Scenario` / `BaseScenario` vtables in `.data.rel.ro` (`OnTickStart`, `OnDetach`, `UpdateState`, `OnScenarioDone`) in-process with zero external memory sniffing.
-  - Installed native Steam launcher wrapper ([`src/faf_launcher.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_launcher.c)) at `/mnt/iscsi-nvme/SteamLibrary/steamapps/common/FpsAimForge/FpsAimForge` so `libanymouse_faf.so` loads automatically whether `FpsAimForge` is launched from Steam or directly.
-  - Streams live scenario state (`FAF_STATE_MENU`, `FAF_STATE_WAITING_FOR_CLICK_TO_START`, `FAF_STATE_START_COUNTDOWN`, `FAF_STATE_RUNNING`, `FAF_STATE_DONE`), round timers, hit/shot/kill counters, 3D camera `(yaw, pitch)`, and active 3D target coordinates over POSIX shared memory (`/dev/shm/anymouse_faf_telemetry`, defined in [`src/faf_telemetry.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_telemetry.h)).
+  - Installed native Steam launcher wrapper ([`src/faf_launcher.c`](src/faf_launcher.c)) at `/mnt/iscsi-nvme/SteamLibrary/steamapps/common/FpsAimForge/FpsAimForge` so `libanymouse_faf.so` loads automatically whether `FpsAimForge` is launched from Steam or directly.
+  - Streams live scenario state (`FAF_STATE_MENU`, `FAF_STATE_WAITING_FOR_CLICK_TO_START`, `FAF_STATE_START_COUNTDOWN`, `FAF_STATE_RUNNING`, `FAF_STATE_DONE`), round timers, hit/shot/kill counters, 3D camera `(yaw, pitch)`, and active 3D target coordinates over POSIX shared memory (`/dev/shm/anymouse_faf_telemetry`, defined in [`src/faf_telemetry.h`](src/faf_telemetry.h)).
   - **True 3D Target-Aware Submovement Extraction:** Records $1000\text{ Hz}$ camera `(yaw, pitch)` trajectory during active rounds, matches each click/kill to the exact 3D target center $\mathbf{T}$ from `TargetManager::last_removed_target_`, isolates the primary ballistic submovement $\mathbf{P}_1$ (velocity drop $< 16\%$ of $\omega_{\text{peak}}$ or corrective velocity valley $< 42\%$ of $\omega_{\text{peak}}$), and emits verified `faf_submovement_event_t` packets into a lock-free ring buffer.
-- **Custom `AnyMouse` Calibration Bundle ([`faf/AnyMouse.bundle.json`](file:///home/future/Desktop/AnyMouse-Vectoring/faf/AnyMouse.bundle.json)):**
+- **Custom `AnyMouse` Calibration Bundle ([`faf/AnyMouse.bundle.json`](faf/AnyMouse.bundle.json)):**
   - Installed into `~/.local/share/FpsAimForge/bundles/AnyMouse.bundle.json`:
     1. **`AnyMouse 8-Octant Center-Out`**: Alternates between neutral wrist center `(0, 0)` and gap-balanced randomized targets across all 8 polar octants (`E, NE, N, NW, W, SW, S, SE`). Center return clicks automatically reset trajectory origin without polluting outward ballistic statistics.
     2. **`AnyMouse 8-Octant Center-Out Ghost`**: 2-target preview mode (`newestTargetIsGhost: true`) for rhythmic center-out calibration.
@@ -152,12 +152,12 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 - **Milestone:** Verified `libanymouse_faf.so` injecting cleanly into Steam's `FpsAimForge` inside `SteamLinuxRuntime_4` (`pressure-vessel`) and capturing live 3D camera + target ballistic submovements in real time (`57` submovement events captured during an initial `AF Static3` test run at `45.0 cm/360`).
 - **Resolved Linux Sticky `/dev/shm` Permission Quirk (`fs.protected_regular = 1`):**
   - **Root Cause:** When `FpsAimForge` (running as unprivileged user `future`) created `/dev/shm/anymouse_faf_telemetry` (`0666`), `./anymouse` (running as `root` via `sudo`) called `shm_open(ANYMOUSE_FAF_SHM_NAME, O_CREAT | O_RDWR, 0666)`. Under Linux kernel `sysctl fs.protected_regular = 1`, passing `O_CREAT` on an existing regular file in world-writable sticky directory `/dev/shm` owned by a non-root user returns `EACCES`.
-  - **Fix:** Updated [`open_faf_shm()`](file:///home/future/Desktop/AnyMouse-Vectoring/src/calibration.c#L586-L618) in [`src/calibration.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/calibration.c) and [`faf_plugin_init()`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_plugin.c#L588-L607) in [`src/faf_plugin.c`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_plugin.c) to call `shm_open(..., O_RDWR, 0666)` **without `O_CREAT`** first, falling back to `O_CREAT | O_RDWR` only when `errno == ENOENT`, and updated [`Makefile`](file:///home/future/Desktop/AnyMouse-Vectoring/Makefile) to unlink (`rm -f`) before relinking shared libraries so live-mapped processes never receive `SIGBUS`.
+  - **Fix:** Updated [`open_faf_shm()`](src/calibration.c#L586-L618) in [`src/calibration.c`](src/calibration.c) and [`faf_plugin_init()`](src/faf_plugin.c#L588-L607) in [`src/faf_plugin.c`](src/faf_plugin.c) to call `shm_open(..., O_RDWR, 0666)` **without `O_CREAT`** first, falling back to `O_CREAT | O_RDWR` only when `errno == ENOENT`, and updated [`Makefile`](Makefile) to unlink (`rm -f`) before relinking shared libraries so live-mapped processes never receive `SIGBUS`.
 
 ---
 
 ### [2026-10-22] - Documentation Sync & First Commit of the Unified C Engine
-- **Milestone:** Brought [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/README.md) in line with the current architecture: removed the obsolete UDP/Unix-socket weight channel and the Raylib/Bevy/Godot trainer from the Section 7 diagram and Phase 1 notes (weights now live in process memory as `_Atomic float octant_weights[8]`), and fixed the Section 12 table-of-contents entry to say `FpsAimForge`.
+- **Milestone:** Brought [`README.md`](README.md) in line with the current architecture: removed the obsolete UDP/Unix-socket weight channel and the Raylib/Bevy/Godot trainer from the Section 7 diagram and Phase 1 notes (weights now live in process memory as `_Atomic float octant_weights[8]`), and fixed the Section 12 table-of-contents entry to say `FpsAimForge`.
 - **Repository:** Committed the unified C engine (`src/`), the `FpsAimForge` bundle (`faf/`), and the removal of the legacy Python/`octant_daemon.c` files. Files named in earlier log entries (`gui.py`, `mouse_protocol.py`, `send_weights.py`, `octant_daemon.c`) are kept in that history as the prototype stage and no longer exist in the tree.
 
 ### [2026-10-22] - Flick CSV Log, GUI Auto-Adapt Sync & Longer Rounds
@@ -179,22 +179,67 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 - **Profile persistence:** weights are restored on launch and saved on exit to `~/.config/anymouse/profile.json` (atomic write, user-owned under sudo; the repo-local `profile.json` is read once as a fallback). `--preset` / explicit scale runs don't overwrite it. The Master Vector Scaling widgets now follow the loaded weights (they previously only changed the underlying values).
 - **`--install-udev`:** optional `uaccess` rules + `uinput` autoload so the engine can run without sudo (`ANYMOUSE_NO_SUDO=1 ./start_daemon.sh`).
 
+### [2026-10-25] - Phase 4 Re-targeted to ESP32-P4; Hardware Verified
+- **Decision:** Phase 4 (hardware pass-through dongle) moves ahead of Phase 3 and the Windows spike. It uses a **Waveshare ESP32-P4-Module-DEV-KIT** instead of an RP2040. Configuration is over a vendor HID channel on the same USB cable (WebHID web page and/or `./anymouse`); Wi-Fi and USB networking were dropped. A hardware dongle also covers Windows vectoring without an interception driver.
+- **Verified over the CH343 UART (`1A86:55D3`) with `esptool` 4.12.0:**
+  - ESP32-P4 **rev v1.3** (pre-v3 silicon, 360 MHz), 16 MB GigaDevice flash, 32 MB PSRAM.
+  - eFuses clean: no secure boot, no flash encryption, download mode enabled.
+  - The previous Arduino "Haltech Multi-Gauge" image is disposable.
+- **USB ports identified:** one USB-C is the CH343 UART bridge (`1A86:55D3`); the other is the P4's built-in USB Serial/JTAG (`303A:1001`), which cannot be a HID mouse. The USB-A is the High-Speed OTG (mouse side).
+- **Schematic findings:** the two USB-A stacks (4 ports) sit behind one High-Speed controller through a mux (HOST jumper = port 1 direct, DEVICE = CH334 hub for ports 2-4); neither can face the PC. The "other" USB-C is wired to GPIO24/25.
+- **PC-facing link solved in software (M0, device half):** `usb_wrap_ll_phy_select(&USB_WRAP, 0)` moves the Full-Speed OTG controller onto the "other" USB-C. Spike `firmware/esp32p4-dongle/spikes/m0_phy_swap/` (ESP-IDF v5.5.4, `esp_tinyusb` 3.0.0) enumerates on the Mac as `303A:4D56` with a HID mouse and a vendor HID interface (usage page `0xFF4D`); 20/20 vendor echoes, about 5 ms RTT. No eFuse burned, no header wiring needed.
+- **Remaining M0 work:** the mouse-side USB host half on the HS port, USB-A VBUS, and whether a reset restores the default PHY mapping. Full-Speed caps output to the PC at 1000 Hz; input is still read at the mouse's native rate.
+- **Plan:** [`firmware/esp32p4-dongle/PLAN.md`](firmware/esp32p4-dongle/PLAN.md), milestones M0 (two-port gate) through M7.
+
+
+### [2026-10-25] - Dongle Control Plane Built and Tested Without a Mouse
+- **Built** (`firmware/esp32p4-dongle/`, ESP-IDF v5.5.4, firmware 0.2.0): shared headers [`common/amv_octant.h`](common/amv_octant.h) (the scaling math) and [`common/amv_dongle_proto.h`](common/amv_dongle_proto.h) (protocol v1: 64-byte frames, 8-byte header, async `EVENT_STATE`); components `amv_store` (NVS slots, CRC32), `amv_ctrl` (state owner, generation counter, lock-free seqlock read for the hot path, 2 s debounced auto-save), `amv_proto` (command handler task) and `amv_usb_device` (PHY swap + composite HID). Partition table now has two OTA slots.
+- **Tested** with [`tools/dongle_test.py`](firmware/esp32p4-dongle/tools/dongle_test.py) over the real USB path: **44/44 checks** passed. Covered: bad magic/length/command; factory reset; valid, invalid (0, 6.0, negative, NaN, Inf) and stale writes; device-originated change arriving as an event; bypass; slot save/load/empty/out-of-range; 282 scaling steps against an independent float64 reference (all exact, cumulative drift 0); persistence of weights and active slot across a reboot. Control round trip about 2 ms median (macOS host).
+- **Host-side math tests:** [`tests/test_octant.c`](firmware/esp32p4-dongle/tests/test_octant.c) passes on the Mac (identity at 1.0, octant tags, no lost sub-pixel counts, continuous blend across octant boundaries).
+- **Observation:** right after a hard reset the Serial/JTAG unit (`303A:1001`) briefly appeared on the "other" USB-C before the app swapped the PHY, which suggests a reset restores the default mapping. Not yet confirmed with a BOOT-held download-mode test.
+- **Design change:** the hot-path weight read is a seqlock rather than the double buffer first planned (a double buffer can hand a reader a buffer that is being rewritten after two quick updates).
+- **Caveats:** `TEST_SCALE` and `TEST_SELF_CHANGE` are debug-only commands to gate out of release builds; `src/evdev_rt.c` has not been switched to the shared header (cannot be built or tested off-Linux); scaled motion is not yet forwarded to the PC mouse report because there is no input source yet.
+
+### [2026-10-25] - AnyMouse Studio (WebHID) Built; Firmware 0.3.0
+- **Web app** ([`web/`](web/README.md)): a static, no-build WebHID page. Radar chart with draggable handles (its outline is the real cosine-blended envelope), weight sliders and number boxes, presets, master scale, left/right and up/down links, four profile slots with filled/active state, JSON export/import (also reads Linux-engine profiles), bypass, a developer panel, and a built-in `?demo` mode with a simulated dongle. Edits are coalesced to about 30 per second; a stale edit is dropped and the page refreshes; events from other clients update the page.
+- **Protocol/firmware additions (0.3.0):** `GET_SLOTS` (which slots hold a saved profile) and `AMV_USB_VID/PID` in [`common/amv_dongle_proto.h`](common/amv_dongle_proto.h). [`web/proto.js`](web/proto.js) is generated from that header by [`gen_proto_js.py`](firmware/esp32p4-dongle/tools/gen_proto_js.py) and checked for staleness by the tests.
+- **Bug found by recording real frames and fixed:** a refused `SAVE_PROFILE`/`LOAD_PROFILE` (bad slot) replied with uninitialized stack bytes instead of the current state. `amv_ctrl` now always returns the current state on refusals; `dongle_test.py` has a regression check (48/48 pass). The recording also exposed wrong byte offsets for the MAC and uptime in the web client and demo device, now fixed.
+- **Tests:** 16 Node tests ([`web/tests/`](web/tests/protocol.test.mjs)). They replay 27 exchanges recorded from the real board ([`capture_fixtures.py`](firmware/esp32p4-dongle/tools/capture_fixtures.py)): requests must encode byte-identically, and the demo device must answer byte-identically (including the scaling output). The demo mode renders correctly in headless Chrome (screenshot checked).
+- **Not yet verified:** the real WebHID permission prompt and dragging the chart in a real browser against the board; DFU and the live calibration mirror are not in the web app yet.
+- **Unrelated:** an SSH key for pushing from this Mac was created at the user's request (`~/.ssh/id_ed25519_anymouse`); the remote is still HTTPS.
 ---
 
-## Where We Left Off (2026-10-23 Handoff)
+## Where We Left Off (2026-10-25 Handoff, ESP32-P4 dongle)
+
+The active work is Phase 4 on the ESP32-P4. Everything about it is in [`firmware/esp32p4-dongle/`](firmware/esp32p4-dongle/README.md) (quickstart) and [`PLAN.md`](firmware/esp32p4-dongle/PLAN.md) (design); the project-level summary is README section 13.
+
+**State:** M0's PC-facing half is done and the control plane (M2/M3 firmware side) is built and tested with no mouse: 44/44 checks pass. The board runs firmware 0.2.0 (the Haltech sketch was overwritten, as agreed). ESP-IDF v5.5.4 is installed at `~/esp/esp-idf` on the Mac. See the dated entry above and [`firmware/esp32p4-dongle/README.md`](firmware/esp32p4-dongle/README.md) for how to rebuild and rerun the test.
+
+**Detailed plan for the first session with real mice: [PLAN.md section 9](firmware/esp32p4-dongle/PLAN.md#9-mouse-discovery-device-info-and-hardware-verification)** (auto-discovery of all mice, immediate vectoring, OpenMouse info for the ULX and R3, generic fallback, 15-point acceptance checklist). The short version follows.
+
+**Next session (needs a mouse receiver in USB-A port 1, jumper on HOST, both USB-C cables connected):**
+1. Host-half spike: IDF `usb_host` on the High-Speed port enumerates the mouse, dumps its HID report descriptor, and measures the input rate, with the PC-side device still up.
+2. Check USB-A VBUS power (`DIO7003`/`AO3401` enable) and the BOOT button GPIO from the schematic.
+3. Test whether a reset restores the default PHY mapping (hold BOOT, tap RST with only the non-UART USB-C connected; look for `303A:1001`).
+4. Capture real report descriptors from the Finalmouse ULX and Attack Shark R3 on the Linux box (`tools/capture_descriptors.sh`, not written yet).
+5. Then, in order: report-descriptor parser (M1), forward scaled motion to the PC mouse report, `src/dongle.c` in the Linux engine plus the double-scaling guard (M3), and the web Studio (M4).
+
+The Linux-engine items below (the 2026-10-23 handoff) are unchanged and still valid.
+
+## Earlier Handoff (2026-10-23, Linux engine)
 
 ### Current Working State
-1. **Unified C Engine ([`./anymouse`](file:///home/future/Desktop/AnyMouse-Vectoring/anymouse)):**
+1. **Unified C Engine (`./anymouse`):**
    - Real-time `evdev` $\to$ `uinput` 8-octant Cosine $C^1$ vectoring with `EVIOCGID` cloning ($1:1$ KWin Wayland Flat profile parity).
    - Automatic mouse discovery with hotplug, a GUI mouse picker (auto / identify / manual path), and the chosen device persisted in `~/.config/anymouse/config`.
    - Native `/dev/hidraw` OpenMouse driver: Finalmouse ULX (`0x361D:0x0100`) CPI + polling rate; Attack Shark R3 (`0x3151:0x402D`) polling rate (CPI writes not implemented yet). All vendor HID I/O runs on a worker thread so the GUI never blocks.
    - Weights auto-restore on launch and auto-save on exit (`~/.config/anymouse/profile.json`).
    - Native GTK4 + Cairo Studio GUI with live Polar Radar Chart and $\mathbf{P}_1$ vs. $\mathbf{T}$ vector overlay.
 2. **`FpsAimForge` (FAF) Phase 2 Integration:**
-   - [`libanymouse_faf.so`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_plugin.c) + [`faf_launcher`](file:///home/future/Desktop/AnyMouse-Vectoring/src/faf_launcher.c) are installed by `anymouse --install-faf` (or the GUI button), which finds FpsAimForge in any Steam library; the original binary is kept at `FpsAimForge.bin`, and a Steam update is detected as "needs repair".
+   - [`libanymouse_faf.so`](src/faf_plugin.c) + [`faf_launcher`](src/faf_launcher.c) are installed by `anymouse --install-faf` (or the GUI button), which finds FpsAimForge in any Steam library; the original binary is kept at `FpsAimForge.bin`, and a Steam update is detected as "needs repair".
    - Every flick is logged to `logs/flicks.csv`; scenarios run 60 s.
-   - Custom calibration bundle [`faf/AnyMouse.bundle.json`](file:///home/future/Desktop/AnyMouse-Vectoring/faf/AnyMouse.bundle.json) installed at `~/.local/share/FpsAimForge/bundles/AnyMouse.bundle.json` (`AnyMouse 8-Octant Center-Out`, `AnyMouse 8-Octant Center-Out Ghost`, `AnyMouse 8-Octant Wide Flick`, and `AnyMouse Calibration Suite` playlist).
-   - KovaaK's UE4.26 code ([`src/kovaaks_offsets.h`](file:///home/future/Desktop/AnyMouse-Vectoring/src/kovaaks_offsets.h)) preserved in standby mode behind `ANYMOUSE_ENABLE_KOVAAKS=1` for future Windows testing.
+   - Custom calibration bundle [`faf/AnyMouse.bundle.json`](faf/AnyMouse.bundle.json) installed at `~/.local/share/FpsAimForge/bundles/AnyMouse.bundle.json` (`AnyMouse 8-Octant Center-Out`, `AnyMouse 8-Octant Center-Out Ghost`, `AnyMouse 8-Octant Wide Flick`, and `AnyMouse Calibration Suite` playlist).
+   - KovaaK's UE4.26 code ([`src/kovaaks_offsets.h`](src/kovaaks_offsets.h)) preserved in standby mode behind `ANYMOUSE_ENABLE_KOVAAKS=1` for future Windows testing.
 
 ### Next Session Resume Steps
 1. Start AnyMouse Studio: `sudo ./start_daemon.sh` (or `make run`). Your last weights are restored automatically.
@@ -227,6 +272,13 @@ Sister document to [`README.md`](file:///home/future/Desktop/AnyMouse-Vectoring/
 - [ ] Evaluate ZMK/UFA (`aroum/ufa`) open firmware build.
 - [ ] Explore binary trampoline injection on stock firmware via `morluto/rea` + Ghidra.
 
-### Checkpoint 3: Universal USB Pass-Through Dongle (Phase 4)
-- [ ] Design RP2040 / RP2350 USB-Host pass-through firmware.
-- [ ] Dual-core processing: Core 0 for 10-15 µs vector mutation, Core 1 for WebHID / RawHID tuning.
+### Checkpoint 3: Universal USB Pass-Through Dongle (Phase 4, ESP32-P4, now the active priority)
+- [x] Verify the target board (ESP32-P4 rev v1.3 on Waveshare ESP32-P4-Module-DEV-KIT) and write the plan ([`firmware/esp32p4-dongle/PLAN.md`](firmware/esp32p4-dongle/PLAN.md)).
+- [ ] M0: ESP-IDF v5.5.4 bring-up; resolve the PC-facing USB link; FS OTG device + HS OTG host enumerating simultaneously.
+- [ ] M1: transparent 1 kHz passthrough with report-descriptor parsing.
+- [ ] Mouse discovery, device info (OpenMouse for known mice, generic fallback) and the 15-point hardware checklist: [PLAN.md section 9](firmware/esp32p4-dongle/PLAN.md#9-mouse-discovery-device-info-and-hardware-verification).
+- [ ] M2: shared `common/amv_octant.h` vectoring + NVS profiles.
+- [ ] M3: vendor HID protocol + `src/dongle.c` sync for live FpsAimForge calibration.
+- [x] M4: WebHID web Studio built ([`web/`](web/README.md)); still to try in a real browser against the board.
+- [ ] M5: firmware update over the vendor HID channel, soak test, docs.
+- [ ] M6: OTA, soak test, docs.

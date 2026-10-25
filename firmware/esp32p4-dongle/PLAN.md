@@ -363,6 +363,15 @@ Unrelated doc drift noticed while planning: README §7 says the UDP weight chann
    **Why the OpenMouse drivers must run on the dongle:** once the mouse is behind the dongle, the PC cannot reach it, so the desktop app's `src/hid_driver.c` and any browser-based configurator see only the dongle. The dongle is the USB host, so it speaks the vendor protocol itself and exposes the results through new protocol commands (`GET_MOUSES`, `GET_MOUSE_INFO`, `SET_MOUSE_POLLING`, `SET_MOUSE_CPI`). The protocol framing, checksums and decoding in `src/hid_driver.c` move into a transport-agnostic module under `common/`, with two transports: Linux hidraw (the desktop app) and the ESP USB host (the dongle). The R3's relay handshake takes seconds, so it runs as an asynchronous job that reports progress by event, never blocking the control channel.
 5. **Descriptor capture.** A `GET_MOUSE_DESC` command streams a mouse's raw report descriptor over the vendor channel, so any mouse tried can be added to `tests/descriptors/` without needing the Linux machine.
 
+### 9.1a Decisions (2026-10-25)
+
+- **License: AGPL-3.0** for the whole repository, matching OpenMouse (`LICENSE`). That lets us use OpenMouse's TypeScript codecs and device catalog directly rather than rewriting them.
+- **All three layers ship together:** universal information (A), known-vendor drivers (B) and the catalog of recognized names (C). Layer B has two routes that coexist:
+  1. **Tunnel:** the dongle forwards raw reports to and from a mouse's vendor interface and the web page presents it as a virtual WebHID device, so OpenMouse's TypeScript codecs run unchanged in the browser. This covers every brand OpenMouse supports with no per-brand firmware.
+  2. **Drivers in C on the dongle:** for standalone use with no PC software. The ULX and R3 first (the logic exists in `src/hid_driver.c`), then other popular families, each only after it is tested on hardware, following OpenMouse's own rule that a model counts as supported only once that exact product ID and connection path has been exercised.
+- **Safety rule:** the dongle sends vendor commands only to devices in the registry, read-only on probe, and never writes a setting unless the user asks.
+- **A way to measure CPI for any mouse:** the *Measure CPI* wizard (drag a known distance, counts divided by distance) is part of layer A.
+
 ### 9.2 Verification checklist (the acceptance test for M1)
 
 Run it with at least: the Finalmouse ULX receiver, the Attack Shark R3 receiver, and one ordinary wired mouse that has no known protocol.
@@ -387,7 +396,38 @@ Run it with at least: the Finalmouse ULX receiver, the Attack Shark R3 receiver,
 
 ### 9.3 Open questions to settle first
 
-- Does ESP-IDF v5.5.4's USB host support hubs (needed for test 10), or does multiple-mouse support need a newer component?
+- ~~Does ESP-IDF v5.5.4's USB host support hubs?~~ Yes: it is the `CONFIG_USB_HOST_HUBS_SUPPORTED` option, and a build with it enabled links and runs (section 9.4). Whether it works with a real hub and mice is still for test 10.
 - Does a High-Speed host handle the ULX's 8 kHz receiver while the Full-Speed device side stays up? The ULX uses a single combined interface for motion and configuration (usage page `0xFF00`), so the dongle must claim it and send vendor reports on it while motion keeps flowing.
 - The R3 receiver exposes three interfaces; only the first carries motion. Confirm which to claim, and that the configuration interfaces can be used for the relay at the same time.
 - How the USB-A power switch (`DIO7003`/`AO3401`) is enabled.
+
+### 9.4 Space and memory budget (measured 2026-10-25)
+
+The question: is there room on the dongle for discovery, the device catalog, the tunnel and drivers? **Yes, with a wide margin.** Flash is not the constraint; what limits the work is the effort of porting drivers, not space.
+
+**Measured**
+
+| Item | Flash image | Free internal RAM (board, idle) |
+|:---|---:|---:|
+| Current firmware (control plane + PC-side USB), 0.3.0 | 283 KB (13.8% of a 2 MB OTA slot) | 559 KB |
+| Same plus the USB host stack **with hub support** (a throwaway build run on the board) | 352 KB (17%): **+69 KB** | 553 KB: **-6 KB** |
+
+The chip has 16 MB flash, 576 KB internal RAM (about 575 KB shown as free at boot) and 32 MB PSRAM. The current partition table uses 2 x 2 MB for the two OTA slots and leaves about 12 MB of flash unused. PSRAM is not enabled in the build; the hot path should stay in internal RAM anyway.
+
+**Estimated** (not measured; our existing control plane is 7.7 KB of code for 12 commands, which is the yardstick)
+
+| Item | Estimate |
+|:---|---:|
+| HID report-descriptor parser, discovery, rate measurement, CPI wizard, descriptor dump, tunnel | 20 to 40 KB |
+| Device catalog (OpenMouse's 391 HID IDs: VID:PID, brand, model, flags) | about 10 to 15 KB |
+| One C vendor driver (framing, checksum, a handful of commands) | about 2 to 8 KB each |
+| **Every one of OpenMouse's 49 families ported to C, worst case** | 250 to 500 KB |
+
+Adding all of it keeps the image around 0.7 to 1.0 MB, inside a 2 MB slot. Per-mouse RAM is small (descriptors of a few hundred bytes, 64-byte report buffers).
+
+**Recommendations**
+1. **Enlarge the OTA slots to 4 MB each now.** It costs nothing (the flash is there) and a partition layout cannot be changed by an over-the-air update later, only by a USB reflash. This is a one-line change in `partitions.csv`.
+2. **Port only a few drivers to C.** The tunnel plus the browser-side codecs already cover the rest, which keeps firmware growth tiny.
+3. **Keep PSRAM off** unless something needs it.
+
+**Not yet measured:** RAM with real devices attached (an 8 kHz mouse streaming plus the hub), and CPU headroom at 8 kHz. Those belong to the checklist above (tests 5 and 10), not to this space question.

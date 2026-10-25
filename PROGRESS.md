@@ -207,6 +207,12 @@ Sister document to [`README.md`](README.md) tracking operational checkpoints, ac
 - **Tests:** 16 Node tests ([`web/tests/`](web/tests/protocol.test.mjs)). They replay 27 exchanges recorded from the real board ([`capture_fixtures.py`](firmware/esp32p4-dongle/tools/capture_fixtures.py)): requests must encode byte-identically, and the demo device must answer byte-identically (including the scaling output). The demo mode renders correctly in headless Chrome (screenshot checked).
 - **Not yet verified:** the real WebHID permission prompt and dragging the chart in a real browser against the board; DFU and the live calibration mirror are not in the web app yet.
 - **Unrelated:** an SSH key for pushing from this Mac was created at the user's request (`~/.ssh/id_ed25519_anymouse`); the remote is still HTTPS.
+
+### [2026-10-25] - License Adopted (AGPL-3.0) and On-Device Space Budget Measured
+- **License:** the repository is now AGPL-3.0 ([`LICENSE`](LICENSE)), matching the OpenMouse protocol library so its codecs and device catalog can be used directly. All three mouse-information layers (universal info, known-vendor drivers, catalog of names) ship together; see [PLAN.md section 9.1a](firmware/esp32p4-dongle/PLAN.md#91a-decisions-2026-10-25).
+- **Space check on the board** (a throwaway build with the USB host stack and hubs, flashed and read back, then the real firmware restored and re-tested at 48/48): the image grows from 283 KB to 352 KB (+69 KB, 17% of a 2 MB slot) and free internal RAM drops from 559 KB to 553 KB. Porting every OpenMouse family to C would still fit (estimated 0.7 to 1.0 MB total). Details and estimates are in [PLAN.md section 9.4](firmware/esp32p4-dongle/PLAN.md#94-space-and-memory-budget-measured-2026-10-25).
+- **Open question answered:** this ESP-IDF (v5.5.4) supports USB hubs through `CONFIG_USB_HOST_HUBS_SUPPORTED`; it still needs a real hub and mice to confirm (checklist test 10).
+- **Recommended, not yet done:** enlarge the two OTA slots from 2 MB to 4 MB in `partitions.csv`, because the layout can only be changed by a USB reflash.
 ---
 
 ## Where We Left Off (2026-10-25 Handoff, ESP32-P4 dongle)

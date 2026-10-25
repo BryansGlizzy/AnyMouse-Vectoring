@@ -8,6 +8,7 @@ Anisotropic, 8-octant polar sensitivity calibration driven by real-time ballisti
 |:---|:---|
 | **README.md** (this file) | Concept, math, calibration algorithm, the Linux engine (`./anymouse`), and the hardware-dongle overview |
 | [PROGRESS.md](PROGRESS.md) | Dated log of milestones, current status per phase, handoff notes and the roadmap checklist |
+| [LICENSE](LICENSE) | GNU AGPL-3.0, the license for this whole repository (see the License section at the end of this file) |
 | [web/README.md](web/README.md) | AnyMouse Studio, the no-install WebHID front-end for the dongle: run, use, files, tests |
 | [firmware/esp32p4-dongle/README.md](firmware/esp32p4-dongle/README.md) | ESP32-P4 dongle quickstart: cabling, build, flash, recovery |
 | [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md) | ESP32-P4 dongle design: verified hardware, architecture, milestones M0 to M6, risks |
@@ -619,3 +620,11 @@ Limit: the PC-facing controller is Full-Speed, so output to the PC is capped at 
 | Understand the design, milestones and risks | [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md) |
 | See what was tested and when | [PROGRESS.md](PROGRESS.md) |
 | Know what comes next with real mice (auto-discovery, CPI/polling for known mice, generic fallback, acceptance checklist) | [PLAN.md section 9](firmware/esp32p4-dongle/PLAN.md#9-mouse-discovery-device-info-and-hardware-verification) |
+
+---
+
+## License
+
+AnyMouse-Vectoring is licensed under the **GNU Affero General Public License v3.0** ([LICENSE](LICENSE)), the same license as the [OpenMouse protocol library](https://github.com/OpenMouse-Project/mouse-protocol) whose codecs and device catalog this project builds on for mouse detection and control (see [PLAN.md section 9](firmware/esp32p4-dongle/PLAN.md#9-mouse-discovery-device-info-and-hardware-verification)). In short: you may use, study, modify and share it, but a modified version that you distribute or offer to users over a network must make its source available under the same license. This is a summary, not legal advice; the LICENSE file governs.
+
+Hosting `web/` on a public site counts as offering it over a network, so the source must stay available to its users (this repository does that).

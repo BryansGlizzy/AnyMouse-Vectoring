@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AnyMouse Studio</title>
+<meta name="description" content="Tune your AnyMouse dongle's 8-direction sensitivity over USB. No install: Chrome, Edge or Brave.">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-state="disconnected">
+<header class="top">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><use href="icon.svg#mark"/></svg>
+    <h1>AnyMouse Studio</h1>
+  </div>
+  <div class="conn">
+    <span id="chip" class="chip" role="status"><i class="dot"></i><span id="chipText">Not connected</span></span>
+    <button id="btnConnect" class="primary" type="button">Connect dongle</button>
+    <button id="btnDisconnect" type="button" hidden>Disconnect</button>
+  </div>
+</header>
+
+<div id="banner" class="banner" role="alert" hidden></div>
+
+<main>
+  <section class="card radar-card" aria-labelledby="hRadar">
+    <div class="card-head">
+      <h2 id="hRadar">Sensitivity by direction</h2>
+      <label class="switch" title="Bypass sets every direction to 1.0 without touching your profile. Not saved: it resets on power-up.">
+        <input id="bypass" class="dev" type="checkbox"><span>Bypass</span>
+      </label>
+    </div>
+    <div class="radar-wrap">
+      <canvas id="radar" tabindex="0" role="img" aria-label="Polar chart of the eight direction weights. Drag a handle, or use the sliders."></canvas>
+    </div>
+    <p class="hint">Drag a handle. The dashed ring is 1.0, meaning the mouse's own sensitivity. Outward is faster in that direction.</p>
+
+    <div class="tools">
+      <div class="group" aria-label="Presets">
+        <span class="gl">Presets</span>
+        <div id="presets" class="chips"></div>
+      </div>
+      <div class="group">
+        <span class="gl">Master</span>
+        <input id="master" class="dev" type="range" min="0.2" max="3" step="0.01" aria-label="Master scale (average of all directions)">
+        <output id="masterOut">1.00</output>
+      </div>
+      <div class="group">
+        <span class="gl">Link</span>
+        <label class="check" title="Editing a direction also sets its mirror image, east to west"><input id="linkLR" class="dev" type="checkbox"> Left / right</label>
+        <label class="check" title="Editing a direction also sets its mirror image, north to south"><input id="linkUD" class="dev" type="checkbox"> Up / down</label>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="hW">
+    <div class="card-head">
+      <h2 id="hW">Weights</h2>
+      <label class="cpi" title="Your mouse's CPI. Only used to show the effective DPI in each direction; the dongle does not need it.">
+        Mouse CPI <input id="cpi" type="number" min="100" max="50000" step="50" value="800">
+      </label>
+    </div>
+    <div id="rows" class="rows"></div>
+  </section>
+
+  <section class="card" aria-labelledby="hP">
+    <div class="card-head"><h2 id="hP">Profiles on the dongle</h2></div>
+    <div id="slots" class="slots" role="radiogroup" aria-label="Profile slot"></div>
+    <div class="btnrow">
+      <button id="btnLoad" class="dev" type="button">Load</button>
+      <button id="btnSave" class="dev" type="button">Save current to slot</button>
+    </div>
+    <p class="hint">The dongle also saves the active slot by itself two seconds after your last change, and restores it at power-up.</p>
+    <div class="btnrow">
+      <button id="btnExport" class="dev" type="button">Export JSON</button>
+      <button id="btnImport" class="dev" type="button">Import JSON</button>
+      <input id="fileImport" type="file" accept="application/json,.json" hidden>
+      <button id="btnFactory" class="danger dev" type="button">Factory reset</button>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="hS">
+    <div class="card-head"><h2 id="hS">Dongle</h2></div>
+    <dl id="status" class="status"></dl>
+    <details class="dev-tools">
+      <summary>Developer tools</summary>
+      <div class="btnrow">
+        <label>dx <input id="tsDx" type="number" value="100" step="1" min="-32768" max="32767"></label>
+        <label>dy <input id="tsDy" type="number" value="0" step="1" min="-32768" max="32767"></label>
+        <button id="btnScale" class="dev" type="button">Run swipe through the dongle</button>
+      </div>
+      <p id="scaleOut" class="mono muted">Sends a movement through the dongle's real scaling code and shows what comes out. It does not move your cursor.</p>
+      <div class="btnrow">
+        <button id="btnStats" class="dev" type="button">Read counters</button>
+        <button id="btnReboot" class="dev" type="button">Reboot dongle</button>
+      </div>
+      <pre id="statsOut" class="mono muted" hidden></pre>
+    </details>
+  </section>
+</main>
+
+<footer>
+  <span>AnyMouse Studio talks to the dongle over USB (WebHID). Nothing leaves your computer.</span>
+  <a id="demoLink" href="?demo">Try the demo</a>
+</footer>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script type="module" src="app.js"></script>
+</body>
+</html>

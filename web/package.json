@@ -1,0 +1,7 @@
+{
+  "name": "anymouse-web",
+  "private": true,
+  "type": "module",
+  "description": "AnyMouse dongle WebHID Studio (static site, no build step). Tests: npm test",
+  "scripts": { "test": "node --test tests/*.test.mjs" }
+}

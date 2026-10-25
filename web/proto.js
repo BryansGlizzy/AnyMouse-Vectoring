@@ -1,0 +1,54 @@
+// GENERATED from common/amv_dongle_proto.h by firmware/esp32p4-dongle/tools/gen_proto_js.py. Do not edit.
+export const P = {
+  CMD: {
+    GET_INFO: 1,
+    GET_WEIGHTS: 2,
+    SET_WEIGHTS: 3,
+    SAVE_PROFILE: 4,
+    LOAD_PROFILE: 5,
+    SET_BYPASS: 6,
+    GET_STATS: 7,
+    TEST_SCALE: 8,
+    TEST_SELF_CHANGE: 9,
+    REBOOT: 10,
+    FACTORY_RESET: 11,
+    GET_SLOTS: 12,
+    EVENT_STATE: 128,
+  },
+  ST: {
+    OK: 0,
+    BAD_CMD: 1,
+    BAD_LEN: 2,
+    BAD_VALUE: 3,
+    STALE: 4,
+    BAD_SLOT: 5,
+    STORE_ERR: 6,
+    BUSY: 7,
+    EMPTY: 8,
+    BAD_MAGIC: 9,
+  },
+  SRC: {
+    HOST: 0,
+    DEVICE: 1,
+    LOAD: 2,
+    BOOT: 3,
+  },
+  PROTO_VERSION: 1,
+  FRAME_SIZE: 64,
+  HEADER_SIZE: 8,
+  PAYLOAD_MAX: 56,
+  MAGIC0: 65,
+  MAGIC1: 77,
+  VENDOR_USAGE_PAGE: 65357,
+  NUM_SLOTS: 4,
+  USB_VID: 12346,
+  USB_PID: 19798,
+  WEIGHT_MIN: 0.01,
+  WEIGHT_MAX: 5.0,
+  GEN_ANY: 4294967295,
+  TEST_RESET_REM: 1,
+};
+
+export const CMD_NAMES = { 1: 'GET_INFO', 2: 'GET_WEIGHTS', 3: 'SET_WEIGHTS', 4: 'SAVE_PROFILE', 5: 'LOAD_PROFILE', 6: 'SET_BYPASS', 7: 'GET_STATS', 8: 'TEST_SCALE', 9: 'TEST_SELF_CHANGE', 10: 'REBOOT', 11: 'FACTORY_RESET', 12: 'GET_SLOTS', 128: 'EVENT_STATE' };
+export const ST_NAMES = { 0: 'OK', 1: 'BAD_CMD', 2: 'BAD_LEN', 3: 'BAD_VALUE', 4: 'STALE', 5: 'BAD_SLOT', 6: 'STORE_ERR', 7: 'BUSY', 8: 'EMPTY', 9: 'BAD_MAGIC' };
+export const SRC_NAMES = { 0: 'HOST', 1: 'DEVICE', 2: 'LOAD', 3: 'BOOT' };

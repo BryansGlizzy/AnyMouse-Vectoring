@@ -258,6 +258,12 @@ Sister document to [`README.md`](README.md) tracking operational checkpoints, ac
 - **Desktop app:** `src/dongle.c` caches the list and runs mouse writes on the link thread; `hid_query_active_mouse`, `hid_set_mouse_cpi` and `hid_set_mouse_polling_rate` go through the dongle when one is linked and fall back to direct hidraw otherwise; the GUI refreshes when the list changes; `--dongle-status` prints the mice. The whole app compiles on Linux and `make test-dongle` passes 61 checks against a fake dongle. **Not run against the real board over hidraw yet (needs the CachyOS box).**
 - **Board test:** `dongle_test.py` 68/68 with the Razer attached (new: list, count, descriptor fetched in pieces and checked, capabilities, refusals of bad rate and CPI).
 
+### [2026-10-26] - Power-Cycle Check, Interrupted Stability Run, TODO Consolidated
+- **Hand-verified by the user:** profiles saved in the Studio, the whole dongle unplugged and plugged back in: the Studio reconnected by itself and the last used profile was restored from flash. Everything built so far works together (Razer vectoring, mouse card, controls, profiles).
+- **Stability run (not complete):** a 30-minute console log was started at 18:44 (fresh boot). It captured 15,224 reports from the Razer with 0 errors and no reboot of the firmware before the mouse was deliberately unplugged at about 3 minutes, a clean re-enumeration and re-read after replugging, and then ended when the serial port went away during the full power cycle. So the M0 exit test (30 minutes, no host errors) is **still open**; it needs an uninterrupted run with the mouse in use. IDF logs one `USB HOST: Enqueue URB error: ESP_ERR_INVALID_STATE` when a mouse disappears mid-read; it is harmless (the transfer is dropped and the unplug is handled).
+- **Decisions:** the jumper stays on HOST (the hub path is not needed now). Deferred without harm: 4 MB OTA slots and gating the debug commands out of release builds (reasons in PLAN section 8). The user will run the PHY-mapping reset test. A wireless mouse through its receiver and the Linux/FpsAimForge items (calibration through the dongle, desktop app against the board, DFU) are TODO for later.
+- **State of the docs:** PLAN section 8 is now the consolidated status and TODO list.
+
 ---
 
 ## Where We Left Off (2026-10-25 Handoff, ESP32-P4 dongle)
@@ -268,7 +274,7 @@ The active work is Phase 4 on the ESP32-P4. Everything about it is in [`firmware
 
 **Detailed plan for the first session with real mice: [PLAN.md section 9](firmware/esp32p4-dongle/PLAN.md#9-mouse-discovery-device-info-and-hardware-verification)** (auto-discovery of all mice, immediate vectoring, OpenMouse info for the ULX and R3, generic fallback, 15-point acceptance checklist). The short version follows.
 
-**Next session:** mouse information is built (see the "Mouse Information in Three Tiers" entry). Pending: run `./anymouse --dongle-status` and the GUI against the board on the CachyOS box, verify the Finalmouse ULX and Attack Shark R3 drivers and enable their writes, the rest of the section 9.2 checklist, and: the rest of the section 9.2 checklist, `./anymouse --dongle-status` and the guard against the real board on the CachyOS box, calibration push through the dongle, and testing whether a reset restores the default PHY mapping.
+**Next session:** everything built so far works; the open and deferred items are listed in [PLAN.md section 8](firmware/esp32p4-dongle/PLAN.md#8-status-and-todo). In short: an uninterrupted 30-minute run and the hotplug and latency checks, the PHY-mapping reset test, then at home the Linux box, FpsAimForge calibration through the dongle, the Finalmouse and Attack Shark drivers, and DFU. Also: the rest of the section 9.2 checklist, `./anymouse --dongle-status` and the guard against the real board on the CachyOS box, calibration push through the dongle, and testing whether a reset restores the default PHY mapping.
 
 The Linux-engine items below (the 2026-10-23 handoff) are unchanged and still valid.
 

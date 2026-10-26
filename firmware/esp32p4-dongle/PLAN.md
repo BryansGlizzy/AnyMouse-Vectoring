@@ -332,15 +332,28 @@ Unrelated doc drift noticed while planning: README §7 says the UDP weight chann
 
 ---
 
-## 8. Immediate Next Actions
+## 8. Status and TODO
 
-1. ~~Install ESP-IDF v5.5.4; PC-link spike.~~ Done 2026-10-25.
-2. ~~Host-half spike.~~ Done 2026-10-26: IDF `usb_host` on the HS controller (`peripheral_map = 0`) enumerates a real mouse while the FS device side stays up.
-3. ~~USB-A VBUS enable and BOOT GPIO.~~ VBUS is always on (no enable GPIO); BOOT is GPIO35.
-4. Test whether a chip reset restores the default PHY mapping (hold BOOT, tap RST with only the "other" USB-C connected, check for `303A:1001`).
-5. ~~Mouse information.~~ Done 2026-10-26 (all three tiers, Studio and desktop code; see 9.5). Remaining there: verify on the CachyOS box, then Finalmouse/R3 hardware.
-6. Run the rest of the section 9.2 checklist (parity, latency, 8 kHz, hub, hotplug, wireless sleep) and capture real descriptors from the Finalmouse ULX and Attack Shark R3 (the dongle logs them as hex on attach; save them to `tests/descriptors/`).
-7. On the CachyOS box: `./anymouse --dongle-status`, the GUI badge and the guard against the real board; try the Studio in Chrome on Linux (udev rule).
+**Done:** toolchain and PC-facing link (M0), host half, mouse passthrough and vectoring with a real mouse (M1), persistence, vendor protocol with `HELLO`, the Linux link (M3 software side), the web Studio in a real browser (M4), and mouse information in three tiers (section 9). Verified by hand on 2026-10-26: unplugging the whole dongle and plugging it back in restores the last used profile from flash, and the Studio reconnects to it by itself.
+
+**Decided 2026-10-26 (user):**
+- The jumper stays on HOST. The hub path (jumper on DEVICE) is not needed for now; the hub was seen to enumerate, a mouse behind it is untested.
+- Deferred, no harm in waiting: enlarging the two OTA slots from 2 MB to 4 MB (the layout only changes by a cable reflash, but the image is about 0.4 MB and the plan estimates 1 MB at most; NVS keeps its address so profiles would survive), and gating the debug commands `TEST_SCALE` / `TEST_SELF_CHANGE` out of release builds (needed only before the dongle is shared).
+
+**Still open for the current hardware (M0/M1 exit tests):**
+1. **The 30-minute stability run.** A first attempt on 2026-10-26 was cut short at about 4 minutes by a deliberate unplug: 15,224 reports, 0 USB errors, a clean re-enumeration on replug (one harmless `USB HOST: Enqueue URB error: ESP_ERR_INVALID_STATE` is logged by IDF when a mouse disappears while a read is being re-queued). It needs an uninterrupted run with the mouse in use.
+2. **Reset restores the default PHY mapping?** (user will test): hold BOOT, tap RST with only the non-UART USB-C connected, look for `303A:1001`. Needed to know whether the "other" USB-C can ever flash again without the UART cable.
+3. **Rest of the section 9.2 checklist:** 50 hotplug cycles and unplug with a button held (no stuck buttons), a real keyboard ignored, count parity against a direct connection, the 1000-click test, latency (median and p99, dongle timestamps plus a logic analyzer once), power with a wireless receiver.
+4. **A wireless mouse through its receiver** (a different mouse, later): extended polling rates (the Razer receiver `1532:0088` driver paths are written but untested).
+5. **Save more real descriptors** into `tests/descriptors/` from each new mouse (the Studio's Download descriptor button does it).
+
+**TODO, later (at home / with FpsAimForge or other hardware):**
+6. **Linux box:** run `./anymouse --dongle-status`, the GUI and the guard against the real board; try the Studio in Chrome on Linux (udev rule); `src/evdev_rt.c` onto `common/amv_octant.h` plus `make test-common` golden vectors (M2).
+7. **Calibration through the dongle (M3):** `STREAM_DIR` and `PUSH_CALIB` commands, forwarding the calibration snapshot from `src/calibration.c` through `src/dongle.c`, the Studio's read-only calibration mirror, and the FpsAimForge convergence test with the dongle.
+8. **Finalmouse ULX and Attack Shark R3** through the dongle: verify their drivers, then add them to the verified list so writes are enabled.
+9. **Firmware update over the vendor channel (M5):** DFU commands, inactive-slot write with CRC, rollback self-test, task watchdog, brown-out, core dump, 8-hour soak.
+10. **Release housekeeping:** request a PID from Espressif before sharing builds (the dev PID is a placeholder), gate the debug commands, enlarge the OTA slots, and decide on 4 MB-slot migration.
+11. **M6 stretch goals:** vendor-command tunnel, extra downstream interfaces, a Windows companion, optional identity cloning, a WebUSB landing page.
 
 ---
 

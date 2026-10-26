@@ -180,6 +180,8 @@ static void print_usage(const char *prog) {
     printf("  --cpi <value>        Set physical mouse sensor CPI on startup (e.g. 3200 or 6400)\n");
     printf("  --probe-hw           Query connected mouse hardware telemetry over /dev/hidraw and exit\n");
     printf("  --list-devices       List detected mice (auto-selection order) and exit\n");
+    printf("  --dongle-status      Find the AnyMouse hardware dongle, verify it, print its state and exit\n");
+    printf("  --dongle-bypass on|off  Switch the dongle's bypass (all weights 1.0, profile kept) and exit\n");
     printf("  --faf-status         Show FpsAimForge (Steam) plugin & bundle install status and exit\n");
     printf("  --install-faf        Install/repair the FpsAimForge launcher, plugin and AnyMouse bundle\n");
     printf("  --uninstall-faf      Restore the original FpsAimForge binary and remove the AnyMouse files\n");
@@ -188,8 +190,11 @@ static void print_usage(const char *prog) {
     printf("  -h, --help           Show this help message\n");
 }
 
-static int run_cli_action(const char *action) {
+static int run_cli_action(const char *action, const char *action_arg) {
     char msg[512];
+    if (strcmp(action, "--dongle-status") == 0 || strcmp(action, "--dongle-bypass") == 0) {
+        return dongle_cli(action, action_arg);
+    }
     if (strcmp(action, "--list-devices") == 0) {
         mouse_device_t list[DEVICES_MAX];
         int n = devices_enumerate(list, DEVICES_MAX);
@@ -199,10 +204,11 @@ static int run_cli_action(const char *action) {
         }
         printf("Detected mice (first = auto-selected):\n");
         for (int i = 0; i < n; i++) {
-            printf("  %s %-40s %04x:%04x score=%-4d %s%s\n", i == 0 ? "*" : " ",
+            printf("  %s %-40s %04x:%04x score=%-4d %s%s%s\n", i == 0 && !list[i].is_dongle ? "*" : " ",
                    list[i].name, list[i].vid, list[i].pid, list[i].score,
                    devices_preferred_path(&list[i]),
-                   list[i].hw_supported ? "  [hardware controls]" : "");
+                   list[i].hw_supported ? "  [hardware controls]" : "",
+                   list[i].is_dongle ? "  [AnyMouse dongle output: vectored in hardware, never grabbed]" : "");
         }
         return 0;
     }
@@ -227,6 +233,7 @@ int main(int argc, char **argv) {
     bool auto_cal = false;
     bool probe_only = false;
     const char *action = NULL;
+    const char *action_arg = NULL;
     int  startup_cpi = 0;
     float base_scale = 0.25f;
     const char *dev_path = NULL;
@@ -245,8 +252,11 @@ int main(int argc, char **argv) {
             probe_only = true;
         } else if (strcmp(argv[i], "--list-devices") == 0 || strcmp(argv[i], "--faf-status") == 0 ||
                    strcmp(argv[i], "--install-faf") == 0 || strcmp(argv[i], "--uninstall-faf") == 0 ||
-                   strcmp(argv[i], "--install-udev") == 0) {
+                   strcmp(argv[i], "--install-udev") == 0 || strcmp(argv[i], "--dongle-status") == 0) {
             action = argv[i];
+        } else if (strcmp(argv[i], "--dongle-bypass") == 0) {
+            action = argv[i];
+            action_arg = i + 1 < argc ? argv[++i] : NULL;
         } else if (strcmp(argv[i], "--preset") == 0 && i + 1 < argc) {
             preset = argv[++i];
         } else if (strcmp(argv[i], "--cpi") == 0 && i + 1 < argc) {
@@ -268,7 +278,7 @@ int main(int argc, char **argv) {
     }
 
     if (action) {
-        return run_cli_action(action);
+        return run_cli_action(action, action_arg);
     }
 
     /* Restore the last session's weights unless the command line asked for specific ones.
@@ -320,6 +330,10 @@ int main(int argc, char **argv) {
     pthread_t cal_tid;
     pthread_create(&cal_tid, NULL, calibration_thread, NULL);
 
+    /* Launch the AnyMouse dongle link (discovery, guard, weight sync) */
+    pthread_t dongle_tid;
+    pthread_create(&dongle_tid, NULL, dongle_thread, NULL);
+
     /* If DISPLAY and WAYLAND_DISPLAY are unset (or running under sudo without display env), check headless */
     if (!headless && getenv("DISPLAY") == NULL && getenv("WAYLAND_DISPLAY") == NULL) {
         printf("[INFO] No DISPLAY/WAYLAND_DISPLAY in environment; running in --headless CLI mode.\n");
@@ -338,6 +352,7 @@ int main(int argc, char **argv) {
 
     pthread_join(rt_tid, NULL);
     pthread_join(cal_tid, NULL);
+    pthread_join(dongle_tid, NULL);
 
     if (persist_profile) {
         char used[PATH_MAX + 32];

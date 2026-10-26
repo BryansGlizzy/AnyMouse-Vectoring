@@ -33,9 +33,9 @@ idf.py -p <UART USB-C port> flash monitor     # macOS: /dev/cu.usbmodem<serial>;
 With both USB-C cables connected and the firmware flashed:
 ```bash
 pip install hidapi
-python3 -I firmware/esp32p4-dongle/tools/dongle_test.py          # 48 checks over the vendor-HID channel
+python3 -I firmware/esp32p4-dongle/tools/dongle_test.py          # 56 checks over the vendor-HID channel
 cc -std=c11 -Wall -Wextra -Icommon firmware/esp32p4-dongle/tests/test_octant.c -lm -o /tmp/test_octant && /tmp/test_octant   # from the repo root
 ```
-`dongle_test.py` covers host-to-device writes (valid, invalid, stale), device-to-host events, bypass, profile slots, factory reset, the real scaling code against an independent reference, and persistence across a reboot. It leaves the dongle at factory defaults. Protocol constants are parsed from [`common/amv_dongle_proto.h`](../../common/amv_dongle_proto.h), which is the protocol's reference.
+`dongle_test.py` covers the `HELLO` identity handshake, host-to-device writes (valid, invalid, stale), device-to-host events, bypass, profile slots, factory reset, the real scaling code against an independent reference, and persistence across a reboot. It leaves the dongle at factory defaults. Protocol constants are parsed from [`common/amv_dongle_proto.h`](../../common/amv_dongle_proto.h), which is the protocol's reference.
 
 **Status of the debug commands:** `TEST_SCALE` and `TEST_SELF_CHANGE` are in the firmware only for this testing; they do not move your cursor. They should be gated out of release builds.

@@ -13,6 +13,13 @@
  *
  * Replies echo cmd and seq. Asynchronous events use cmd AMV_CMD_EVENT_STATE, seq 0.
  *
+ * Identity: a host decides that a device is an AnyMouse dongle from the HELLO handshake,
+ * never from its USB VID:PID (those change between development and production builds).
+ * The host sends a random nonce; the dongle answers with AMV_HELLO_IDENT, the same nonce
+ * and its capabilities. Only a live implementation of this protocol can echo the nonce, so
+ * an unrelated device that happens to use the same usage page is not mistaken for a dongle.
+ * AMV_VENDOR_USAGE_PAGE is the only thing a host matches before asking.
+ *
  * Only plain "#define NAME number" lines are parsed by tools/dongle_test.py, so keep
  * constants in that form.
  */
@@ -28,6 +35,7 @@
 #define AMV_MAGIC0            0x41
 #define AMV_MAGIC1            0x4D
 #define AMV_VENDOR_USAGE_PAGE 0xFF4D
+#define AMV_VENDOR_USAGE      0x01   /* application collection usage on that page */
 #define AMV_NUM_SLOTS         4
 
 /* USB identity of the dev build (PLAN.md section 6: replace the PID before sharing builds). */
@@ -54,6 +62,7 @@
 #define AMV_CMD_REBOOT           0x0A
 #define AMV_CMD_FACTORY_RESET    0x0B
 #define AMV_CMD_GET_SLOTS        0x0C   /* reply: 1 byte, bit n set if slot n holds a valid saved profile */
+#define AMV_CMD_HELLO            0x0D   /* identity handshake (see top of file); firmware 0.4.0+ */
 #define AMV_CMD_EVENT_STATE      0x80   /* async: state changed (any source) */
 
 /* Status codes in replies */
@@ -73,6 +82,14 @@
 #define AMV_SRC_DEVICE     1
 #define AMV_SRC_LOAD       2
 #define AMV_SRC_BOOT       3
+
+/* HELLO reply identity word: bytes 'A' 'M' 'V' 'D' (AnyMouse Vectoring Dongle) little-endian */
+#define AMV_HELLO_IDENT    0x44564D41
+#define AMV_HELLO_NONCE_LEN 8
+
+/* HELLO capability bits */
+#define AMV_CAP_VECTORED_MOUSE 0x0001   /* the HID mouse on this USB device already carries vectored motion */
+#define AMV_CAP_MOUSE_HOST     0x0002   /* a downstream mouse can be attached (USB host side present) */
 
 /* TEST_SCALE request flags */
 #define AMV_TEST_RESET_REM 0x01
@@ -112,6 +129,21 @@ typedef struct __attribute__((packed)) {
     uint32_t uptime_ms;
 } amv_info_payload_t;
 
+/* HELLO request: 8 bytes. */
+typedef struct __attribute__((packed)) {
+    uint8_t  nonce[AMV_HELLO_NONCE_LEN];
+} amv_hello_req_t;
+
+/* HELLO reply. 24 bytes. */
+typedef struct __attribute__((packed)) {
+    uint32_t ident;       /* AMV_HELLO_IDENT */
+    uint8_t  nonce[AMV_HELLO_NONCE_LEN];   /* copied from the request */
+    uint8_t  proto_ver;
+    uint8_t  fw_major, fw_minor, fw_patch;
+    uint16_t caps;        /* AMV_CAP_* */
+    uint8_t  mac[6];      /* stable per-unit id */
+} amv_hello_rep_t;
+
 /* GET_STATS reply. 32 bytes. */
 typedef struct __attribute__((packed)) {
     uint32_t sets_ok, stale_rejects, bad_value_rejects, saves;
@@ -143,6 +175,8 @@ _Static_assert(sizeof(amv_event_payload_t) == 39, "event payload size");
 _Static_assert(sizeof(amv_set_weights_req_t) == 36, "set weights size");
 _Static_assert(sizeof(amv_info_payload_t) == 18, "info size");
 _Static_assert(sizeof(amv_stats_payload_t) == 32, "stats size");
+_Static_assert(sizeof(amv_hello_req_t) == 8, "hello req size");
+_Static_assert(sizeof(amv_hello_rep_t) == 24, "hello rep size");
 _Static_assert(sizeof(amv_test_scale_req_t) == 5, "test scale req size");
 _Static_assert(sizeof(amv_test_scale_rep_t) == 17, "test scale rep size");
 _Static_assert(sizeof(amv_test_self_change_req_t) == 7, "self change size");

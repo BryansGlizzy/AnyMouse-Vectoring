@@ -5,7 +5,7 @@
 #define AMV_HID_INSTANCE_VENDOR 1
 
 #define AMV_FW_MAJOR 0
-#define AMV_FW_MINOR 3
+#define AMV_FW_MINOR 4
 #define AMV_FW_PATCH 0
 
 /* Starts the protocol task and subscribes to state-change events. Call after amv_ctrl_init(). */

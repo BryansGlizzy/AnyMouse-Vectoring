@@ -358,7 +358,7 @@ static bool write_text(const char *path, const char *text) {
 
 /*
  * Grants the logged-in seat user (uaccess) access to mice, the two supported
- * vendor config interfaces and /dev/uinput, so the engine can run without sudo
+ * vendor config interfaces, the AnyMouse dongle and /dev/uinput, so the engine can run without sudo
  * (it then uses the normal scheduler instead of SCHED_FIFO).
  */
 bool udev_install_rules(char *msg, size_t msg_sz) {
@@ -373,7 +373,10 @@ bool udev_install_rules(char *msg, size_t msg_sz) {
         "SUBSYSTEM==\"input\", KERNEL==\"event*\", ENV{ID_INPUT_MOUSE}==\"1\", TAG+=\"uaccess\"\n"
         "# Vendor configuration interfaces (CPI / polling rate)\n"
         "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"361d\", TAG+=\"uaccess\"\n"
-        "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"3151\", TAG+=\"uaccess\"\n";
+        "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"3151\", TAG+=\"uaccess\"\n"
+        "# AnyMouse dongle control channel (also used by AnyMouse Studio in the browser).\n"
+        "# Access only: the app identifies the dongle by its protocol handshake, not by this match.\n"
+        "SUBSYSTEM==\"hidraw\", ATTRS{manufacturer}==\"AnyMouse\", TAG+=\"uaccess\"\n";
 
     if (!write_text("/etc/udev/rules.d/70-anymouse.rules", RULES)) {
         snprintf(msg, msg_sz, "Failed writing /etc/udev/rules.d/70-anymouse.rules: %s", strerror(errno));

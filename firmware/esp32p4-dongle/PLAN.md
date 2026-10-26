@@ -190,11 +190,11 @@ Each milestone has an exit test. Nothing moves on until its test passes on real 
 | M0 PC-facing link | **Done** (device half). Host half (mouse on the USB-A port) waits for a real mouse |
 | M1 passthrough | Not started: needs the host half (descriptor parser, `usb_host`, accumulator, button queue) |
 | M2 vectoring + persistence | **Mostly done without a mouse:** `common/amv_octant.h`, seqlock weights, NVS slots with CRC, auto-save. Not done: wiring scaled deltas to the PC mouse report; switching `src/evdev_rt.c` to the shared header (cannot be built or tested off-Linux) |
-| M3 vendor protocol + engine | **Firmware side done and tested** (44/44 checks, `tools/dongle_test.py`). Not done: `src/dongle.c` in the Linux engine, the double-scaling guard, FAF calibration through the dongle |
+| M3 vendor protocol + engine | **Firmware side done and tested** (56/56 checks on the board, firmware 0.4.0, `tools/dongle_test.py`). **Linux side built (2026-10-26):** `src/dongle.c` (handshake discovery, weight sync), the double-scaling guard, CLI, GUI badge, udev rule; 44 link checks pass on Linux against a fake dongle (`make test-dongle`). Not done: the C client exercised against the real board over hidraw, the web page moved to the `HELLO` handshake, FAF calibration through the dongle |
 | M4 Web Studio | **Built** in [`web/`](../../web/README.md): chart, weights, presets, slots, import/export, demo mode, 16 Node tests against recorded frames. Not yet exercised in a real browser against the board; firmware update (DFU) and the live calibration mirror are not in it yet |
 | M5 hardening / DFU | Not started (partition table with two OTA slots already in place) |
 
-**Built so far** (firmware 0.3.0; protocol additions since the first test: `GET_SLOTS`, `AMV_USB_VID/PID` in the header; 48 firmware checks): components `amv_common` (links repo-level `common/`), `amv_store`, `amv_ctrl`, `amv_proto`, `amv_usb_device`; `tools/dongle_test.py`, `tools/gen_proto_js.py`, `tools/capture_fixtures.py`; `tests/test_octant.c`; and the web app in `web/`. Debug-only protocol commands `TEST_SCALE` and `TEST_SELF_CHANGE` let the host exercise the real scaling code and the device-to-host event path without a mouse; they should be compiled out (or gated) in release builds.
+**Built so far** (firmware 0.4.0; protocol additions since the first test: `GET_SLOTS`, `AMV_USB_VID/PID`, and the `HELLO` identity handshake in the header; 56 firmware checks; Linux link tests in `tests/test_dongle_link.c`): components `amv_common` (links repo-level `common/`), `amv_store`, `amv_ctrl`, `amv_proto`, `amv_usb_device`; `tools/dongle_test.py`, `tools/gen_proto_js.py`, `tools/capture_fixtures.py`; `tests/test_octant.c`; and the web app in `web/`. Debug-only protocol commands `TEST_SCALE` and `TEST_SELF_CHANGE` let the host exercise the real scaling code and the device-to-host event path without a mouse; they should be compiled out (or gated) in release builds.
 
 ### M0 — Bring-up and the PC-link gate *(blocks everything)*
 1. Install ESP-IDF v5.5.4. Build and flash `hello_world` for `esp32p4` (rev<3 option) over **both** USB-C ports and confirm the console on each.
@@ -235,7 +235,7 @@ Each milestone has an exit test. Nothing moves on until its test passes on real 
 - **Exit:** a profile set over the console survives power cycles; a vertical-boost preset visibly changes vertical vs. horizontal sensitivity; golden-vector tests pass on both targets.
 
 ### M3 — Vendor HID protocol + Linux engine integration (live FpsAimForge calibration)
-1. `common/amv_dongle_proto.h` (**implemented, protocol v1**): 64-byte frames, an 8-byte header `{magic 'A' 'M', proto_ver, cmd, seq, status, len, reserved}` plus up to 56 bytes of payload. Replies echo `cmd` and `seq` and carry a status code; changes are announced to every client by an async `EVENT_STATE` frame tagged with its source (host, device, load, boot). The implemented command set is `GET_INFO`, `GET_WEIGHTS`, `SET_WEIGHTS` (with `base_gen`, stale writes get `STALE` plus the current state), `SAVE_PROFILE`, `LOAD_PROFILE`, `SET_BYPASS`, `GET_STATS`, `FACTORY_RESET`, `REBOOT`, and the debug commands `TEST_SCALE` / `TEST_SELF_CHANGE`; the header is the authority. The original design list follows; items not yet implemented are `STREAM_DIR`, `PUSH_CALIB`, the DFU commands and the Wi-Fi ones (dropped). Original list:
+1. `common/amv_dongle_proto.h` (**implemented, protocol v1**): 64-byte frames, an 8-byte header `{magic 'A' 'M', proto_ver, cmd, seq, status, len, reserved}` plus up to 56 bytes of payload. Replies echo `cmd` and `seq` and carry a status code; changes are announced to every client by an async `EVENT_STATE` frame tagged with its source (host, device, load, boot). The implemented command set is `GET_INFO`, `GET_WEIGHTS`, `SET_WEIGHTS` (with `base_gen`, stale writes get `STALE` plus the current state), `SAVE_PROFILE`, `LOAD_PROFILE`, `SET_BYPASS`, `GET_STATS`, `FACTORY_RESET`, `REBOOT`, `GET_SLOTS`, `HELLO` (identity handshake, see M3 item 2), and the debug commands `TEST_SCALE` / `TEST_SELF_CHANGE`; the header is the authority. The original design list follows; items not yet implemented are `STREAM_DIR`, `PUSH_CALIB`, the DFU commands and the Wi-Fi ones (dropped). Original list:
    - `GET_INFO` (fw version, proto version, chip rev, downstream mouse VID:PID/name, input rate)
    - `GET_WEIGHTS`, `SET_WEIGHTS{base_gen, weights[8]}` → `ACK{new_gen}` / `NACK{reason, current_gen}`
    - `SAVE_PROFILE{slot}`, `LOAD_PROFILE{slot}`, `SET_BYPASS{on}`
@@ -245,11 +245,11 @@ Each milestone has an exit test. Nothing moves on until its test passes on real 
    - DFU commands (see M5) and `REBOOT{to_bootloader?}`
    - Async IN event: `WEIGHTS_CHANGED{gen, weights[8]}`.
 2. Linux engine, new `src/dongle.c`:
-   - Find the dongle by VID:PID plus the `0xFF4D` vendor collection (reusing `descriptor_has_collection()` in `src/hid_driver.c`).
-   - A sync thread polls `g_state.octant_weights` at 50 Hz, diffs, and pushes changes. Polling means none of the existing writers (GUI, calibration, presets, profile load, UDP) need to change.
-   - It applies incoming `WEIGHTS_CHANGED` events to `g_state`, and forwards the calibration snapshot after each round.
-3. **Double-scaling guard (critical):** `devices.c` gives the dongle a "never grab" rank. While a dongle is attached, `evdev_rt` stays idle instead of grabbing another mouse, unless the user picks one explicitly. The GUI shows "Vectoring: Dongle" instead of "Vectoring: Software".
-4. CLI: `./anymouse --dongle-status`, `--dongle-bypass on|off`. `--install-udev` gains rules for the dongle (needed for hidraw access by the app **and** by the browser's WebHID on Linux).
+   - **Identity is proven by the protocol, never by USB VID:PID** (those change between development and production builds). The `0xFF4D` vendor collection (found with `hid_descriptor_has_collection()` in `src/hid_driver.c`) only makes an interface a *candidate*. The host then sends `HELLO` with a random 8-byte nonce; the dongle answers with the identity word `AMVD`, the same nonce, protocol and firmware versions, capability bits (`AMV_CAP_VECTORED_MOUSE`, `AMV_CAP_MOUSE_HOST`) and its MAC. Firmware older than `HELLO` (0.3.x) is recognised by a well-formed `GET_INFO` reply and flagged for update. A different protocol version is reported as incompatible; a device that fails the handshake is treated as an ordinary device.
+   - A sync thread (50 Hz) diffs `g_state.octant_weights` against the last state agreed with the dongle and pushes changes with `SET_WEIGHTS`, using the same 0.01..5.0 rule as the firmware (checked on the float bits, because the engine builds with `-ffast-math`). Polling means none of the existing writers (GUI, calibration, presets, profile load) need to change. On connect the engine adopts the dongle's weights; a `STALE` reply makes the dongle's state win.
+   - It applies incoming `EVENT_STATE` frames to `g_state` (bumping `dongle_weights_rev` so the GUI re-syncs), ignoring the echo of its own writes. Forwarding the calibration snapshot after each round is still to do.
+3. **Double-scaling guard (critical, built 2026-10-26):** the mouse interface on the same USB device as a candidate is flagged `is_dongle` and never auto-grabbed, and the GUI shows "Vectoring: Dongle". It fails safe: an unverified, silent, unopenable or incompatible candidate still guards its mouse. Only a candidate that fails the handshake (an unrelated device on the same usage page) or a verified dongle that reports no vectored output releases it. While a dongle vectors, automatic selection grabs nothing (the engine reports "software engine idle"); explicitly choosing the dongle's mouse is refused with a message, while choosing another mouse still works.
+4. CLI: `./anymouse --dongle-status`, `--dongle-bypass on|off` (built). `--install-udev` adds a hidraw `uaccess` rule matching the `AnyMouse` USB manufacturer string; it only grants access, identification stays with the handshake (needed for hidraw access by the app **and** by the browser's WebHID on Linux; untested on a real udev system).
 - **Exit:**
   - A full `AnyMouse Calibration Suite` session in FpsAimForge with auto-adapt on converges as it does with software vectoring (r̃_k within noise of 1.0 by round 8–12).
   - Weights on both sides match by generation number after the session.
@@ -258,7 +258,7 @@ Each milestone has an exit test. Nothing moves on until its test passes on real 
 ### M4 — Web Studio (WebHID, port of the GTK GUI)
 1. `web/`: a static single-page app in vanilla JS + canvas, no framework, no CDN. Target under 150 KB before gzip. Protocol constants generated from `common/amv_dongle_proto.h` by `firmware/esp32p4-dongle/tools/gen_proto_js.py`.
 2. Features, in priority order:
-   - **Connect:** `navigator.hid.requestDevice` filtered to the dongle's VID:PID and the `0xFF4D` usage page; auto-reconnect to a previously granted device on page load.
+   - **Connect:** `navigator.hid.requestDevice` filtered to the `0xFF4D` usage page, then verified with `HELLO` (today `web/` still filters on VID:PID as well; moving it to usage page plus `HELLO` is the next web change, so a production PID does not break it); auto-reconnect to a previously granted device on page load.
    - **Polar radar:** draggable handles, the same rendering conventions as `gui_gtk4.c`, and the live input-direction needle.
    - **Weight controls:** 8 sliders + numeric fields, master scale, ±symmetry links, presets (Neutral, Vertical Boost, Horizontal Boost, Diagonal ULX, Low, matching `core_apply_preset`).
    - **Profiles:** 4 slots, save/load, JSON export/import compatible with `profile.json` from the Linux engine.
@@ -293,12 +293,12 @@ Each milestone has an exit test. Nothing moves on until its test passes on real 
 |:---|:---|:---|
 | `common/amv_octant.h` | New: scale math shared with firmware | M2 |
 | `src/evdev_rt.c` | Use `common/amv_octant.h`; stay idle when a dongle owns vectoring | M2, M3 |
-| `src/dongle.c` (new) | Discovery, sync thread, event handling, calib push | M3 |
-| `src/devices.c` | Exclude the dongle from auto-grab; flag it in `--list-devices` | M3 |
-| `src/gui_gtk4.c` | "Vectoring: Dongle" badge, dongle status row | M3 |
-| `src/main.c` | `--dongle-status`, `--dongle-bypass` | M3 |
-| `src/steam_install.c` (udev) | Add dongle VID:PID to the uaccess rules | M3 |
-| `Makefile` | Add `-Icommon`; `make test-common` runs the golden vectors | M2 |
+| `src/dongle.c` (new) | Handshake discovery, guard, sync thread, event handling, CLI. Calib push still to do | M3 (built) |
+| `src/devices.c` | Exclude the dongle from auto-grab; flag it in `--list-devices` | M3 (built) |
+| `src/gui_gtk4.c` | "Vectoring: Dongle" badge, dongle status row | M3 (built) |
+| `src/main.c` | `--dongle-status`, `--dongle-bypass` | M3 (built) |
+| `src/steam_install.c` (udev) | Add a dongle hidraw uaccess rule (by manufacturer string, not VID:PID) | M3 (built) |
+| `Makefile` | Add `-Icommon`; `make test-common` runs the golden vectors (M2, to do); `make test-dongle` runs the dongle link and guard tests (built) | M2, M3 |
 
 Unrelated doc drift noticed while planning: README §7 says the UDP weight channel was removed, but `src/evdev_rt.c` still listens on UDP 42069. Left alone; the dongle sync doesn't depend on it.
 
@@ -306,7 +306,7 @@ Unrelated doc drift noticed while planning: README §7 says the UDP weight chann
 
 ## 6. USB Identity
 
-- **Development:** Espressif VID `0x303A` with a placeholder PID, product string "AnyMouse Vectoring Dongle", and serial number from the P4 MAC. Note that the board's built-in Serial/JTAG already uses `303A:1001`, so the dongle's own PID must differ.
+- **Development:** Espressif VID `0x303A` with a placeholder PID, product string "AnyMouse Vectoring Dongle", and serial number from the P4 MAC. Note that the board's built-in Serial/JTAG already uses `303A:1001`, so the dongle's own PID must differ. Host software does not rely on these IDs to recognise the dongle: it uses the `HELLO` handshake (M3), so the production PID can change without breaking `./anymouse`.
 - **Before sharing builds with anyone else:** request a free PID from Espressif's `espressif/usb-pids` program for `0x303A`.
 - **KDE note:** KWin keys per-device pointer settings on VID:PID (the same issue the engine solved with `EVIOCGID` cloning). Set the dongle to the Flat profile once in System Settings. On Windows, turn off "Enhance pointer precision".
 
@@ -324,7 +324,7 @@ Unrelated doc drift noticed while planning: README §7 says the UDP weight chann
 | Windows exclusive HID access when app and web page both run | Medium | Clear "in use" message; generation counter keeps state consistent across sequential use |
 | DFU interrupted mid-update | Low | Inactive slot only, CRC check, rollback; UART/Serial-JTAG recovery always works |
 | Pre-v3 silicon errata or dropped support in newer IDF | Low–Med | Pin IDF v5.5.4; never update IDF mid-milestone |
-| Double scaling (dongle + software engine both active) | High if unguarded | M3 guard + GUI badge + test |
+| Double scaling (dongle + software engine both active) | High if unguarded | Guard built 2026-10-26 (handshake-based, fails safe), GUI badge, 44 tests on Linux; still to confirm on real hardware |
 | Unusual report descriptors (12-bit packed X/Y, multiple report IDs, vendor-defined mouse) | Medium | Table-driven parser plus a descriptor test corpus; log unknown layouts |
 | Competitive-play rules | Low | Directional sensitivity scaling is in the same category as Raw Accel or on-mouse sensitivity; check the specific tournament's hardware rules |
 
@@ -409,7 +409,7 @@ The question: is there room on the dongle for discovery, the device catalog, the
 
 | Item | Flash image | Free internal RAM (board, idle) |
 |:---|---:|---:|
-| Current firmware (control plane + PC-side USB), 0.3.0 | 283 KB (13.8% of a 2 MB OTA slot) | 559 KB |
+| Control plane + PC-side USB, 0.3.0 (0.4.0 adds only `HELLO`) | 283 KB (13.8% of a 2 MB OTA slot) | 559 KB |
 | Same plus the USB host stack **with hub support** (a throwaway build run on the board) | 352 KB (17%): **+69 KB** | 553 KB: **-6 KB** |
 
 The chip has 16 MB flash, 576 KB internal RAM (about 575 KB shown as free at boot) and 32 MB PSRAM. The current partition table uses 2 x 2 MB for the two OTA slots and leaves about 12 MB of flash unused. PSRAM is not enabled in the build; the hot path should stay in internal RAM anyway.

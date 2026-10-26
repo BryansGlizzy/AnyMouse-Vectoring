@@ -27,6 +27,10 @@ The browser needs permission to open the dongle's `/dev/hidraw*` node:
 echo 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4d56", TAG+="uaccess"' | sudo tee /etc/udev/rules.d/71-anymouse-dongle.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger --action=add --subsystem-match=hidraw
 ```
+`./anymouse --install-udev` installs an equivalent rule keyed on the `AnyMouse` manufacturer string, which keeps working if the dongle's USB ID changes.
+
+**Known gap:** this page still filters on the dongle's VID:PID. The native app identifies the dongle with the `HELLO` protocol handshake instead; the web page should follow (usage-page filter, then `HELLO`) before a production PID is used.
+
 Flatpak and Snap browsers cannot see hidraw devices; use a native package. On Windows, only one program can hold the dongle's HID interface at a time, so close the native app first.
 
 ## Files

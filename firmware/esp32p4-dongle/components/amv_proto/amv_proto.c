@@ -215,6 +215,19 @@ static void handle_request(const uint8_t *in, uint8_t out[AMV_FRAME_SIZE])
         build_frame(out, cmd, seq, AMV_ST_OK, &mask, 1);
         break;
     }
+    case AMV_CMD_HELLO: {
+        if (len != sizeof(amv_hello_req_t)) {
+            build_frame(out, cmd, seq, AMV_ST_BAD_LEN, NULL, 0);
+            break;
+        }
+        amv_hello_rep_t p = { .ident = AMV_HELLO_IDENT, .proto_ver = AMV_PROTO_VERSION,
+                              .fw_major = AMV_FW_MAJOR, .fw_minor = AMV_FW_MINOR, .fw_patch = AMV_FW_PATCH,
+                              .caps = AMV_CAP_VECTORED_MOUSE };
+        memcpy(p.nonce, pl, sizeof(p.nonce));
+        esp_efuse_mac_get_default(p.mac);
+        build_frame(out, cmd, seq, AMV_ST_OK, &p, sizeof(p));
+        break;
+    }
     case AMV_CMD_FACTORY_RESET: {
         amv_result_t r = amv_ctrl_factory_reset(AMV_SRC_HOST, &st);
         if (r != AMV_R_OK) amv_ctrl_get_state(&st);

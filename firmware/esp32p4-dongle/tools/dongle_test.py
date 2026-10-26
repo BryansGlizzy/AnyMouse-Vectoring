@@ -197,6 +197,22 @@ def main():
     check("MAC is the board's efuse MAC", i["mac"] == "30:ed:a0:ea:6c:ab", i["mac"])
     check("chip rev reported", i["chip_rev"] > 0, f"{i['chip_rev']}")
 
+    print("== HELLO handshake (identity is proven by the protocol, not by VID:PID) ==")
+    nonce = bytes(rnd.randrange(256) for _ in range(C["AMV_HELLO_NONCE_LEN"]))
+    s, b = d.request(C["AMV_CMD_HELLO"], nonce)
+    check("HELLO ok", s == 0, f"status {s}")
+    ident, rn, pv, fa, fb, fc, caps, hmac = struct.unpack("<I8sBBBBH6s", b[:24])
+    check("identity word is 'AMVD'", ident == C["AMV_HELLO_IDENT"] and b[:4] == b"AMVD", f"{ident:#x}")
+    check("nonce echoed", rn == nonce)
+    check("proto version and fw agree with GET_INFO", pv == i["proto"] and (fa, fb, fc) == tuple(i["fw"]))
+    check("vectored-mouse capability set", bool(caps & C["AMV_CAP_VECTORED_MOUSE"]), f"caps {caps:#x}")
+    check("HELLO MAC matches GET_INFO", hmac.hex(":") == i["mac"])
+    nonce2 = bytes(rnd.randrange(256) for _ in range(C["AMV_HELLO_NONCE_LEN"]))
+    s, b2 = d.request(C["AMV_CMD_HELLO"], nonce2)
+    check("a fresh nonce is echoed fresh", s == 0 and b2[4:12] == nonce2 != nonce)
+    s, _ = d.request(C["AMV_CMD_HELLO"], b"\x01\x02")
+    check("short HELLO rejected", s == C["AMV_ST_BAD_LEN"], f"status {s}")
+
     print("== framing errors ==")
     bad = bytearray(d._frame(C["AMV_CMD_GET_WEIGHTS"]))
     bad[0] = 0x00

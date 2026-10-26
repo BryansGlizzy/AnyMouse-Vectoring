@@ -53,7 +53,7 @@ static bool read_cap(const char *event_name, const char *cap, char *out, size_t 
 }
 
 /* Extract ".../usbN/N-P" (the physical USB device, shared by all its interfaces) */
-static void usb_parent_of(const char *real, char *out, size_t out_sz) {
+void devices_usb_parent_of(const char *real, char *out, size_t out_sz) {
     out[0] = '\0';
     const char *p = strstr(real, "/usb");
     if (!p) return;
@@ -80,7 +80,7 @@ static bool usb_parent_has_keyboard(const char *usb_parent) {
         snprintf(link, sizeof(link), "/sys/class/input/%s/device", ent->d_name);
         if (!realpath(link, real)) continue;
         char parent[128];
-        usb_parent_of(real, parent, sizeof(parent));
+        devices_usb_parent_of(real, parent, sizeof(parent));
         if (strcmp(parent, usb_parent) != 0) continue;
 
         char ev[128], key[512];
@@ -167,8 +167,9 @@ int devices_enumerate(mouse_device_t *out, int max) {
         if (read_sys_line(path, val, sizeof(val))) d->pid = (uint16_t)strtoul(val, NULL, 16);
 
         find_by_id_link(ent->d_name, d->byid_path, sizeof(d->byid_path));
-        usb_parent_of(real, d->usb_parent, sizeof(d->usb_parent));
+        devices_usb_parent_of(real, d->usb_parent, sizeof(d->usb_parent));
         d->hw_supported = devices_is_hw_supported(d->vid, d->pid);
+        d->is_dongle = dongle_guards_usb_device(d->usb_parent);
         d->score = score_device(d, rel, key, usb_parent_has_keyboard(d->usb_parent));
         count++;
     }
@@ -192,9 +193,13 @@ const char *devices_preferred_path(const mouse_device_t *d) {
     return d->byid_path[0] ? d->byid_path : d->event_path;
 }
 
+/* While an AnyMouse dongle vectors in hardware, automatic selection grabs nothing: the
+ * dongle's output must not be scaled again, and the user is expected to use the mouse
+ * behind it. Another mouse can still be chosen explicitly. */
 bool devices_pick_auto(mouse_device_t *out) {
     mouse_device_t list[DEVICES_MAX];
     int n = devices_enumerate(list, DEVICES_MAX);
+    for (int i = 0; i < n; i++) if (list[i].is_dongle) return false;
     if (n <= 0) return false;
     *out = list[0];
     return true;
@@ -253,6 +258,7 @@ int devices_identify_by_motion(mouse_device_t *out, int timeout_ms) {
             active_idx = i;
             continue;
         }
+        if (list[i].is_dongle) continue;   /* already vectored; never a software target */
         fds[i] = open(list[i].event_path, O_RDONLY | O_NONBLOCK);
     }
 
@@ -303,6 +309,11 @@ void devices_request_switch(const char *path) {
     pthread_mutex_lock(&g_state.device_mutex);
     snprintf(g_state.requested_path, sizeof(g_state.requested_path), "%s", path ? path : "");
     pthread_mutex_unlock(&g_state.device_mutex);
+    atomic_fetch_add(&g_state.device_request_gen, 1U);
+}
+
+/* Make the RT engine release and re-select under the current request (e.g. a dongle linked) */
+void devices_request_reselect(void) {
     atomic_fetch_add(&g_state.device_request_gen, 1U);
 }
 

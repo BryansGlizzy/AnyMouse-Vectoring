@@ -189,7 +189,7 @@ Sister document to [`README.md`](README.md) tracking operational checkpoints, ac
 - **Schematic findings:** the two USB-A stacks (4 ports) sit behind one High-Speed controller through a mux (HOST jumper = port 1 direct, DEVICE = CH334 hub for ports 2-4); neither can face the PC. The "other" USB-C is wired to GPIO24/25.
 - **PC-facing link solved in software (M0, device half):** `usb_wrap_ll_phy_select(&USB_WRAP, 0)` moves the Full-Speed OTG controller onto the "other" USB-C. Spike `firmware/esp32p4-dongle/spikes/m0_phy_swap/` (ESP-IDF v5.5.4, `esp_tinyusb` 3.0.0) enumerates on the Mac as `303A:4D56` with a HID mouse and a vendor HID interface (usage page `0xFF4D`); 20/20 vendor echoes, about 5 ms RTT. No eFuse burned, no header wiring needed.
 - **Remaining M0 work:** the mouse-side USB host half on the HS port, USB-A VBUS, and whether a reset restores the default PHY mapping. Full-Speed caps output to the PC at 1000 Hz; input is still read at the mouse's native rate.
-- **Plan:** [`firmware/esp32p4-dongle/PLAN.md`](firmware/esp32p4-dongle/PLAN.md), milestones M0 (two-port gate) through M7.
+- **Plan:** [`firmware/esp32p4-dongle/PLAN.md`](firmware/esp32p4-dongle/PLAN.md), milestones M0 (two-port gate) through M6.
 
 
 ### [2026-10-25] - Dongle Control Plane Built and Tested Without a Mouse
@@ -213,13 +213,21 @@ Sister document to [`README.md`](README.md) tracking operational checkpoints, ac
 - **Space check on the board** (a throwaway build with the USB host stack and hubs, flashed and read back, then the real firmware restored and re-tested at 48/48): the image grows from 283 KB to 352 KB (+69 KB, 17% of a 2 MB slot) and free internal RAM drops from 559 KB to 553 KB. Porting every OpenMouse family to C would still fit (estimated 0.7 to 1.0 MB total). Details and estimates are in [PLAN.md section 9.4](firmware/esp32p4-dongle/PLAN.md#94-space-and-memory-budget-measured-2026-10-25).
 - **Open question answered:** this ESP-IDF (v5.5.4) supports USB hubs through `CONFIG_USB_HOST_HUBS_SUPPORTED`; it still needs a real hub and mice to confirm (checklist test 10).
 - **Recommended, not yet done:** enlarge the two OTA slots from 2 MB to 4 MB in `partitions.csv`, because the layout can only be changed by a USB reflash.
+### [2026-10-26] - Desktop App Links to the Dongle by Protocol Handshake (Firmware 0.4.0)
+- **Gap found:** `./anymouse` had no dongle support. It would have grabbed the dongle's HID mouse as an ordinary mouse and scaled its already-vectored motion a second time.
+- **Identity by protocol, not USB IDs:** new `HELLO` command (nonce in, `AMVD` identity word + nonce + capabilities + MAC out). The Linux app treats any hidraw interface on usage page `0xFF4D` as a *candidate* and accepts it only after the handshake, so production VID:PIDs can change freely. Firmware older than HELLO is recognised by a well-formed `GET_INFO`.
+- **Guard (`src/devices.c`, `src/evdev_rt.c`):** the mouse interface of a candidate is never auto-grabbed unless the candidate fails the handshake (then it is an ordinary device) or reports that its output is not vectored. Unopenable or silent candidates keep guarding (fail safe). An explicit choice of the dongle's mouse is refused with a clear message.
+- **Link (`src/dongle.c`, new thread):** adopts the dongle's weights on connect, pushes local edits with `SET_WEIGHTS` (same 0.01..5.0 rule as the firmware, checked on the float bits because the engine builds with `-ffast-math`), applies `EVENT_STATE` from other clients (the web page) and resolves `STALE` in the dongle's favour. GUI shows "Vectoring: Dongle" with generation and bypass; CLI gains `--dongle-status` and `--dongle-bypass on|off`; `--install-udev` adds a rule for the AnyMouse manufacturer string.
+- **Tests:** `tests/test_dongle_link.c` (`make test-dongle`, built and run on Linux through a container): 44 checks covering handshake classification, sync, stale handling, echo suppression, and the guard against a fake sysfs tree. The full app (GTK, RT engine) compiles on Linux. `dongle_test.py` gained 8 `HELLO` checks and passes **56/56 on the real board** flashed with 0.4.0. Web tests still pass (16).
+- **Not yet verified:** the C client against the real board (the Mac has no hidraw, and the real-USB path needs the CachyOS box), and the udev manufacturer match. **Web parity gap:** `web/` still filters by VID:PID; it should switch to the usage-page filter plus `HELLO`.
+
 ---
 
 ## Where We Left Off (2026-10-25 Handoff, ESP32-P4 dongle)
 
 The active work is Phase 4 on the ESP32-P4. Everything about it is in [`firmware/esp32p4-dongle/`](firmware/esp32p4-dongle/README.md) (quickstart) and [`PLAN.md`](firmware/esp32p4-dongle/PLAN.md) (design); the project-level summary is README section 13.
 
-**State:** M0's PC-facing half is done and the control plane (M2/M3 firmware side) is built and tested with no mouse: 44/44 checks pass. The board runs firmware 0.2.0 (the Haltech sketch was overwritten, as agreed). ESP-IDF v5.5.4 is installed at `~/esp/esp-idf` on the Mac. See the dated entry above and [`firmware/esp32p4-dongle/README.md`](firmware/esp32p4-dongle/README.md) for how to rebuild and rerun the test.
+**State:** M0's PC-facing half is done and the control plane (M2/M3 firmware side) is built and tested with no mouse: 56/56 checks pass. The board runs firmware 0.4.0 (adds the `HELLO` identity handshake; the Haltech sketch was overwritten, as agreed). The Linux app's dongle link (`src/dongle.c`, guard, CLI) is built and tested against a fake dongle on Linux, but not yet against the real board over hidraw (see the 2026-10-26 entry). The WebHID Studio (M4) is built in [`web/`](web/README.md) but not yet tried in a real browser against the board. ESP-IDF v5.5.4 is installed at `~/esp/esp-idf` on the Mac. See the dated entry above and [`firmware/esp32p4-dongle/README.md`](firmware/esp32p4-dongle/README.md) for how to rebuild and rerun the test.
 
 **Detailed plan for the first session with real mice: [PLAN.md section 9](firmware/esp32p4-dongle/PLAN.md#9-mouse-discovery-device-info-and-hardware-verification)** (auto-discovery of all mice, immediate vectoring, OpenMouse info for the ULX and R3, generic fallback, 15-point acceptance checklist). The short version follows.
 
@@ -228,7 +236,7 @@ The active work is Phase 4 on the ESP32-P4. Everything about it is in [`firmware
 2. Check USB-A VBUS power (`DIO7003`/`AO3401` enable) and the BOOT button GPIO from the schematic.
 3. Test whether a reset restores the default PHY mapping (hold BOOT, tap RST with only the non-UART USB-C connected; look for `303A:1001`).
 4. Capture real report descriptors from the Finalmouse ULX and Attack Shark R3 on the Linux box (`tools/capture_descriptors.sh`, not written yet).
-5. Then, in order: report-descriptor parser (M1), forward scaled motion to the PC mouse report, `src/dongle.c` in the Linux engine plus the double-scaling guard (M3), and the web Studio (M4).
+5. Then, in order: report-descriptor parser (M1), forward scaled motion to the PC mouse report, run `./anymouse --dongle-status` and the GUI badge against the board on the CachyOS box (the Linux link is built), move the web Studio to the `HELLO` handshake and try it in a real browser against the board (M4), and calibration push through the dongle (M3).
 
 The Linux-engine items below (the 2026-10-23 handoff) are unchanged and still valid.
 
@@ -280,11 +288,11 @@ The Linux-engine items below (the 2026-10-23 handoff) are unchanged and still va
 
 ### Checkpoint 3: Universal USB Pass-Through Dongle (Phase 4, ESP32-P4, now the active priority)
 - [x] Verify the target board (ESP32-P4 rev v1.3 on Waveshare ESP32-P4-Module-DEV-KIT) and write the plan ([`firmware/esp32p4-dongle/PLAN.md`](firmware/esp32p4-dongle/PLAN.md)).
-- [ ] M0: ESP-IDF v5.5.4 bring-up; resolve the PC-facing USB link; FS OTG device + HS OTG host enumerating simultaneously.
+- [ ] M0: ESP-IDF v5.5.4 bring-up; resolve the PC-facing USB link; FS OTG device + HS OTG host enumerating simultaneously. (Bring-up and the PC-facing device half done 2026-10-25; host half waits for a mouse.)
 - [ ] M1: transparent 1 kHz passthrough with report-descriptor parsing.
 - [ ] Mouse discovery, device info (OpenMouse for known mice, generic fallback) and the 15-point hardware checklist: [PLAN.md section 9](firmware/esp32p4-dongle/PLAN.md#9-mouse-discovery-device-info-and-hardware-verification).
-- [ ] M2: shared `common/amv_octant.h` vectoring + NVS profiles.
-- [ ] M3: vendor HID protocol + `src/dongle.c` sync for live FpsAimForge calibration.
+- [ ] M2: shared `common/amv_octant.h` vectoring + NVS profiles. (Header, seqlock weights and NVS slots done; still to do: scaled deltas to the PC mouse report, `src/evdev_rt.c` on the shared header.)
+- [ ] M3: vendor HID protocol + `src/dongle.c` sync for live FpsAimForge calibration. (Firmware side done, 56/56 checks; Linux side built 2026-10-26: `src/dongle.c`, guard, CLI, GUI badge; real-board hidraw run and calibration push still to do.)
 - [x] M4: WebHID web Studio built ([`web/`](web/README.md)); still to try in a real browser against the board.
-- [ ] M5: firmware update over the vendor HID channel, soak test, docs.
-- [ ] M6: OTA, soak test, docs.
+- [ ] M5: hardening: firmware update (DFU) over the vendor HID channel, app rollback, watchdog, 8-hour soak, docs.
+- [ ] M6: stretch goals (vendor-command tunnel, extra downstream interfaces, Windows companion, identity cloning); see [PLAN.md M6](firmware/esp32p4-dongle/PLAN.md#m6--stretch-goals-after-m5-in-value-order).

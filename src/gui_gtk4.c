@@ -59,6 +59,7 @@ typedef struct {
     int        last_active_vid;
     int        last_active_pid;
     bool       last_grabbed;
+    uint32_t   last_dongle_rev;
     int        tick_count;
 
     /* FpsAimForge installer widgets */
@@ -753,7 +754,7 @@ static void rescan_devices(bool force) {
     for (int i = 0; i < n; i++) {
         char item[300];
         snprintf(item, sizeof(item), "%s  [%04x:%04x]%s  %s", list[i].name, list[i].vid, list[i].pid,
-                 list[i].hw_supported ? " ★" : "", list[i].event_path);
+                 list[i].is_dongle ? " 🔗 dongle output" : list[i].hw_supported ? " ★" : "", list[i].event_path);
         gtk_string_list_append(g_ui.device_model, item);
     }
     g_ui.updating_ui = false;
@@ -948,7 +949,28 @@ static gboolean on_ui_tick(gpointer user_data) {
         snprintf(rt_buf, sizeof(rt_buf), "🟡 RT Engine: %s",
                  err[0] ? err : "Selecting mouse...");
     }
+    dongle_status_t dg;
+    dongle_get_status(&dg);
+    size_t used = strlen(rt_buf);
+    switch (dg.link) {
+    case DONGLE_LINKED:
+        snprintf(rt_buf + used, sizeof(rt_buf) - used, "\n🔗 Vectoring: Dongle (%s; gen %u%s)",
+                 dg.detail, dg.gen, dg.bypass ? ", BYPASS" : "");
+        break;
+    case DONGLE_NO_ACCESS: case DONGLE_NOT_RESPONDING: case DONGLE_INCOMPATIBLE:
+        snprintf(rt_buf + used, sizeof(rt_buf) - used, "\n⚠️ Dongle: %s", dg.detail);
+        break;
+    case DONGLE_NONE:
+        break;
+    }
     gtk_label_set_text(GTK_LABEL(g_ui.lbl_rt_status), rt_buf);
+
+    /* The dongle (or another client, e.g. the web page) changed the weights */
+    uint32_t drev = atomic_load_explicit(&g_state.dongle_weights_rev, memory_order_relaxed);
+    if (drev != g_ui.last_dongle_rev) {
+        g_ui.last_dongle_rev = drev;
+        sync_ui_from_state();
+    }
 
     /* Follow hotplug / device switches: re-query hardware when the grabbed mouse changes */
     int avid = atomic_load(&g_state.active_vid), apid = atomic_load(&g_state.active_pid);

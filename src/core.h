@@ -58,8 +58,34 @@ typedef struct {
     uint16_t vid;
     uint16_t pid;
     bool     hw_supported;      /* Known vendor protocol (CPI / polling control) */
+    bool     is_dongle;         /* Output of an AnyMouse dongle (already vectored): never auto-grabbed */
     int      score;             /* Auto-selection rank, highest wins */
 } mouse_device_t;
+
+/* AnyMouse hardware dongle link state (src/dongle.c) */
+typedef enum {
+    DONGLE_NONE = 0,         /* no AnyMouse vendor interface present */
+    DONGLE_NO_ACCESS,        /* interface present, but its hidraw node cannot be opened */
+    DONGLE_NOT_RESPONDING,   /* opened, no handshake reply yet (retried) */
+    DONGLE_INCOMPATIBLE,     /* AnyMouse framing at another protocol version: guarded, not synced */
+    DONGLE_LINKED            /* handshake passed; weights kept in sync */
+} dongle_link_t;
+
+typedef struct {
+    dongle_link_t link;
+    bool     legacy;            /* firmware predates HELLO (recognised by GET_INFO) */
+    bool     vectoring;         /* the dongle's mouse output is already vectored */
+    char     node[64];          /* /dev/hidrawN */
+    uint8_t  proto_ver;
+    uint8_t  fw[3];
+    uint8_t  mac[6];
+    uint16_t caps;              /* AMV_CAP_* */
+    uint32_t gen;
+    bool     bypass;
+    uint8_t  active_slot;
+    float    weights[8];
+    char     detail[160];
+} dongle_status_t;
 
 /* Hardware telemetry decoded directly over /dev/hidrawX (OpenMouse protocol) */
 typedef struct {
@@ -180,6 +206,9 @@ typedef struct {
     _Atomic int      active_vid;          /* 0 when no device is grabbed */
     _Atomic int      active_pid;
 
+    /* Bumped whenever the dongle link writes octant_weights (the GUI re-syncs its widgets) */
+    _Atomic uint32_t dongle_weights_rev;
+
     /* Lock-free SPSC ring buffer: Thread 1 (evdev) -> Thread 2 (calibration) */
     tick_event_t     tick_ring[TICK_RING_SIZE];
     _Atomic uint32_t ring_head;
@@ -223,6 +252,15 @@ const char *devices_preferred_path(const mouse_device_t *d);
 int   devices_identify_by_motion(mouse_device_t *out, int timeout_ms);
 void  devices_request_switch(const char *path);
 void  devices_get_request(char *out, size_t out_sz);
+void  devices_request_reselect(void);
+void  devices_usb_parent_of(const char *sysfs_real, char *out, size_t out_sz);
+
+/* AnyMouse hardware dongle: discovery by protocol handshake, guard, weight sync (src/dongle.c) */
+void *dongle_thread(void *arg);
+bool  dongle_guards_usb_device(const char *usb_parent);  /* mice on this USB device must not be grabbed */
+bool  dongle_guard_active(void);                         /* any dongle (or unverified candidate) present */
+bool  dongle_get_status(dongle_status_t *out);           /* true when linked */
+int   dongle_cli(const char *action, const char *arg);   /* --dongle-status, --dongle-bypass on|off */
 
 /* Persistent user config & invoking-user helpers (src/config.c) */
 bool  config_user_home(char *out, size_t out_sz);
@@ -238,6 +276,7 @@ bool  hid_query_active_mouse(mouse_hw_status_t *out_status);
 bool  hid_set_mouse_cpi(int cpi);
 bool  hid_set_mouse_motion_sync(bool enabled);
 bool  hid_set_mouse_polling_rate(int hz);
+bool  hid_descriptor_has_collection(const char *hidraw_name, uint16_t want_page, uint16_t want_usage);
 
 /* FpsAimForge Steam detection & plugin/bundle installer (src/steam_install.c) */
 typedef enum {

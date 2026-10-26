@@ -371,6 +371,12 @@ static void client_task(void *arg)
     for (;;) usb_host_client_handle_events(s_client, portMAX_DELAY);
 }
 
+int amv_usb_host_device_count(void)
+{
+    usb_host_lib_info_t info;
+    return usb_host_lib_info(&info) == ESP_OK ? info.num_devices : -1;
+}
+
 int amv_usb_host_mice(amv_usb_host_mouse_t *out, int max)
 {
     int n = 0;
@@ -391,6 +397,10 @@ esp_err_t amv_usb_host_start(void)
     gpio_config(&io);
     gpio_set_level(AMV_USB_VBUS_EN_GPIO, 1);
 #endif
+    /* Connection, enumeration and port events only log at debug level; keep them visible while the
+     * mouse side is being brought up (CONFIG_LOG_MAXIMUM_LEVEL_DEBUG in sdkconfig.defaults). */
+    static const char *const host_tags[] = { "HUB", "USBH", "HCD DWC", "ENUM", "USB HOST" };
+    for (size_t i = 0; i < sizeof host_tags / sizeof host_tags[0]; i++) esp_log_level_set(host_tags[i], ESP_LOG_DEBUG);
     s_q = xQueueCreate(8, sizeof(msg_t));
     s_ctrl_sem = xSemaphoreCreateBinary();
     if (!s_q || !s_ctrl_sem) return ESP_ERR_NO_MEM;

@@ -31,5 +31,8 @@ typedef struct {
 
 esp_err_t amv_usb_host_start(void);
 
+/* Devices the host library has enumerated (any class, hubs included), or -1. */
+int amv_usb_host_device_count(void);
+
 /* Snapshot of the claimed mouse interfaces; returns how many were written. */
 int amv_usb_host_mice(amv_usb_host_mouse_t *out, int max);

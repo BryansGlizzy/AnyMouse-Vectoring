@@ -29,6 +29,7 @@ void app_main(void)
         ESP_LOGI(TAG, "in=%u frames=%u raw=(%lld,%lld) out=(%lld,%lld) btn_overflow=%u", (unsigned)vs.reports_in,
                  (unsigned)vs.frames_out, (long long)vs.raw_dx, (long long)vs.raw_dy, (long long)vs.out_dx,
                  (long long)vs.out_dy, (unsigned)vs.button_overflow);
+        ESP_LOGI(TAG, "usb host: %d device(s) enumerated", amv_usb_host_device_count());
         amv_usb_host_mouse_t mice[8];
         int n = amv_usb_host_mice(mice, 8);
         for (int i = 0; i < n; i++) {

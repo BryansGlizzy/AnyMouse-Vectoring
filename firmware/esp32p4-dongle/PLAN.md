@@ -37,7 +37,9 @@ Probed from the Mac with `esptool` v4.12.0, the boot log, the eFuse summary and 
 
 **Schematic facts (Waveshare ESP32-P4-Module-DEV-KIT.pdf, page 1 net labels):**
 - UART USB-C: `USB0_5V` + `USB_DBG_D_P/N` → CH343P. Other USB-C: `USB1_5V` + `USB1P1_P/N` → module pins `GPIO24/25`. Matches the `ioreg` results.
-- Host-mode VBUS for the USB-A ports (`VBUS_OUT`) comes from an `AO3401` P-FET and a `DIO7003` power switch. Its enable pin is not readable from the text extraction.
+- **USB-A VBUS (read from the rendered schematic, 2026-10-26):** `VBUS_OUT` comes from a `DIO7003HCST5` power switch (U6) whose EN pin is pulled up to `VCC_5V` through R25, so **it is always on and there is no GPIO to enable** (`AMV_USB_VBUS_EN_GPIO` stays -1). A mouse should power up (LED/sensor) in any of the four sockets whenever the board has 5 V. If a mouse is dark, suspect the supply or the cable, not firmware.
+- **Which socket reaches the P4 (same schematic page):** the mux `U15` (FSUSB42UMX) routes the P4's HS D+/D- to either the CH334F hub (`SEL` low: jumper H3 fitted, which ties `USB_SEL` to GND through R46) or straight to **the second socket of stack J8** (`USBHSD1`, `SEL` high: no jumper, R37 pulls `USB_SEL` up to `VBUS_OUT`). Hub sockets are `USB1`/`USB2` (stack J2) and `USB3` (first socket of J8). So: **no jumper = only one socket works (J8's second socket)**; **jumper fitted = three sockets work through the hub** (this firmware enables hub support). Waveshare's wording ("jumper caps ... HOST mode to expand USB ports") is consistent with jumper fitted = hub. The earlier note here that "HOST = port 1 direct" was an assumption and needs confirming against the board silkscreen.
+- **BOOT button = GPIO35** (RESET is the `ESP_EN` line).
 - The P4's one HS controller feeds **both** USB-A stacks through the mux, so they are mutually exclusive, not two independent ports. Both stacks are host-facing receptacles; neither can be the output to the PC.
 - eFuse `USB_PHY_SEL` exists and is unset (0). `USB_OTG11_EXCHG_PINS` and `USB_DEVICE_EXCHG_PINS` (D+/D− swaps) are also unset.
 
@@ -399,7 +401,7 @@ Run it with at least: the Finalmouse ULX receiver, the Attack Shark R3 receiver,
 - ~~Does ESP-IDF v5.5.4's USB host support hubs?~~ Yes: it is the `CONFIG_USB_HOST_HUBS_SUPPORTED` option, and a build with it enabled links and runs (section 9.4). Whether it works with a real hub and mice is still for test 10.
 - Does a High-Speed host handle the ULX's 8 kHz receiver while the Full-Speed device side stays up? The ULX uses a single combined interface for motion and configuration (usage page `0xFF00`), so the dongle must claim it and send vendor reports on it while motion keeps flowing.
 - The R3 receiver exposes three interfaces; only the first carries motion. Confirm which to claim, and that the configuration interfaces can be used for the relay at the same time.
-- How the USB-A power switch (`DIO7003`/`AO3401`) is enabled.
+- ~~How the USB-A power switch is enabled.~~ Always on (EN tied to 5 V), see section 0. Open instead: which socket and jumper position actually reaches the P4 on this board; the first run with a Razer mouse saw no device at all (0 devices enumerated, no connect event with host debug logging on), so the port path is still unproven.
 
 ### 9.4 Space and memory budget (measured 2026-10-25)
 

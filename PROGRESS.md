@@ -236,6 +236,11 @@ Sister document to [`README.md`](README.md) tracking operational checkpoints, ac
   4. Note reports/s per mouse (compare with its polling rate), any `errors`, and whether clicks, wheel and side buttons work.
   5. If nothing enumerates: suspect VBUS. If it enumerates but there is no motion: compare the `mouse:` layout line with the descriptor. If the log says `not a relative mouse`, the parser rejected that interface: save its hex and add it as a test.
 
+### [2026-10-26] - First Mouse Attempt (Razer): Nothing Enumerated; Schematic Answers VBUS
+- **Result:** with a Razer mouse plugged into the dongle, the High-Speed host stayed at `0 device(s) enumerated` with no connect or port event, even with USB-host debug logging enabled (firmware now sets debug level for the `HUB`, `USBH`, `HCD DWC`, `ENUM` and `USB HOST` tags and prints the library's device count every 5 s). The PC-side device and the 56 control-plane checks are unaffected.
+- **Schematic (rendered from Waveshare's PDF):** USB-A VBUS switch `DIO7003` has EN tied to 5 V, so VBUS is always on and no enable GPIO exists; BOOT is GPIO35. The mux `U15` sends the P4's HS pair either to the CH334F hub (jumper fitted, three sockets: J2 both, J8 first) or straight to J8's second socket (no jumper). See PLAN section 0. The earlier assumption "HOST jumper = direct port 1" is unconfirmed.
+- **Next:** note the jumper state and try each socket; with the jumper fitted any of the three hub sockets should work, with it removed only J8's second socket. Also confirm the mouse itself powers up and whether it is a wired mouse or a wireless one (a wireless mouse needs its receiver plugged in, not the mouse).
+
 ---
 
 ## Where We Left Off (2026-10-25 Handoff, ESP32-P4 dongle)

@@ -116,3 +116,34 @@ esp_err_t amv_store_erase_all(void)
     nvs_close(h);
     return err;
 }
+
+static void mouse_key(uint16_t vid, uint16_t pid, char key[16])
+{
+    snprintf(key, 16, "c%04x%04x", vid, pid);
+}
+
+esp_err_t amv_store_get_mouse_cpi(uint16_t vid, uint16_t pid, uint16_t *cpi)
+{
+    char key[16];
+    mouse_key(vid, pid, key);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READONLY, &h);
+    if (err != ESP_OK) return err == ESP_ERR_NVS_NOT_FOUND ? ESP_ERR_NOT_FOUND : err;
+    err = nvs_get_u16(h, key, cpi);
+    nvs_close(h);
+    return err == ESP_ERR_NVS_NOT_FOUND ? ESP_ERR_NOT_FOUND : err;
+}
+
+esp_err_t amv_store_set_mouse_cpi(uint16_t vid, uint16_t pid, uint16_t cpi)
+{
+    char key[16];
+    mouse_key(vid, pid, key);
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) return err;
+    err = cpi ? nvs_set_u16(h, key, cpi) : nvs_erase_key(h, key);
+    if (err == ESP_ERR_NVS_NOT_FOUND) err = ESP_OK;
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}

@@ -11,6 +11,7 @@
 #include "tusb.h"
 #include "amv_ctrl.h"
 #include "amv_octant.h"
+#include "amv_usb_host.h"
 
 static const char *TAG = "amv_proto";
 
@@ -77,6 +78,13 @@ static void on_state_event(const amv_state_t *st, uint8_t source)
     to_payload(st, &ev.st);
     ev.source = source;
     build_frame(it.buf, AMV_CMD_EVENT_STATE, 0, AMV_ST_OK, &ev, sizeof(ev));
+    if (xQueueSend(s_q, &it, 0) != pdTRUE) s_events_dropped++;
+}
+
+static void on_mouse_event(const amv_mouse_event_t *ev)
+{
+    item_t it = { .is_tx = 1 };
+    build_frame(it.buf, AMV_CMD_EVENT_MOUSE, 0, AMV_ST_OK, ev, sizeof(*ev));
     if (xQueueSend(s_q, &it, 0) != pdTRUE) s_events_dropped++;
 }
 
@@ -228,6 +236,39 @@ static void handle_request(const uint8_t *in, uint8_t out[AMV_FRAME_SIZE])
         build_frame(out, cmd, seq, AMV_ST_OK, &p, sizeof(p));
         break;
     }
+    case AMV_CMD_GET_MOUSE: {
+        if (len < 1) { build_frame(out, cmd, seq, AMV_ST_BAD_LEN, NULL, 0); break; }
+        amv_mouse_info_t p;
+        uint8_t s = amv_mouse_get_info(pl[0], &p);
+        build_frame(out, cmd, seq, s, &p, s == AMV_ST_OK ? sizeof(p) : 2);
+        break;
+    }
+    case AMV_CMD_GET_MOUSE_CAPS: {
+        if (len < 1) { build_frame(out, cmd, seq, AMV_ST_BAD_LEN, NULL, 0); break; }
+        amv_mouse_caps_t p;
+        uint8_t s = amv_mouse_get_caps(pl[0], &p);
+        build_frame(out, cmd, seq, s, &p, s == AMV_ST_OK ? sizeof(p) : 0);
+        break;
+    }
+    case AMV_CMD_GET_MOUSE_DESC: {
+        if (len < sizeof(amv_mouse_desc_req_t)) { build_frame(out, cmd, seq, AMV_ST_BAD_LEN, NULL, 0); break; }
+        amv_mouse_desc_req_t r;
+        memcpy(&r, pl, sizeof r);
+        amv_mouse_desc_rep_t p;
+        uint8_t s = amv_mouse_get_desc(r.index, r.offset, &p);
+        build_frame(out, cmd, seq, s, &p, s == AMV_ST_OK ? sizeof(p) : 0);
+        break;
+    }
+    case AMV_CMD_SET_MOUSE_CPI:
+    case AMV_CMD_SET_MOUSE_POLLING: {
+        if (len < sizeof(amv_mouse_set_req_t)) { build_frame(out, cmd, seq, AMV_ST_BAD_LEN, NULL, 0); break; }
+        amv_mouse_set_req_t r;
+        memcpy(&r, pl, sizeof r);
+        amv_mouse_info_t p;
+        uint8_t s = cmd == AMV_CMD_SET_MOUSE_CPI ? amv_mouse_set_cpi(r.index, r.value, &p) : amv_mouse_set_rate(r.index, r.value, &p);
+        build_frame(out, cmd, seq, s, &p, s == AMV_ST_NO_MOUSE ? 2 : sizeof(p));
+        break;
+    }
     case AMV_CMD_FACTORY_RESET: {
         amv_result_t r = amv_ctrl_factory_reset(AMV_SRC_HOST, &st);
         if (r != AMV_R_OK) amv_ctrl_get_state(&st);
@@ -295,6 +336,7 @@ void amv_proto_init(void)
 {
     s_q = xQueueCreate(32, sizeof(item_t));
     configASSERT(s_q);
+    amv_mouse_set_event_cb(on_mouse_event);
     const esp_timer_create_args_t a1 = { .callback = self_change_cb, .name = "amv_selfchg" };
     const esp_timer_create_args_t a2 = { .callback = reboot_cb, .name = "amv_reboot" };
     ESP_ERROR_CHECK(esp_timer_create(&a1, &s_self_timer));

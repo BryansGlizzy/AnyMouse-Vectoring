@@ -213,6 +213,58 @@ def main():
     s, _ = d.request(C["AMV_CMD_HELLO"], b"\x01\x02")
     check("short HELLO rejected", s == C["AMV_ST_BAD_LEN"], f"status {s}")
 
+    print("== attached mice (needs a mouse in the USB-A port; skipped if none) ==")
+    INFO = struct.Struct("<BBBBHHBBHHHHBBBBBBH30s")
+    st, b = d.request(C["AMV_CMD_GET_MOUSE"], bytes([0]))
+    if st == C["AMV_ST_BAD_CMD"]:
+        print("  (firmware without mouse commands: skipped)")
+    elif st == C["AMV_ST_NO_MOUSE"]:
+        print("  (no mouse attached: skipped)")
+        check("empty list reports count 0", len(b) >= 2 and b[1] == 0, b.hex())
+    else:
+        check("GET_MOUSE ok", st == 0, f"status {st}")
+        m = INFO.unpack(b[:INFO.size])
+        idx, count, tier, flags, vid, pid = m[:6]
+        name = m[-1].split(b"\0")[0].decode(errors="replace")
+        print(f"   mouse 0: {vid:04x}:{pid:04x} {name!r} tier {tier} flags {flags:#04x} cpi {m[11]} device_hz {m[10]} nominal {m[8]}")
+        check("entry 0 is a used mouse, not an ignored device", tier in (C["AMV_TIER_KNOWN"], C["AMV_TIER_GENERIC"], C["AMV_TIER_BOOT"]), f"tier {tier}")
+        check("count matches GET_INFO has_mouse or more", count >= i["has_mouse"] >= 1, f"count {count}, has_mouse {i['has_mouse']}")
+        check("name and VID:PID filled in", bool(name) and vid != 0)
+        check("nominal rate derived from the endpoint interval", 0 < m[8] <= 8000, f"{m[8]}")
+        s2, b2 = d.request(C["AMV_CMD_GET_MOUSE"], bytes([count + 5]))
+        check("index out of range answers NO_MOUSE with the count", s2 == C["AMV_ST_NO_MOUSE"] and b2[1] == count, f"status {s2}")
+        # Descriptor, fetched in pieces, must be a well-formed HID descriptor that starts a mouse collection
+        desc, off = b"", 0
+        while True:
+            s3, b3 = d.request(C["AMV_CMD_GET_MOUSE_DESC"], struct.pack("<BBH", 0, 0, off))
+            if s3 != 0:
+                break
+            _, _, total, o, n, _ = struct.unpack("<BBHHBB", b3[:8])
+            desc += b3[8:8 + n]; off += n
+            if off >= total or n == 0:
+                break
+        check("report descriptor retrieved in pieces", s3 == 0 and len(desc) == total and len(desc) > 20, f"{len(desc)} of {total}")
+        check("descriptor declares a Generic Desktop Mouse", desc[:4] == bytes([0x05, 0x01, 0x09, 0x02]), desc[:6].hex())
+        if tier == C["AMV_TIER_KNOWN"]:
+            s4, b4 = d.request(C["AMV_CMD_GET_MOUSE_CAPS"], bytes([0]))
+            caps = struct.unpack("<BBBB8HHHH16s", b4[:42]) if s4 == 0 else None
+            check("known mouse has capabilities", caps is not None)
+            if caps:
+                rates = list(caps[4:4 + caps[2]])
+                print(f"   caps: rates {rates}, CPI {caps[12]}..{caps[13]} step {caps[14]}, firmware {caps[15].split(bytes(1))[0].decode()!r}")
+                check("rates and CPI range plausible", len(rates) > 0 and caps[12] < caps[13])
+                # Refusals only: nothing here changes the mouse
+                bad = max(rates) * 3 + 7
+                s5, _ = d.request(C["AMV_CMD_SET_MOUSE_POLLING"], struct.pack("<BBH", 0, 0, bad))
+                check("a polling rate the mouse does not accept is refused", s5 == C["AMV_ST_BAD_VALUE"], f"status {s5}")
+                s6, _ = d.request(C["AMV_CMD_SET_MOUSE_CPI"], struct.pack("<BBH", 0, 0, 7))
+                check("a CPI below the range is refused", s6 == C["AMV_ST_BAD_VALUE"], f"status {s6}")
+        else:
+            s4, _ = d.request(C["AMV_CMD_GET_MOUSE_CAPS"], bytes([0]))
+            check("generic mouse has no vendor capabilities", s4 == C["AMV_ST_UNSUPPORTED"], f"status {s4}")
+            s5, _ = d.request(C["AMV_CMD_SET_MOUSE_POLLING"], struct.pack("<BBH", 0, 0, 500))
+            check("polling cannot be set on a generic mouse", s5 == C["AMV_ST_UNSUPPORTED"], f"status {s5}")
+
     print("== framing errors ==")
     bad = bytearray(d._frame(C["AMV_CMD_GET_WEIGHTS"]))
     bad[0] = 0x00

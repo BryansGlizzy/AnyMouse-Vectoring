@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "amv_dongle_proto.h"
 
 /*
  * Mouse side of the dongle: the High-Speed OTG controller in host mode (USB-A port 1 with the
@@ -40,3 +41,14 @@ void amv_usb_host_port_status(char *out, size_t cap);
 
 /* Snapshot of the claimed mouse interfaces; returns how many were written. */
 int amv_usb_host_mice(amv_usb_host_mouse_t *out, int max);
+
+/* ---- attached-device information, backing the GET_MOUSE* / SET_MOUSE_* protocol commands ----
+ * Entries: claimed mice (tiers KNOWN, GENERIC, BOOT) first, then ignored devices. Each call
+ * returns an AMV_ST_* code. Safe from any task; the setters block while the mouse answers. */
+typedef void (*amv_mouse_event_cb_t)(const amv_mouse_event_t *ev);
+void    amv_mouse_set_event_cb(amv_mouse_event_cb_t cb);
+uint8_t amv_mouse_get_info(uint8_t index, amv_mouse_info_t *out);
+uint8_t amv_mouse_get_caps(uint8_t index, amv_mouse_caps_t *out);
+uint8_t amv_mouse_get_desc(uint8_t index, uint16_t offset, amv_mouse_desc_rep_t *out);
+uint8_t amv_mouse_set_cpi(uint8_t index, uint16_t cpi, amv_mouse_info_t *out);    /* KNOWN: to the mouse; else a stored label (0 forgets) */
+uint8_t amv_mouse_set_rate(uint8_t index, uint16_t hz, amv_mouse_info_t *out);

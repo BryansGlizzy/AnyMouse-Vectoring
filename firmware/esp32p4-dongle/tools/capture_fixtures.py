@@ -23,7 +23,7 @@ for m in re.finditer(r"^#define\s+(AMV_\w+)\s+(0x[0-9A-Fa-f]+|\d+(?:\.\d+)?)", o
     C[m.group(1)] = int(v, 16) if v.startswith("0x") else (float(v) if "." in v else int(v))
 
 h = None
-for d in hid.enumerate(C["AMV_USB_VID"], C["AMV_USB_PID"]):
+for d in hid.enumerate():   # matched on the vendor usage page only, like the clients
     if d["usage_page"] == C["AMV_VENDOR_USAGE_PAGE"]:
         h = hid.device(); h.open_path(d["path"]); h.set_nonblocking(True)
 if h is None:
@@ -104,6 +104,14 @@ xchg("bad_command", 0x7E)
 # The firmware auto-saves the active slot 2 s after the last weight change; the recording must finish first.
 assert time.time() - t_first_set < 1.8, "recording too slow: the auto-save would pollute the slot mask"
 xchg("info", C["AMV_CMD_GET_INFO"], volatile=True)
+# Mouse information: recorded with the Razer Basilisk Ultimate plugged into the dongle (see web/mock_device.js)
+xchg("mouse_0", C["AMV_CMD_GET_MOUSE"], bytes([0]), volatile=True)          # measured rate and CPI vary
+xchg("mouse_caps_0", C["AMV_CMD_GET_MOUSE_CAPS"], bytes([0]))
+xchg("mouse_desc_0", C["AMV_CMD_GET_MOUSE_DESC"], struct.pack("<BBH", 0, 0, 0))
+xchg("mouse_desc_48", C["AMV_CMD_GET_MOUSE_DESC"], struct.pack("<BBH", 0, 0, 48))
+xchg("mouse_desc_96", C["AMV_CMD_GET_MOUSE_DESC"], struct.pack("<BBH", 0, 0, 96))
+xchg("mouse_out_of_range", C["AMV_CMD_GET_MOUSE"], bytes([9]))
+xchg("mouse_set_rate_bad", C["AMV_CMD_SET_MOUSE_POLLING"], struct.pack("<BBH", 0, 0, 777), volatile=True)
 xchg("stats", C["AMV_CMD_GET_STATS"], volatile=True)
 xchg("factory_reset_end", C["AMV_CMD_FACTORY_RESET"])
 

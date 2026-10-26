@@ -5,8 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { P } from '../proto.js';
-import { buildFrame, parseFrame, parseState, parseInfo, parseStats, DongleClient, DongleError } from '../dongle.js';
-import { MockHid } from '../mock_device.js';
+import { buildFrame, parseFrame, parseState, parseInfo, parseStats, parseMouse, parseMouseCaps, DongleClient, DongleError } from '../dongle.js';
+import { MockHid, MOCK_RAZER, MOCK_GENERIC, MOCK_KEYBOARD } from '../mock_device.js';
 import { importProfile, exportProfile, weightsValid, PRESETS } from '../presets.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -78,7 +78,7 @@ test('HELLO: the demo device answers the recorded real reply, and the client ver
   const c = new DongleClient(mock, { timeoutMs: 300 });
   await c.open();
   const h = await c.hello(nonce);
-  assert.equal(h.legacy, false); assert.equal(h.vectoring, true); assert.equal(h.fw, '0.4.0');
+  assert.equal(h.legacy, false); assert.equal(h.vectoring, true); assert.equal(h.fw, '0.5.0');
   assert.match(h.mac, /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/);
 });
 
@@ -101,6 +101,52 @@ test('HELLO rejects a device that does not echo the nonce, and accepts legacy fi
   const c3 = new DongleClient(silent, { timeoutMs: 80 });
   await c3.open();
   await assert.rejects(() => c3.hello(), (e) => e.status === -4);
+});
+
+test('mouse info: the real Razer replies decode, and the demo device matches them', () => {
+  const byName = Object.fromEntries(fx.steps.map((s) => [s.name, parseFrame(hex(s.reply))]));
+  const m = parseMouse(byName.mouse_0.payload);
+  assert.equal(m.tier, P.TIER.KNOWN); assert.equal(m.driver, P.DRV.RAZER);
+  assert.equal(m.vid, 0x1532); assert.equal(m.pid, 0x0086); assert.equal(m.name, 'Razer Basilisk Ultimate');
+  assert.equal(m.nominalHz, 1000); assert.equal(m.deviceHz, 1000); assert.equal(m.cpiSource, P.CPI.DEVICE);
+  assert.ok(m.flags & P.MF.VERIFIED && m.flags & P.MF.CAN_SET_CPI);
+  const c = parseMouseCaps(byName.mouse_caps_0.payload);
+  assert.deepEqual(c.rates, MOCK_RAZER.caps.rates); assert.equal(c.cpiMax, MOCK_RAZER.caps.cpiMax); assert.equal(c.firmware, MOCK_RAZER.caps.firmware);
+  assert.equal(byName.mouse_out_of_range.status, P.ST.NO_MOUSE);
+  assert.equal(byName.mouse_set_rate_bad.status, P.ST.BAD_VALUE);
+});
+
+test('mouse list, descriptor download and setters over the demo device', async () => {
+  const mock = new MockHid({ mice: [MOCK_KEYBOARD, MOCK_GENERIC, MOCK_RAZER] });
+  const c = new DongleClient(mock, { timeoutMs: 300 });
+  await c.open();
+  const list = await c.listMice();
+  assert.deepEqual(list.map((m) => m.tier), [P.TIER.GENERIC, P.TIER.KNOWN, P.TIER.IGNORED]);   // ignored devices last
+  assert.equal(list[2].reason, P.IGN.NOT_MOUSE);
+  const razer = list.find((m) => m.driver === P.DRV.RAZER);
+  const desc = await c.getMouseDescriptor(razer.index);
+  assert.deepEqual(Array.from(desc), Array.from(MOCK_RAZER.desc));   // three 48-byte pieces put back together
+  const events = [];
+  c.addEventListener('mouse', (e) => events.push(e.detail));
+  let r = await c.setMouseCpi(razer.index, 3200);
+  assert.ok(r.ok); assert.equal(r.mouse.cpi, 3200); assert.equal(r.mouse.cpiSource, P.CPI.DEVICE);
+  r = await c.setMousePolling(razer.index, 500);
+  assert.ok(r.ok); assert.equal(r.mouse.deviceHz, 500);
+  assert.equal((await c.setMousePolling(razer.index, 777)).status, P.ST.BAD_VALUE);
+  r = await c.setMouseCpi(0, 800);                        // generic: remembered as a label
+  assert.ok(r.ok); assert.equal(r.mouse.cpiSource, P.CPI.USER);
+  assert.equal((await c.setMousePolling(0, 500)).status, P.ST.UNSUPPORTED);
+  assert.equal(await c.getMouseCaps(0), null);
+  await new Promise((res) => setTimeout(res, 5));
+  assert.equal(events.length, 3); assert.equal(events[0].change, P.MEV.UPDATED);
+});
+
+test('listMice() on firmware without mouse commands returns null', async () => {
+  const old = new MockHid({});
+  const orig = old._handle.bind(old);
+  old._handle = (f) => { if (f[3] === P.CMD.GET_MOUSE) { const r = orig(f); r.reply[5] = P.ST.BAD_CMD; r.reply[6] = 0; return r; } return orig(f); };
+  const c = new DongleClient(old, { timeoutMs: 300 }); await c.open();
+  assert.equal(await c.listMice(), null);
 });
 
 // ---------- client behavior over the demo device ----------

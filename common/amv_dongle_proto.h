@@ -63,7 +63,16 @@
 #define AMV_CMD_FACTORY_RESET    0x0B
 #define AMV_CMD_GET_SLOTS        0x0C   /* reply: 1 byte, bit n set if slot n holds a valid saved profile */
 #define AMV_CMD_HELLO            0x0D   /* identity handshake (see top of file); firmware 0.4.0+ */
+/* Attached-device information (firmware 0.5.0+). Index n of GET_MOUSE runs over the claimed mice
+ * (tiers KNOWN, GENERIC, BOOT) and then the ignored devices; out of range answers NO_MOUSE with
+ * {index, count}. Indexes change on hotplug: refetch after EVENT_MOUSE and match on uid. */
+#define AMV_CMD_GET_MOUSE        0x0E   /* {index} -> amv_mouse_info_t */
+#define AMV_CMD_GET_MOUSE_CAPS   0x0F   /* {index} -> amv_mouse_caps_t (tier KNOWN only) */
+#define AMV_CMD_GET_MOUSE_DESC   0x10   /* amv_mouse_desc_req_t -> amv_mouse_desc_rep_t (raw report descriptor) */
+#define AMV_CMD_SET_MOUSE_CPI    0x11   /* amv_mouse_set_req_t -> amv_mouse_info_t; KNOWN: written to the mouse, else stored as a label */
+#define AMV_CMD_SET_MOUSE_POLLING 0x12  /* amv_mouse_set_req_t -> amv_mouse_info_t; KNOWN with AMV_MF_CAN_SET_RATE only */
 #define AMV_CMD_EVENT_STATE      0x80   /* async: state changed (any source) */
+#define AMV_CMD_EVENT_MOUSE      0x81   /* async: amv_mouse_event_t; a mouse was attached, removed or re-read */
 
 /* Status codes in replies */
 #define AMV_ST_OK          0
@@ -76,6 +85,9 @@
 #define AMV_ST_BUSY        7
 #define AMV_ST_EMPTY       8   /* LOAD_PROFILE on a slot that was never saved */
 #define AMV_ST_BAD_MAGIC   9
+#define AMV_ST_NO_MOUSE    10  /* index out of range; payload {index, count} */
+#define AMV_ST_UNSUPPORTED 11  /* this mouse or its driver cannot do that */
+#define AMV_ST_DEVICE_ERR  12  /* the mouse did not answer its vendor protocol */
 
 /* Where a state change came from (EVENT payload and bookkeeping) */
 #define AMV_SRC_HOST       0
@@ -90,6 +102,45 @@
 /* HELLO capability bits */
 #define AMV_CAP_VECTORED_MOUSE 0x0001   /* the HID mouse on this USB device already carries vectored motion */
 #define AMV_CAP_MOUSE_HOST     0x0002   /* a downstream mouse can be attached (USB host side present) */
+
+/* Device tiers (PLAN.md section 9.1) */
+#define AMV_TIER_KNOWN     1   /* vendor protocol known (OpenMouse driver on the dongle): real CPI / polling */
+#define AMV_TIER_GENERIC   2   /* report descriptor parsed: vectored, info from USB descriptors */
+#define AMV_TIER_BOOT      3   /* descriptor unusable, read in boot protocol (8-bit motion, 3 buttons) */
+#define AMV_TIER_IGNORED   4   /* attached but not used (see AMV_IGN_*) */
+
+/* amv_mouse_info_t.flags */
+#define AMV_MF_REPORT_IDS    0x01
+#define AMV_MF_WHEEL         0x02
+#define AMV_MF_PAN           0x04
+#define AMV_MF_ALSO_KEYBOARD 0x08
+#define AMV_MF_VERIFIED      0x10  /* driver tested on this model through the dongle; writes allowed */
+#define AMV_MF_CAN_SET_CPI   0x20
+#define AMV_MF_CAN_SET_RATE  0x40
+#define AMV_MF_DRV_ERROR     0x80  /* the driver's last exchange with the mouse failed */
+
+/* amv_mouse_info_t.cpi_source */
+#define AMV_CPI_NONE       0
+#define AMV_CPI_USER       1   /* entered by the user, stored per VID:PID, label only */
+#define AMV_CPI_DEVICE     2   /* read from the mouse */
+
+/* amv_mouse_info_t.driver */
+#define AMV_DRV_NONE       0
+#define AMV_DRV_RAZER      1
+#define AMV_DRV_FINALMOUSE 2
+#define AMV_DRV_GEARHUB    3
+
+/* amv_mouse_info_t.reason (tier IGNORED) */
+#define AMV_IGN_NOT_MOUSE  1   /* no HID mouse collection (keyboard, audio, storage, ...) */
+#define AMV_IGN_ABSOLUTE   2   /* absolute pointer (tablet, touch screen) */
+#define AMV_IGN_UNPARSED   3   /* descriptor unusable and no boot protocol to fall back on */
+#define AMV_IGN_NO_SLOT    4   /* too many mice attached */
+#define AMV_IGN_CLAIM      5   /* the interface could not be claimed or read */
+
+/* amv_mouse_event_t.change */
+#define AMV_MEV_ATTACHED   1
+#define AMV_MEV_REMOVED    2
+#define AMV_MEV_UPDATED    3
 
 /* TEST_SCALE request flags */
 #define AMV_TEST_RESET_REM 0x01
@@ -144,6 +195,62 @@ typedef struct __attribute__((packed)) {
     uint8_t  mac[6];      /* stable per-unit id */
 } amv_hello_rep_t;
 
+/* GET_MOUSE reply. 56 bytes. Rates in Hz, 0 = unknown. */
+typedef struct __attribute__((packed)) {
+    uint8_t  index, count;    /* this entry, entries in the list */
+    uint8_t  tier;            /* AMV_TIER_* */
+    uint8_t  flags;           /* AMV_MF_* */
+    uint16_t vid, pid;
+    uint8_t  speed;           /* 0 low, 1 full, 2 high */
+    uint8_t  iface;           /* claimed interface number */
+    uint16_t nominal_hz;      /* from bInterval and bus speed */
+    uint16_t measured_hz;     /* highest reports/s seen in the last 10 s (rises only while moving) */
+    uint16_t device_hz;       /* polling rate the mouse reports (KNOWN), 0 = unknown */
+    uint16_t cpi;             /* 0 = unknown */
+    uint8_t  cpi_source;      /* AMV_CPI_* */
+    uint8_t  battery;         /* percent, 0xFF = none or unknown */
+    uint8_t  num_buttons;
+    uint8_t  x_bits;          /* width of the X field */
+    uint8_t  driver;          /* AMV_DRV_* */
+    uint8_t  reason;          /* AMV_IGN_* for tier IGNORED, else 0 */
+    uint16_t uid;             /* stable while attached */
+    char     name[30];        /* product string, NUL-terminated */
+} amv_mouse_info_t;
+
+/* GET_MOUSE_CAPS reply. 42 bytes. */
+typedef struct __attribute__((packed)) {
+    uint8_t  index, driver, n_rates, rsvd;
+    uint16_t rates[8];        /* polling rates the mouse accepts */
+    uint16_t cpi_min, cpi_max, cpi_step;
+    char     firmware[16];    /* mouse firmware version, "" if unknown */
+} amv_mouse_caps_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  index, rsvd;
+    uint16_t offset;
+} amv_mouse_desc_req_t;
+
+/* GET_MOUSE_DESC reply. 56 bytes; ask again at offset + len until offset + len == total. */
+typedef struct __attribute__((packed)) {
+    uint8_t  index, rsvd;
+    uint16_t total, offset;
+    uint8_t  len, rsvd2;
+    uint8_t  data[48];
+} amv_mouse_desc_rep_t;
+
+/* SET_MOUSE_CPI / SET_MOUSE_POLLING request. 4 bytes. */
+typedef struct __attribute__((packed)) {
+    uint8_t  index, rsvd;
+    uint16_t value;           /* CPI, or Hz */
+} amv_mouse_set_req_t;
+
+/* EVENT_MOUSE payload. 4 bytes. */
+typedef struct __attribute__((packed)) {
+    uint8_t  count;           /* entries now in the list */
+    uint8_t  change;          /* AMV_MEV_* */
+    uint16_t uid;             /* the entry concerned */
+} amv_mouse_event_t;
+
 /* GET_STATS reply. 32 bytes. */
 typedef struct __attribute__((packed)) {
     uint32_t sets_ok, stale_rejects, bad_value_rejects, saves;
@@ -177,6 +284,11 @@ _Static_assert(sizeof(amv_info_payload_t) == 18, "info size");
 _Static_assert(sizeof(amv_stats_payload_t) == 32, "stats size");
 _Static_assert(sizeof(amv_hello_req_t) == 8, "hello req size");
 _Static_assert(sizeof(amv_hello_rep_t) == 24, "hello rep size");
+_Static_assert(sizeof(amv_mouse_info_t) == 56, "mouse info size");
+_Static_assert(sizeof(amv_mouse_caps_t) == 42, "mouse caps size");
+_Static_assert(sizeof(amv_mouse_desc_rep_t) == 56, "mouse desc size");
+_Static_assert(sizeof(amv_mouse_set_req_t) == 4, "mouse set size");
+_Static_assert(sizeof(amv_mouse_event_t) == 4, "mouse event size");
 _Static_assert(sizeof(amv_test_scale_req_t) == 5, "test scale req size");
 _Static_assert(sizeof(amv_test_scale_rep_t) == 17, "test scale rep size");
 _Static_assert(sizeof(amv_test_self_change_req_t) == 7, "self change size");

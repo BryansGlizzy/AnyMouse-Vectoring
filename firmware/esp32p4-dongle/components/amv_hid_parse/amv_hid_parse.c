@@ -214,3 +214,46 @@ bool amv_hid_decode(const amv_hid_layout_t *l, const uint8_t *data, size_t len, 
     }
     return ok && out->have != 0;
 }
+
+bool amv_hid_has_collection(const uint8_t *d, size_t n, uint16_t want_page, uint16_t want_usage)
+{
+    uint32_t page = 0, usage = 0;
+    bool have = false;
+    size_t i = 0;
+    while (i < n) {
+        uint8_t b = d[i];
+        if (b == 0xFE) {
+            if (i + 2 >= n) return false;
+            i += 3 + (size_t)d[i + 1];
+            continue;
+        }
+        size_t size = b & 3;
+        if (size == 3) size = 4;
+        if (i + 1 + size > n) return false;
+        uint32_t v = (uint32_t)item_value(d + i + 1, (unsigned)size, false);
+        i += 1 + size;
+        switch (b & 0xFC) {
+        case 0x04: page = v; break;                                  /* Usage Page */
+        case 0x08:                                                   /* Usage */
+            if (!have) { usage = size == 4 ? v : ((page << 16) | (v & 0xFFFF)); have = true; }
+            break;
+        case 0xA0:                                                   /* Collection */
+            if (have && (usage >> 16) == want_page && (usage & 0xFFFF) == want_usage) return true;
+            have = false;
+            break;
+        case 0x80: case 0x90: case 0xB0: case 0xC0:
+            have = false;
+            break;
+        default: break;
+        }
+    }
+    return false;
+}
+
+const uint8_t amv_hid_boot_mouse_desc[] = {
+    0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
+    0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05, 0x81, 0x01,
+    0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06,
+    0xC0, 0xC0,
+};
+const size_t amv_hid_boot_mouse_desc_len = sizeof(amv_hid_boot_mouse_desc);

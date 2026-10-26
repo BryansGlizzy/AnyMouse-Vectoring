@@ -12,7 +12,8 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 HEADER = os.path.join(ROOT, "common", "amv_dongle_proto.h")
 OUT = os.path.join(ROOT, "web", "proto.js")
 
-GROUPS = [("CMD", "AMV_CMD_"), ("ST", "AMV_ST_"), ("SRC", "AMV_SRC_")]
+GROUPS = [("CMD", "AMV_CMD_"), ("ST", "AMV_ST_"), ("SRC", "AMV_SRC_"), ("TIER", "AMV_TIER_"), ("MF", "AMV_MF_"),
+          ("CPI", "AMV_CPI_"), ("DRV", "AMV_DRV_"), ("IGN", "AMV_IGN_"), ("MEV", "AMV_MEV_")]
 
 
 def parse():

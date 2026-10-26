@@ -9,6 +9,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include "../common/amv_dongle_proto.h"
+
 #define PI 3.14159265358979323846f
 #define TWO_PI (2.0f * PI)
 #define INV_OCTANT_STEP (4.0f / PI)
@@ -107,7 +109,19 @@ typedef struct {
     char     mouse_fw[32];
     char     dongle_fw[32];
     int      supported_rates[8];  /* Polling rates the device accepts, 0-terminated */
+    /* Set when the mouse sits behind the AnyMouse dongle and is reached through it */
+    bool     via_dongle;
+    int      tier;                /* AMV_TIER_* (dongle only) */
+    bool     can_set_cpi;
+    bool     can_set_rate;
 } mouse_hw_status_t;
+
+/* A mouse plugged into the dongle, as the dongle reports it (GET_MOUSE / GET_MOUSE_CAPS) */
+typedef struct {
+    amv_mouse_info_t info;
+    amv_mouse_caps_t caps;
+    bool             has_caps;
+} dongle_mouse_t;
 
 /* Per-octant ballistic submovement calibration statistics */
 typedef struct {
@@ -208,6 +222,8 @@ typedef struct {
 
     /* Bumped whenever the dongle link writes octant_weights (the GUI re-syncs its widgets) */
     _Atomic uint32_t dongle_weights_rev;
+    /* Bumped whenever the list of mice behind the dongle (or their CPI / rate / battery) changes */
+    _Atomic uint32_t dongle_mice_rev;
 
     /* Lock-free SPSC ring buffer: Thread 1 (evdev) -> Thread 2 (calibration) */
     tick_event_t     tick_ring[TICK_RING_SIZE];
@@ -261,6 +277,12 @@ bool  dongle_guards_usb_device(const char *usb_parent);  /* mice on this USB dev
 bool  dongle_guard_active(void);                         /* any dongle (or unverified candidate) present */
 bool  dongle_get_status(dongle_status_t *out);           /* true when linked */
 int   dongle_cli(const char *action, const char *arg);   /* --dongle-status, --dongle-bypass on|off */
+int   dongle_get_mice(dongle_mouse_t *out, int max);      /* -1: no link, or firmware without mouse info */
+/* Write a mouse setting through the dongle (runs on the dongle thread). Returns the AMV_ST_* status,
+ * or -1 when not linked / timed out. */
+int   dongle_mouse_set(uint8_t index, bool cpi, uint16_t value);
+bool  dongle_fill_hw_status(mouse_hw_status_t *out);      /* first mouse behind the dongle -> hardware panel */
+int   dongle_first_mouse_set(bool cpi, uint16_t value);   /* dongle_mouse_set() on that mouse */
 
 /* Persistent user config & invoking-user helpers (src/config.c) */
 bool  config_user_home(char *out, size_t out_sz);

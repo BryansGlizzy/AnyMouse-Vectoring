@@ -47,5 +47,14 @@ typedef struct {
 /* 0 on success (check layout->valid), negative if the descriptor is malformed. */
 int  amv_hid_parse(const uint8_t *desc, size_t len, amv_hid_layout_t *out);
 
+/* true if the descriptor declares an application collection with this usage page and usage
+ * (used to find a vendor configuration interface). */
+bool amv_hid_has_collection(const uint8_t *desc, size_t len, uint16_t page, uint16_t usage);
+
+/* The HID 1.11 appendix B boot-protocol mouse descriptor (3 buttons, 8-bit X/Y): the layout used
+ * when a mouse's own descriptor cannot be parsed and it is switched to boot protocol. */
+extern const uint8_t amv_hid_boot_mouse_desc[];
+extern const size_t amv_hid_boot_mouse_desc_len;
+
 /* true if the report carried at least one mouse field. */
 bool amv_hid_decode(const amv_hid_layout_t *l, const uint8_t *data, size_t len, amv_hid_report_t *out);

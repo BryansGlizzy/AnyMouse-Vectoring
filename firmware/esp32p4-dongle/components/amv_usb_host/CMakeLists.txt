@@ -1,3 +1,4 @@
-idf_component_register(SRCS "amv_usb_host.c" INCLUDE_DIRS "include"
-                       REQUIRES amv_hid_parse
-                       PRIV_REQUIRES usb amv_vector amv_ctrl freertos esp_driver_gpio esp_timer soc)
+idf_component_register(SRCS "amv_usb_host.c" "drv_razer.c" "drv_finalmouse.c" "drv_gearhub.c"
+                       INCLUDE_DIRS "include"
+                       REQUIRES amv_hid_parse amv_common
+                       PRIV_REQUIRES usb amv_vector amv_ctrl amv_store freertos esp_driver_gpio esp_timer soc)

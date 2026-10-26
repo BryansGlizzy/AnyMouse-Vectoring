@@ -60,6 +60,7 @@ typedef struct {
     int        last_active_pid;
     bool       last_grabbed;
     uint32_t   last_dongle_rev;
+    uint32_t   last_mice_rev;
     int        tick_count;
 
     /* FpsAimForge installer widgets */
@@ -538,8 +539,9 @@ static void update_rate_dropdown(const mouse_hw_status_t *st) {
 static void apply_hw_status(const mouse_hw_status_t *in, bool ok) {
     mouse_hw_status_t st = *in;
     bool hw_ok = st.node[0] != '\0' && st.accessible;
-    gtk_widget_set_sensitive(g_ui.btn_cpi_3200, hw_ok && st.vid == 0x361D && g_hw_busy == 0);
-    gtk_widget_set_sensitive(g_ui.btn_cpi_6400, hw_ok && st.vid == 0x361D && g_hw_busy == 0);
+    bool cpi_ok = st.via_dongle ? st.can_set_cpi : st.vid == 0x361D;
+    gtk_widget_set_sensitive(g_ui.btn_cpi_3200, hw_ok && cpi_ok && g_hw_busy == 0);
+    gtk_widget_set_sensitive(g_ui.btn_cpi_6400, hw_ok && cpi_ok && g_hw_busy == 0);
     update_rate_dropdown(&st);
 
     if (!ok && st.node[0] == '\0') {
@@ -570,9 +572,15 @@ static void apply_hw_status(const mouse_hw_status_t *in, bool ok) {
             char b[64];
             snprintf(b, sizeof(b), "🔋 %d%% (%.2fV)", st.battery_pct, st.battery_mv / 1000.0f);
             gtk_label_set_text(GTK_LABEL(g_ui.badge_bat), b);
+        } else if (st.via_dongle) {
+            char b[64];
+            if (st.battery_pct > 0) snprintf(b, sizeof(b), "🔋 %d%%", st.battery_pct);
+            else snprintf(b, sizeof(b), "🔋 Battery: --%%");
+            gtk_label_set_text(GTK_LABEL(g_ui.badge_bat), b);
         }
         char ms_buf[64];
-        snprintf(ms_buf, sizeof(ms_buf), "🎯 Motion Sync: %s", st.motion_sync ? "ON" : "OFF");
+        if (st.via_dongle) snprintf(ms_buf, sizeof(ms_buf), "🎯 Motion Sync: --");
+        else snprintf(ms_buf, sizeof(ms_buf), "🎯 Motion Sync: %s", st.motion_sync ? "ON" : "OFF");
         gtk_label_set_text(GTK_LABEL(g_ui.badge_sync), ms_buf);
 
         if (st.rssi_dbm != 0) {
@@ -974,7 +982,10 @@ static gboolean on_ui_tick(gpointer user_data) {
 
     /* Follow hotplug / device switches: re-query hardware when the grabbed mouse changes */
     int avid = atomic_load(&g_state.active_vid), apid = atomic_load(&g_state.active_pid);
-    if (avid != g_ui.last_active_vid || apid != g_ui.last_active_pid || grabbed != g_ui.last_grabbed) {
+    uint32_t mrev = atomic_load_explicit(&g_state.dongle_mice_rev, memory_order_relaxed);
+    if (avid != g_ui.last_active_vid || apid != g_ui.last_active_pid || grabbed != g_ui.last_grabbed ||
+        mrev != g_ui.last_mice_rev) {
+        g_ui.last_mice_rev = mrev;
         g_ui.last_active_vid = avid;
         g_ui.last_active_pid = apid;
         g_ui.last_grabbed = grabbed;

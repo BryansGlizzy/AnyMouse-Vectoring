@@ -1,7 +1,7 @@
 // AnyMouse Studio: UI and state handling. The protocol lives in dongle.js, the demo device in mock_device.js.
 import { P } from './proto.js';
 import { DongleClient, DongleError, statusName } from './dongle.js';
-import { MockHid } from './mock_device.js';
+import { MockHid, MOCK_RAZER, MOCK_GENERIC, MOCK_KEYBOARD } from './mock_device.js';
 import { OCTANTS, PRESETS, MIRROR_LR, MIRROR_UD, clampWeight, round2, mean, exportProfile, importProfile } from './presets.js';
 import { Radar } from './radar.js';
 
@@ -22,6 +22,7 @@ const S = {
   w: Array(8).fill(1),       // what the UI shows (may be ahead of the dongle while an edit is in flight)
   inFlight: false, dirty: false,
   slotsMask: 0, selSlot: 0, demo: DEMO,
+  mice: null,                // null: firmware without mouse info; else [{...info, caps}]
   cpi: store.get('cpi', 800), linkLR: store.get('linkLR', false), linkUD: store.get('linkUD', false),
 };
 
@@ -157,6 +158,127 @@ function onDeviceState(ev) {
   render();
 }
 
+// ---------- attached mice ----------
+const TIER_LABEL = { [P.TIER.KNOWN]: ['t1', 'Known protocol'], [P.TIER.GENERIC]: ['t2', 'Generic HID'], [P.TIER.BOOT]: ['t3', 'Boot fallback'], [P.TIER.IGNORED]: ['t4', 'Not used'] };
+const DRIVER_LABEL = { [P.DRV.RAZER]: 'Razer', [P.DRV.FINALMOUSE]: 'Finalmouse', [P.DRV.GEARHUB]: 'GearHub / Attack Shark' };
+const IGNORE_TEXT = {
+  [P.IGN.NOT_MOUSE]: 'Not a mouse (no pointer interface). Left alone.',
+  [P.IGN.ABSOLUTE]: 'Absolute pointer (tablet or touch screen). Only relative mice are vectored.',
+  [P.IGN.UNPARSED]: 'Its HID descriptor could not be read and it has no boot mouse mode, so it cannot be used.',
+  [P.IGN.NO_SLOT]: 'Too many mice attached at once.',
+  [P.IGN.CLAIM]: 'The dongle could not open this device.',
+};
+const hex4 = (n) => n.toString(16).padStart(4, '0');
+let miceTimer = null, miceBusy = false;
+
+async function refreshMice() {
+  if (!S.client || miceBusy) return;
+  miceBusy = true;
+  try {
+    const list = await S.client.listMice();
+    if (list) {
+      for (const m of list) {
+        const prev = S.mice?.find((x) => x.uid === m.uid);
+        m.caps = m.tier === P.TIER.KNOWN ? (prev?.caps ?? await S.client.getMouseCaps(m.index)) : null;
+      }
+      // A CPI read from the mouse drives the effective-DPI column
+      const known = list.find((m) => m.tier !== P.TIER.IGNORED && m.cpi);
+      if (known && known.cpi !== S.cpi) { S.cpi = known.cpi; $('#cpi').value = known.cpi; }
+    }
+    S.mice = list;
+  } catch (e) { if (e.status === -1 || e.status === -2) failure(e); }
+  finally { miceBusy = false; }
+  renderMice();
+  render();
+}
+
+function onMouseEvent() {
+  // caps are per model: drop them for entries that changed so they are read again
+  if (S.mice) for (const m of S.mice) m.caps = m.tier === P.TIER.KNOWN ? m.caps : null;
+  refreshMice();
+}
+
+function rateText(m) {
+  const parts = [];
+  if (m.deviceHz) parts.push(`${m.deviceHz} Hz set on the mouse`);
+  if (m.nominalHz) parts.push(`${m.nominalHz} Hz USB interval`);
+  parts.push(m.measuredHz ? `${m.measuredHz}/s measured` : 'move the mouse to measure');
+  return parts.join(' · ');
+}
+
+function mouseCard(m) {
+  const [cls, label] = TIER_LABEL[m.tier] ?? ['t4', `tier ${m.tier}`];
+  const drv = DRIVER_LABEL[m.driver];
+  const rows = [['USB ID', `${hex4(m.vid)}:${hex4(m.pid)} · ${['low', 'full', 'high'][m.speed] ?? '?'} speed · interface ${m.iface}`]];
+  let body = '', controls = '';
+  if (m.tier === P.TIER.IGNORED) {
+    body = `<p class="note">${esc(IGNORE_TEXT[m.reason] ?? 'Not used.')}</p>`;
+  } else {
+    rows.push(['Polling rate', rateText(m)]);
+    rows.push(['CPI', m.cpi ? `${m.cpi}${m.cpiSource === P.CPI.DEVICE ? ' (read from the mouse)' : ' (entered by you)'}` : 'unknown']);
+    if (m.battery != null) rows.push(['Battery', `${m.battery}%`]);
+    if (m.caps?.firmware) rows.push(['Mouse firmware', m.caps.firmware]);
+    rows.push(['Report', `${m.xBits}-bit motion, ${m.buttons} buttons${m.flags & P.MF.WHEEL ? ', wheel' : ''}${m.flags & P.MF.PAN ? ', tilt' : ''}${m.flags & P.MF.REPORT_IDS ? ', report IDs' : ''}`]);
+    if (m.tier === P.TIER.KNOWN) {
+      const canCpi = m.flags & P.MF.CAN_SET_CPI, canRate = m.flags & P.MF.CAN_SET_RATE, c = m.caps;
+      if (canCpi && c) controls += `<label>CPI <input class="m-cpi dev" type="number" min="${c.cpiMin}" max="${c.cpiMax}" step="${c.cpiStep}" value="${m.cpi || ''}"></label><button class="m-cpi-set dev" type="button">Set CPI</button>`;
+      if (canRate && c?.rates.length) controls += `<label>Polling <select class="m-rate dev">${c.rates.map((r) => `<option value="${r}"${r === m.deviceHz ? ' selected' : ''}>${r} Hz</option>`).join('')}</select></label>`;
+      if (!(m.flags & P.MF.VERIFIED)) body += `<p class="note">Read-only: this model has not been tested through the dongle yet, so it will not be written to.</p>`;
+    } else {
+      controls = `<label title="Only used for the effective-DPI numbers; the dongle cannot change your mouse's CPI.">Your mouse's CPI <input class="m-cpi dev" type="number" min="50" max="64000" step="50" value="${m.cpi || ''}" placeholder="e.g. 800"></label><button class="m-cpi-set dev" type="button">Remember</button>`;
+      body += `<p class="note">No vendor protocol is known for this mouse, so its CPI and polling rate cannot be read or changed here. Its motion is vectored normally.</p>`;
+    }
+    if (m.tier === P.TIER.BOOT) body += `<p class="note warn">Its own HID descriptor could not be read, so it runs in the simple boot mode: 8-bit motion, 3 buttons, no wheel. Please download the descriptor and report it.</p>`;
+    if (m.flags & P.MF.DRV_ERROR) body += `<p class="note warn">The mouse did not answer its ${esc(drv ?? 'vendor')} protocol on the last try.</p>`;
+    controls += `<button class="m-desc dev" type="button">Download descriptor</button>`;
+  }
+  return `<div class="mouse" data-i="${m.index}" data-uid="${m.uid}">
+    <div class="mouse-head"><b>${esc(m.name || 'USB device')}</b><span class="tier ${cls}">${esc(label)}${drv && m.tier === P.TIER.KNOWN ? ` · ${esc(drv)}` : ''}</span></div>
+    <dl class="status">${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
+    ${body}${controls ? `<div class="btnrow">${controls}</div>` : ''}
+  </div>`;
+}
+
+function renderMice() {
+  const el = $('#mice'), note = $('#miceNote');
+  if (!connected()) { el.innerHTML = '<p class="hint">Connect the dongle to see the mouse plugged into it.</p>'; note.textContent = ''; return; }
+  if (S.mice === null) { el.innerHTML = '<p class="hint">This dongle firmware does not report mouse information yet. Update it to 0.5.0 or later.</p>'; note.textContent = ''; return; }
+  if (!S.mice.length) { el.innerHTML = '<p class="hint">No mouse plugged into the dongle. Use its USB-A port (jumper on HOST: the lower socket next to the Ethernet jack).</p>'; note.textContent = ''; return; }
+  if (el.contains(document.activeElement) && document.activeElement.matches('input, select')) return;   // do not clobber typing
+  el.innerHTML = S.mice.map(mouseCard).join('');
+  const used = S.mice.filter((m) => m.tier !== P.TIER.IGNORED).length;
+  note.textContent = `${used} in use${S.mice.length > used ? `, ${S.mice.length - used} ignored` : ''}`;
+}
+
+$('#mice').addEventListener('click', (e) => {
+  const card = e.target.closest('.mouse');
+  if (!card) return;
+  const i = +card.dataset.i;
+  if (e.target.matches('.m-cpi-set')) act(async () => {
+    const v = parseInt(card.querySelector('.m-cpi').value, 10) || 0;
+    const r = await S.client.setMouseCpi(i, v);
+    toast(r.ok ? (r.mouse?.cpiSource === P.CPI.DEVICE ? `Mouse set to ${r.mouse.cpi} CPI.` : 'CPI remembered for this mouse.') : `Not set: ${statusName(r.status)}`, r.ok ? 'good' : 'bad');
+    document.activeElement?.blur();
+    await refreshMice();
+  });
+  if (e.target.matches('.m-desc')) act(async () => {
+    const d = await S.client.getMouseDescriptor(i), m = S.mice[i];
+    const text = Array.from(d, (b) => b.toString(16).padStart(2, '0')).join(' ') + '\n';
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([text], { type: 'text/plain' })), download: `${(m.name || 'mouse').replace(/\W+/g, '_').toLowerCase()}_${hex4(m.vid)}_${hex4(m.pid)}_if${m.iface}.hex` });
+    document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  });
+});
+$('#mice').addEventListener('change', (e) => {
+  if (!e.target.matches('.m-rate')) return;
+  const i = +e.target.closest('.mouse').dataset.i, hz = +e.target.value;
+  act(async () => {
+    const r = await S.client.setMousePolling(i, hz);
+    toast(r.ok ? `Polling rate set to ${r.mouse.deviceHz} Hz.` : `Not set: ${statusName(r.status)}`, r.ok ? 'good' : 'bad');
+    document.activeElement?.blur();
+    await refreshMice();
+  });
+});
+
 // ---------- connection ----------
 function setState(state, text) {
   document.body.dataset.state = state;
@@ -190,10 +312,14 @@ async function attach(hid, demo = false) {
     S.w = S.dev.w.slice(); S.selSlot = S.dev.slot;
     S.slotsMask = await client.getSlotsMask();
     client.addEventListener('state', onDeviceState);
+    client.addEventListener('mouse', onMouseEvent);
     banner('');
     setState(demo ? 'demo' : 'connected', demo ? 'Demo (simulated dongle)' : `Connected · firmware ${S.info.fw}`);
     setEnabled(true);
     render();
+    await refreshMice();
+    clearInterval(miceTimer);
+    miceTimer = setInterval(() => { if (!document.hidden) refreshMice(); }, 2000);   // measured rate, CPI changed on the mouse
   } catch (e) {
     S.client = null; S.dev = null;
     try { await client.close(); } catch { /* ignore */ }
@@ -205,7 +331,9 @@ async function attach(hid, demo = false) {
 
 async function detach(silent = false) {
   const c = S.client;
-  S.client = null; S.dev = null; S.info = null; S.inFlight = false; S.dirty = false;
+  clearInterval(miceTimer); miceTimer = null;
+  S.client = null; S.dev = null; S.info = null; S.inFlight = false; S.dirty = false; S.mice = null;
+  renderMice();
   try { await c?.close(); } catch { /* already gone */ }
   if (!silent) { setState('disconnected', 'Not connected'); setEnabled(false); render(); }
 }
@@ -221,7 +349,7 @@ function failure(e) {
 }
 
 async function connectClicked() {
-  if (DEMO) { await attach(new MockHid({ gen: 7, w: [1, 1.15, 1.3, 1.15, 1, 1, 1, 1], filledSlots: [0, 2], slot: 0 }, { latencyMs: 3 }), true); return; }
+  if (DEMO) { await attach(new MockHid({ gen: 7, w: [1, 1.15, 1.3, 1.15, 1, 1, 1, 1], filledSlots: [0, 2], slot: 0, mice: [MOCK_RAZER, MOCK_GENERIC, MOCK_KEYBOARD] }, { latencyMs: 3 }), true); return; }
   try {
     const [dev] = await navigator.hid.requestDevice({ filters: [FILTER] });
     if (!dev) { toast('No device selected.'); return; }
@@ -356,7 +484,7 @@ function render({ skipRadar = false, keepMaster = false } = {}) {
     rows.push(['Firmware', `${S.info.fw} (protocol ${S.info.proto})`], ['Chip revision', `v${(S.info.chipRev / 100).toFixed(2)}`],
       ['Serial (MAC)', S.info.mac], ['Active profile', `slot ${S.dev.slot + 1}`], ['Revision', `#${S.dev.gen}${pending ? ' (sending…)' : ''}`],
       ['Last round trip', S.client.lastRttMs == null ? '—' : `${S.client.lastRttMs.toFixed(1)} ms`],
-      ['Mouse input', S.info.hasMouse ? 'connected' : 'not available in this firmware yet']);
+      ['Mice attached', S.mice === null ? 'not reported by this firmware' : String(S.mice.filter((m) => m.tier !== P.TIER.IGNORED).length)]);
   } else {
     rows.push(['Status', 'Connect the dongle with its second USB-C cable to the computer, then press Connect.']);
   }

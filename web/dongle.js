@@ -52,6 +52,29 @@ export function encodeSetWeights(baseGen, w) {
   return p;
 }
 
+const cstr = (u8) => { let t = ''; for (const b of u8) { if (!b) break; t += String.fromCharCode(b); } return t; };
+
+// GET_MOUSE reply (amv_mouse_info_t, 56 bytes)
+export function parseMouse(p) {
+  const v = view(p);
+  return {
+    index: p[0], count: p[1], tier: p[2], flags: p[3], vid: v.getUint16(4, true), pid: v.getUint16(6, true),
+    speed: p[8], iface: p[9], nominalHz: v.getUint16(10, true), measuredHz: v.getUint16(12, true),
+    deviceHz: v.getUint16(14, true), cpi: v.getUint16(16, true), cpiSource: p[18], battery: p[19] === 0xff ? null : p[19],
+    buttons: p[20], xBits: p[21], driver: p[22], reason: p[23], uid: v.getUint16(24, true), name: cstr(p.slice(26, 56)),
+  };
+}
+
+// GET_MOUSE_CAPS reply (amv_mouse_caps_t, 42 bytes)
+export function parseMouseCaps(p) {
+  const v = view(p), rates = [];
+  for (let i = 0; i < Math.min(p[2], 8); i++) rates.push(v.getUint16(4 + i * 2, true));
+  return { index: p[0], driver: p[1], rates, cpiMin: v.getUint16(20, true), cpiMax: v.getUint16(22, true), cpiStep: v.getUint16(24, true), firmware: cstr(p.slice(26, 42)) };
+}
+
+const mouseIndex = (i) => Uint8Array.of(i);
+const mouseSet = (i, value) => { const p = new Uint8Array(4); p[0] = i; view(p).setUint16(2, value, true); return p; };
+
 export function parseInfo(p) {
   const v = view(p);
   const mac = Array.from(p.slice(8, 14), (b) => b.toString(16).padStart(2, '0')).join(':');
@@ -71,7 +94,7 @@ export function parseTestScale(p) {
 
 // ---------- client ----------
 export class DongleClient extends EventTarget {
-  constructor(hid, { timeoutMs = 1500 } = {}) {
+  constructor(hid, { timeoutMs = 3000 } = {}) {   // a mouse write can take ~1 s while the mouse answers
     super();
     this.hid = hid;
     this.timeoutMs = timeoutMs;
@@ -106,6 +129,11 @@ export class DongleClient extends EventTarget {
     if (!f) return;
     if (f.cmd === P.CMD.EVENT_STATE) {
       this.dispatchEvent(new CustomEvent('state', { detail: parseEvent(f.payload) }));
+      return;
+    }
+    if (f.cmd === P.CMD.EVENT_MOUSE) {
+      const v = view(f.payload);
+      this.dispatchEvent(new CustomEvent('mouse', { detail: { count: f.payload[0], change: f.payload[1], uid: v.getUint16(2, true) } }));
       return;
     }
     const p = this.pending.get(f.seq);
@@ -209,6 +237,51 @@ export class DongleClient extends EventTarget {
     if (r.status !== P.ST.OK) throw new DongleError(statusName(r.status), r.status);
     return parseTestScale(r.payload);
   }
+  // ---- attached mice (firmware 0.5.0+). listMice() returns null when the firmware predates them. ----
+  async listMice() {
+    const out = [];
+    for (let i = 0; i < 16; i++) {
+      const r = await this.request(P.CMD.GET_MOUSE, mouseIndex(i));
+      if (r.status === P.ST.BAD_CMD) return null;
+      if (r.status === P.ST.NO_MOUSE) break;
+      if (r.status !== P.ST.OK) throw new DongleError(statusName(r.status), r.status);
+      out.push(parseMouse(r.payload));
+    }
+    return out;
+  }
+  async getMouseCaps(i) {
+    const r = await this.request(P.CMD.GET_MOUSE_CAPS, mouseIndex(i));
+    return r.status === P.ST.OK ? parseMouseCaps(r.payload) : null;
+  }
+  /** The raw HID report descriptor of mouse i, fetched in 48-byte pieces. */
+  async getMouseDescriptor(i) {
+    const parts = [];
+    let off = 0, total = 1;
+    while (off < total) {
+      const q = new Uint8Array(4); q[0] = i; view(q).setUint16(2, off, true);
+      const r = await this.request(P.CMD.GET_MOUSE_DESC, q);
+      if (r.status !== P.ST.OK) throw new DongleError(statusName(r.status), r.status);
+      const v = view(r.payload), n = r.payload[6];
+      total = v.getUint16(2, true);
+      parts.push(r.payload.slice(8, 8 + n));
+      off += n;
+      if (!n) break;
+    }
+    const out = new Uint8Array(off);
+    let at = 0;
+    for (const part of parts) { out.set(part, at); at += part.length; }
+    return out;
+  }
+  /** Known mice: written to the mouse. Others: stored on the dongle as a label (0 forgets). */
+  async setMouseCpi(i, cpi) {
+    const r = await this.request(P.CMD.SET_MOUSE_CPI, mouseSet(i, cpi));
+    return { status: r.status, ok: r.status === P.ST.OK, mouse: r.payload.length >= 56 ? parseMouse(r.payload) : null };
+  }
+  async setMousePolling(i, hz) {
+    const r = await this.request(P.CMD.SET_MOUSE_POLLING, mouseSet(i, hz));
+    return { status: r.status, ok: r.status === P.ST.OK, mouse: r.payload.length >= 56 ? parseMouse(r.payload) : null };
+  }
+
   async reboot() {
     const r = await this.request(P.CMD.REBOOT);
     if (r.status !== P.ST.OK) throw new DongleError(statusName(r.status), r.status);

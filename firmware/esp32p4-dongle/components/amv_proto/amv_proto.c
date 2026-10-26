@@ -127,7 +127,7 @@ static void handle_request(const uint8_t *in, uint8_t out[AMV_FRAME_SIZE])
     case AMV_CMD_GET_INFO: {
         amv_info_payload_t p = { .proto_ver = AMV_PROTO_VERSION, .fw_major = AMV_FW_MAJOR,
                                  .fw_minor = AMV_FW_MINOR, .fw_patch = AMV_FW_PATCH,
-                                 .num_slots = AMV_NUM_SLOTS, .has_mouse = 0 };
+                                 .num_slots = AMV_NUM_SLOTS, .has_mouse = amv_ctrl_mouse_count() };
         esp_chip_info_t ci;
         esp_chip_info(&ci);
         p.chip_rev = ci.revision;
@@ -222,7 +222,7 @@ static void handle_request(const uint8_t *in, uint8_t out[AMV_FRAME_SIZE])
         }
         amv_hello_rep_t p = { .ident = AMV_HELLO_IDENT, .proto_ver = AMV_PROTO_VERSION,
                               .fw_major = AMV_FW_MAJOR, .fw_minor = AMV_FW_MINOR, .fw_patch = AMV_FW_PATCH,
-                              .caps = AMV_CAP_VECTORED_MOUSE };
+                              .caps = AMV_CAP_VECTORED_MOUSE | AMV_CAP_MOUSE_HOST };
         memcpy(p.nonce, pl, sizeof(p.nonce));
         esp_efuse_mac_get_default(p.mac);
         build_frame(out, cmd, seq, AMV_ST_OK, &p, sizeof(p));

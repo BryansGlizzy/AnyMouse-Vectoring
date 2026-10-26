@@ -283,3 +283,7 @@ uint8_t amv_ctrl_slots_mask(void)
     xSemaphoreGive(s_mtx);
     return mask;
 }
+
+static volatile uint8_t s_mouse_count;
+void amv_ctrl_set_mouse_count(uint8_t n) { s_mouse_count = n; }
+uint8_t amv_ctrl_mouse_count(void) { return s_mouse_count; }

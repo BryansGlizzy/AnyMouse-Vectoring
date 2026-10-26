@@ -14,7 +14,16 @@
 
 static const char *TAG = "amv_usb";
 
-static const uint8_t mouse_report_desc[] = { TUD_HID_REPORT_DESC_MOUSE() };
+/* Report-protocol mouse: 16 buttons, 16-bit X/Y, 8-bit wheel, 8-bit AC Pan (8 bytes, no report ID).
+ * In boot protocol (BIOS) the host gets the standard 3-byte report instead. */
+static const uint8_t mouse_report_desc[] = {
+    0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00,
+    0x05, 0x09, 0x19, 0x01, 0x29, 0x10, 0x15, 0x00, 0x25, 0x01, 0x95, 0x10, 0x75, 0x01, 0x81, 0x02,
+    0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x16, 0x01, 0x80, 0x26, 0xFF, 0x7F, 0x75, 0x10, 0x95, 0x02, 0x81, 0x06,
+    0x09, 0x38, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06,
+    0x05, 0x0C, 0x0A, 0x38, 0x02, 0x95, 0x01, 0x81, 0x06,
+    0xC0, 0xC0,
+};
 
 static const uint8_t vendor_report_desc[] = {
     0x06, 0x4D, 0xFF,       /* Usage Page (0xFF4D, vendor) */
@@ -84,6 +93,38 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
 {
     (void)report_id; (void)report_type;
     if (instance == ITF_VENDOR) amv_proto_on_rx(buffer, bufsize);
+}
+
+static void (*s_mouse_done_cb)(void);
+
+void amv_usb_device_set_mouse_done_cb(void (*cb)(void)) { s_mouse_done_cb = cb; }
+
+void tud_hid_report_complete_cb(uint8_t instance, uint8_t const *report, uint16_t len)
+{
+    (void)report; (void)len;
+    if (instance == ITF_MOUSE && s_mouse_done_cb) s_mouse_done_cb();
+}
+
+bool amv_usb_device_mouse_ready(void)
+{
+    return tud_mounted() && tud_hid_n_ready(ITF_MOUSE);
+}
+
+int amv_usb_device_mouse_max_delta(void)
+{
+    return tud_hid_n_get_protocol(ITF_MOUSE) == HID_PROTOCOL_BOOT ? 127 : 32767;
+}
+
+bool amv_usb_device_mouse_send(uint16_t buttons, int32_t dx, int32_t dy, int32_t wheel, int32_t pan)
+{
+    if (tud_hid_n_get_protocol(ITF_MOUSE) == HID_PROTOCOL_BOOT) {
+        uint8_t r[3] = { (uint8_t)(buttons & 0x07), (uint8_t)(int8_t)dx, (uint8_t)(int8_t)dy };
+        return tud_hid_n_report(ITF_MOUSE, 0, r, sizeof r);
+    }
+    uint8_t r[8] = { (uint8_t)buttons, (uint8_t)(buttons >> 8),
+                     (uint8_t)dx, (uint8_t)(dx >> 8), (uint8_t)dy, (uint8_t)(dy >> 8),
+                     (uint8_t)(int8_t)wheel, (uint8_t)(int8_t)pan };
+    return tud_hid_n_report(ITF_MOUSE, 0, r, sizeof r);
 }
 
 static void usb_event_cb(tinyusb_event_t *event, void *arg)

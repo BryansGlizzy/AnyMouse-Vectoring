@@ -78,6 +78,7 @@ pre = state(xchg("pre_state", C["AMV_CMD_GET_WEIGHTS"]))
 steps.pop()
 pre["filled_slots"] = [i for i in range(4) if slots_mask() >> i & 1]
 
+xchg("hello", C["AMV_CMD_HELLO"], bytes(range(0x10, 0x10 + C["AMV_HELLO_NONCE_LEN"])))
 xchg("factory_reset", C["AMV_CMD_FACTORY_RESET"])
 g = state(xchg("get_weights", C["AMV_CMD_GET_WEIGHTS"]))["gen"]
 xchg("get_slots_empty", C["AMV_CMD_GET_SLOTS"])

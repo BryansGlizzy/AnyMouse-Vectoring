@@ -7,7 +7,9 @@ import { Radar } from './radar.js';
 
 const $ = (s) => document.querySelector(s);
 const DEMO = new URLSearchParams(location.search).has('demo');
-const FILTER = { vendorId: P.USB_VID, productId: P.USB_PID, usagePage: P.VENDOR_USAGE_PAGE };
+// Only the vendor usage page is matched here; whether a device really is a dongle is decided by
+// the HELLO handshake (dongle.js), so a changed USB VID:PID does not matter.
+const FILTER = { usagePage: P.VENDOR_USAGE_PAGE };
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem('anymouse.' + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -182,6 +184,7 @@ async function attach(hid, demo = false) {
   try {
     await client.open();
     S.client = client; S.hid = hid; S.demo = demo;
+    S.hello = await client.hello();
     S.info = await client.getInfo();
     S.dev = await client.getState();
     S.w = S.dev.w.slice(); S.selSlot = S.dev.slot;
@@ -375,7 +378,7 @@ function init() {
     banner('<b>This browser cannot talk to USB devices.</b>AnyMouse Studio needs WebHID: use Chrome, Edge, Brave or Opera on a computer (not Firefox, Safari or a phone). You can still <a href="?demo">try the demo</a>.', true);
     return;
   }
-  const matches = (d) => d.vendorId === FILTER.vendorId && d.productId === FILTER.productId && d.collections.some((c) => c.usagePage === FILTER.usagePage);
+  const matches = (d) => d.collections.some((c) => c.usagePage === FILTER.usagePage);
   navigator.hid.getDevices().then((ds) => { const d = ds.find(matches); if (d) attach(d); }).catch(() => {});
   navigator.hid.addEventListener('connect', (e) => { if (matches(e.device) && !S.client) attach(e.device); });
   navigator.hid.addEventListener('disconnect', (e) => {

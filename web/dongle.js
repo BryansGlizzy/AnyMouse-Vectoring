@@ -153,6 +153,34 @@ export class DongleClient extends EventTarget {
     if (info.proto !== P.PROTO_VERSION) throw new DongleError(`unsupported protocol version ${info.proto} (this page speaks ${P.PROTO_VERSION})`, -3);
     return info;
   }
+  /**
+   * Prove the device is an AnyMouse dongle: send a random nonce and require it back with the
+   * identity word. Identity never depends on USB VID:PID. Firmware older than HELLO answers
+   * BAD_CMD; a well-formed GET_INFO reply then counts (flagged legacy).
+   */
+  async hello(nonce = crypto.getRandomValues(new Uint8Array(P.HELLO_NONCE_LEN))) {
+    const notDongle = (why) => new DongleError(`not an AnyMouse dongle (${why})`, -4);
+    let r;
+    try { r = await this.request(P.CMD.HELLO, nonce); }
+    catch (e) { if (e.status === -2) throw notDongle('no reply'); throw e; }
+    if (r.status === P.ST.BAD_CMD) {
+      const info = await this.getInfo().catch(() => { throw notDongle('no valid reply to GET_INFO'); });
+      return { legacy: true, vectoring: true, caps: P.CAP_VECTORED_MOUSE, fw: info.fw, mac: info.mac, proto: info.proto };
+    }
+    if (r.status !== P.ST.OK || r.payload.length < 24) throw notDongle('bad handshake reply');
+    const v = view(r.payload);
+    if (v.getUint32(0, true) !== P.HELLO_IDENT) throw notDongle('wrong identity word');
+    for (let i = 0; i < P.HELLO_NONCE_LEN; i++) if (r.payload[4 + i] !== nonce[i]) throw notDongle('nonce not echoed');
+    const proto = r.payload[12];
+    if (proto !== P.PROTO_VERSION) throw new DongleError(`unsupported protocol version ${proto} (this page speaks ${P.PROTO_VERSION})`, -3);
+    const caps = v.getUint16(16, true);
+    return {
+      legacy: false, proto, caps,
+      vectoring: (caps & P.CAP_VECTORED_MOUSE) !== 0, mouseHost: (caps & P.CAP_MOUSE_HOST) !== 0,
+      fw: `${r.payload[13]}.${r.payload[14]}.${r.payload[15]}`,
+      mac: Array.from(r.payload.slice(18, 24), (b) => b.toString(16).padStart(2, '0')).join(':'),
+    };
+  }
   async getState() {
     const r = await this._stateCall(P.CMD.GET_WEIGHTS);
     if (!r.ok) throw new DongleError(statusName(r.status), r.status);

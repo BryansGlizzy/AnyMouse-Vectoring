@@ -68,6 +68,41 @@ test('client decoders parse the real replies', () => {
   assert.ok(stats.setsOk >= 1 && stats.staleRejects >= 1 && stats.badValueRejects >= 1);
 });
 
+test('HELLO: the demo device answers the recorded real reply, and the client verifies it', async () => {
+  const s = fx.steps.find((x) => x.name === 'hello');
+  const nonce = hex(s.request).slice(P.HEADER_SIZE, P.HEADER_SIZE + P.HELLO_NONCE_LEN);
+  const real = parseFrame(hex(s.reply));
+  assert.equal(real.status, P.ST.OK);
+  assert.equal(new DataView(real.payload.buffer, real.payload.byteOffset).getUint32(0, true), P.HELLO_IDENT);
+  const mock = new MockHid(fx.pre);
+  const c = new DongleClient(mock, { timeoutMs: 300 });
+  await c.open();
+  const h = await c.hello(nonce);
+  assert.equal(h.legacy, false); assert.equal(h.vectoring, true); assert.equal(h.fw, '0.4.0');
+  assert.match(h.mac, /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/);
+});
+
+test('HELLO rejects a device that does not echo the nonce, and accepts legacy firmware via GET_INFO', async () => {
+  const bad = new MockHid({});
+  const orig = bad._handle.bind(bad);
+  bad._handle = (f) => { const r = orig(f); if (f[3] === P.CMD.HELLO) r.reply[12] ^= 0xff; return r; };
+  const c1 = new DongleClient(bad, { timeoutMs: 300 }); await c1.open();
+  await assert.rejects(() => c1.hello(), (e) => e instanceof DongleError && e.status === -4);
+
+  const old = new MockHid({});
+  const orig2 = old._handle.bind(old);
+  old._handle = (f) => { if (f[3] === P.CMD.HELLO) { const r = orig2(f); r.reply[3] = P.CMD.HELLO; r.reply[5] = P.ST.BAD_CMD; r.reply[6] = 0; return r; } return orig2(f); };
+  const c2 = new DongleClient(old, { timeoutMs: 300 }); await c2.open();
+  const h = await c2.hello();
+  assert.equal(h.legacy, true);
+
+  const silent = new MockHid({});
+  silent.sendReport = async () => {};
+  const c3 = new DongleClient(silent, { timeoutMs: 80 });
+  await c3.open();
+  await assert.rejects(() => c3.hello(), (e) => e.status === -4);
+});
+
 // ---------- client behavior over the demo device ----------
 async function connected(init, opts) {
   const mock = new MockHid(init, opts);

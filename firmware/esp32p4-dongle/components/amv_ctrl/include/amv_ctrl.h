@@ -50,5 +50,9 @@ amv_result_t amv_ctrl_save_slot(uint8_t slot, amv_state_t *out);
 amv_result_t amv_ctrl_load_slot(uint8_t slot, uint8_t source, amv_state_t *out);
 amv_result_t amv_ctrl_factory_reset(uint8_t source, amv_state_t *out);
 
+/* Number of downstream mice currently being read (set by the USB host side, reported by GET_INFO). */
+void         amv_ctrl_set_mouse_count(uint8_t n);
+uint8_t      amv_ctrl_mouse_count(void);
+
 /* Bit n set if slot n holds a valid saved profile. */
 uint8_t      amv_ctrl_slots_mask(void);

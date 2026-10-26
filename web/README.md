@@ -29,7 +29,7 @@ sudo udevadm control --reload-rules && sudo udevadm trigger --action=add --subsy
 ```
 `./anymouse --install-udev` installs an equivalent rule keyed on the `AnyMouse` manufacturer string, which keeps working if the dongle's USB ID changes.
 
-**Known gap:** this page still filters on the dongle's VID:PID. The native app identifies the dongle with the `HELLO` protocol handshake instead; the web page should follow (usage-page filter, then `HELLO`) before a production PID is used.
+**Identity:** the page matches only the dongle's vendor usage page (`0xFF4D`) and then proves the device with the `HELLO` handshake (random nonce echoed back with the `AMVD` identity word), exactly like the native app, so a changed USB VID:PID does not matter. Firmware older than `HELLO` (0.3.x) is accepted through `GET_INFO`.
 
 Flatpak and Snap browsers cannot see hidraw devices; use a native package. On Windows, only one program can hold the dongle's HID interface at a time, so close the native app first.
 

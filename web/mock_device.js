@@ -93,8 +93,16 @@ export class MockHid extends EventTarget {
     switch (cmd) {
       case P.CMD.GET_INFO: {
         const p = new Uint8Array(18), v = new DataView(p.buffer);
-        p.set([P.PROTO_VERSION, 0, 3, 0], 0); v.setUint16(4, 103, true); p[6] = P.NUM_SLOTS; p[7] = 0;
+        p.set([P.PROTO_VERSION, 0, 4, 0], 0); v.setUint16(4, 103, true); p[6] = P.NUM_SLOTS; p[7] = 0;
         p.set([0x30, 0xed, 0xa0, 0xea, 0x6c, 0xab], 8); v.setUint32(14, (Date.now() - this.bootMs) >>> 0, true);
+        return { reply: reply(cmd, seq, P.ST.OK, p), events };
+      }
+      case P.CMD.HELLO: {
+        if (len !== P.HELLO_NONCE_LEN) return { reply: bad(P.ST.BAD_LEN), events };
+        const p = new Uint8Array(24), v = new DataView(p.buffer);
+        v.setUint32(0, P.HELLO_IDENT, true); p.set(pl.slice(0, P.HELLO_NONCE_LEN), 4);
+        p.set([P.PROTO_VERSION, 0, 4, 0], 12); v.setUint16(16, P.CAP_VECTORED_MOUSE | P.CAP_MOUSE_HOST, true);
+        p.set([0x30, 0xed, 0xa0, 0xea, 0x6c, 0xab], 18);
         return { reply: reply(cmd, seq, P.ST.OK, p), events };
       }
       case P.CMD.GET_WEIGHTS: return { reply: state(P.ST.OK), events };

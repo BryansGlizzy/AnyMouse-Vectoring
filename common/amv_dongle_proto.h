@@ -124,7 +124,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  fw_major, fw_minor, fw_patch;
     uint16_t chip_rev;    /* e.g. 103 = v1.03 */
     uint8_t  num_slots;
-    uint8_t  has_mouse;   /* 0 until the USB host side exists */
+    uint8_t  has_mouse;   /* number of downstream mice currently attached and read */
     uint8_t  mac[6];
     uint32_t uptime_ms;
 } amv_info_payload_t;

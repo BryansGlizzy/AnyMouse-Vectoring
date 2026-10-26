@@ -14,7 +14,11 @@ void app_main(void)
     ESP_LOGI(TAG, "AnyMouse dongle fw %d.%d.%d", AMV_FW_MAJOR, AMV_FW_MINOR, AMV_FW_PATCH);
     ESP_ERROR_CHECK(amv_ctrl_init());
     amv_proto_init();
+#ifndef AMV_HOST_ONLY   /* bring-up switch: -DAMV_HOST_ONLY leaves the PC-side device off to test the host alone */
     ESP_ERROR_CHECK(amv_usb_device_start());
+#else
+    ESP_LOGW(TAG, "AMV_HOST_ONLY: PC-side USB device NOT started");
+#endif
     amv_vector_start();
     ESP_ERROR_CHECK(amv_usb_host_start());
 
@@ -29,7 +33,9 @@ void app_main(void)
         ESP_LOGI(TAG, "in=%u frames=%u raw=(%lld,%lld) out=(%lld,%lld) btn_overflow=%u", (unsigned)vs.reports_in,
                  (unsigned)vs.frames_out, (long long)vs.raw_dx, (long long)vs.raw_dy, (long long)vs.out_dx,
                  (long long)vs.out_dy, (unsigned)vs.button_overflow);
-        ESP_LOGI(TAG, "usb host: %d device(s) enumerated", amv_usb_host_device_count());
+        char port[128];
+        amv_usb_host_port_status(port, sizeof port);
+        ESP_LOGI(TAG, "usb host: %d device(s) enumerated; %s", amv_usb_host_device_count(), port);
         amv_usb_host_mouse_t mice[8];
         int n = amv_usb_host_mice(mice, 8);
         for (int i = 0; i < n; i++) {

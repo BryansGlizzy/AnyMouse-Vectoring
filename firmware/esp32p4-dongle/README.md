@@ -2,11 +2,11 @@
 
 USB man-in-the-middle firmware for the Waveshare ESP32-P4-Module-DEV-KIT. The mouse plugs into the dongle's USB-A port; the dongle applies the 8-octant vectoring and appears to the PC as a normal USB mouse. It is configured over a vendor HID channel on the same cable, from a web page (WebHID, nothing to install) or from `./anymouse` (which also does live FpsAimForge calibration). No Wi-Fi, no network.
 
-**Status (2026-10-26):** the control plane works end to end (56 checks). The mouse side is **built but has not yet seen a real mouse**: report-descriptor parser, High-Speed USB host, per-report scaling and the 1 kHz PC-side output are in the firmware (0.4.0), and the board boots with both USB stacks up. The first test with a mouse is described in [PLAN.md](PLAN.md) section 9 and in the handoff in [../../PROGRESS.md](../../PROGRESS.md). Board verified (ESP32-P4 rev v1.3, 16 MB flash, 32 MB PSRAM). One USB-C is the CH343 UART bridge (flashing/console); the other is the P4's USB Serial/JTAG by default, but the firmware moves the Full-Speed OTG controller onto it in software (proved by [`spikes/m0_phy_swap/`](spikes/m0_phy_swap/)), so it enumerates as a HID mouse plus a vendor HID channel. Over that channel the firmware stores octant weights in flash (4 profile slots, auto-save, CRC), accepts updates from the host, and pushes changes back as events; the control-plane test passes with no mouse attached. See [PLAN.md](PLAN.md) for the milestone table.
+**Status (2026-10-26):** the control plane works end to end (56 checks). The mouse side **works with a real mouse** (Razer Basilisk Ultimate): report-descriptor parser, High-Speed USB host, per-report scaling and the 1 kHz PC-side output are in the firmware (0.4.0) and measured at about 1000 reports/s in and out with no errors. Next is exposing mouse information (name, VID:PID, polling rate, CPI); see [PLAN.md](PLAN.md) section 9.5 and [../../PROGRESS.md](../../PROGRESS.md). Board verified (ESP32-P4 rev v1.3, 16 MB flash, 32 MB PSRAM). One USB-C is the CH343 UART bridge (flashing/console); the other is the P4's USB Serial/JTAG by default, but the firmware moves the Full-Speed OTG controller onto it in software (proved by [`spikes/m0_phy_swap/`](spikes/m0_phy_swap/)), so it enumerates as a HID mouse plus a vendor HID channel. Over that channel the firmware stores octant weights in flash (4 profile slots, auto-save, CRC), accepts updates from the host, and pushes changes back as events; the control-plane test passes with no mouse attached. See [PLAN.md](PLAN.md) for the milestone table.
 
 **Next:** once a real mouse is available, the plan is automatic discovery of every attached mouse, immediate vectoring, real CPI and polling for known mice and a generic fallback for the rest. The design and the acceptance checklist are in [PLAN.md section 9](PLAN.md#9-mouse-discovery-device-info-and-hardware-verification).
 
-**Cabling for now:** the UART USB-C to the Mac (flashing/console), the "other" USB-C to the PC under test, and the mouse receiver in USB-A port 1 with the HOST jumper set.
+**Cabling:** the UART USB-C to the Mac (flashing/console), the "other" USB-C to the PC under test, and the mouse (or its receiver) in the **lower USB-A socket next to the Ethernet jack** with **both jumper caps on HOST** (that is the direct port). With the caps on DEVICE the P4 talks to the onboard hub and the other three sockets instead. USB-A VBUS is always on, so a mouse powers up in any socket; only the data pair is switched.
 
 ## Documents
 | File | Purpose |
@@ -42,13 +42,19 @@ idf.py -p <UART USB-C port> flash monitor     # macOS: /dev/cu.usbmodem<serial>;
 
 The console prints every 5 s: input reports, frames out, raw vs out counts, and per mouse VID:PID, report count and errors.
 
+## Bring-up switches and diagnostics
+- **`-DAMV_HOST_ONLY`** (`idf.py -DCMAKE_C_FLAGS=-DAMV_HOST_ONLY build`): leaves the PC-side USB device off, to test the host alone. Clean the `build/` directory afterwards, because CMake remembers the flag.
+- **Host port register:** the 5 s status line and a 20 Hz change logger print the High-Speed controller's `HPRT` (connected, enabled, power, D-/D+ line state, speed). Line state `00` with nothing plugged in means no device is pulling the data pair up; a connect shows `conn=1` and the speed (0 high, 1 full, 2 low).
+- **Debug logs for the host stack:** connect and enumeration events only appear at debug level; for a session, set `CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y` and `esp_log_level_set("*", ESP_LOG_DEBUG)` in `amv_usb_host_start()`, and revert afterwards.
+- **Saving a mouse's report descriptor:** on attach the console prints each HID interface's descriptor as hex; paste it into `tests/descriptors/<vendor>_<model>_<vid>_<pid>_if<N>.hex` and add a case to `tests/test_hid_parse.c`.
+
 ## Test without a mouse
 With both USB-C cables connected and the firmware flashed:
 ```bash
 pip install hidapi
 python3 -I firmware/esp32p4-dongle/tools/dongle_test.py          # 56 checks over the vendor-HID channel
 cc -std=c11 -Wall -Wextra -Icommon firmware/esp32p4-dongle/tests/test_octant.c -lm -o /tmp/test_octant && /tmp/test_octant   # from the repo root
-(cd firmware/esp32p4-dongle && cc -std=c11 -Wall -Wextra -Icomponents/amv_hid_parse/include tests/test_hid_parse.c components/amv_hid_parse/amv_hid_parse.c -o /tmp/test_hid_parse && /tmp/test_hid_parse)   # descriptor parser, 24 checks
+(cd firmware/esp32p4-dongle && cc -std=c11 -Wall -Wextra -Icomponents/amv_hid_parse/include tests/test_hid_parse.c components/amv_hid_parse/amv_hid_parse.c -o /tmp/test_hid_parse && /tmp/test_hid_parse)   # descriptor parser, 30 checks
 ```
 `dongle_test.py` covers the `HELLO` identity handshake, host-to-device writes (valid, invalid, stale), device-to-host events, bypass, profile slots, factory reset, the real scaling code against an independent reference, and persistence across a reboot. It leaves the dongle at factory defaults. Protocol constants are parsed from [`common/amv_dongle_proto.h`](../../common/amv_dongle_proto.h), which is the protocol's reference.
 

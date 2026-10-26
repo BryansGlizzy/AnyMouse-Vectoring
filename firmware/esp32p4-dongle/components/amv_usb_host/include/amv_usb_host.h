@@ -1,4 +1,5 @@
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
 
@@ -33,6 +34,9 @@ esp_err_t amv_usb_host_start(void);
 
 /* Devices the host library has enumerated (any class, hubs included), or -1. */
 int amv_usb_host_device_count(void);
+
+/* Human-readable snapshot of the High-Speed host port register (bring-up diagnostics). */
+void amv_usb_host_port_status(char *out, size_t cap);
 
 /* Snapshot of the claimed mouse interfaces; returns how many were written. */
 int amv_usb_host_mice(amv_usb_host_mouse_t *out, int max);

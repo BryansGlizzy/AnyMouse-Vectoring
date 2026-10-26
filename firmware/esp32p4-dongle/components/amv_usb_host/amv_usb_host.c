@@ -7,6 +7,7 @@
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "usb/usb_host.h"
+#include "soc/usb_dwc_struct.h"
 #include "usb/usb_helpers.h"
 #include "amv_ctrl.h"
 #include "amv_hid_parse.h"
@@ -371,6 +372,32 @@ static void client_task(void *arg)
     for (;;) usb_host_client_handle_events(s_client, portMAX_DELAY);
 }
 
+void amv_usb_host_port_status(char *out, size_t cap)
+{
+    /* Read-only peek at the High-Speed controller's host port register: what the pins look like */
+    usb_dwc_hprt_reg_t h = { .val = USB_DWC_HS.hprt_reg.val };
+    snprintf(out, cap, "HPRT=%08x conn=%u en=%u pwr=%u linestate(D-,D+)=%u%u speed=%u ovrcur=%u rst=%u",
+             (unsigned)h.val, h.prtconnsts, h.prtena, h.prtpwr, (h.prtlnsts >> 1) & 1, h.prtlnsts & 1, h.prtspd,
+             h.prtovrcurract, h.prtrst);
+}
+
+/* Bring-up aid: log every change of the host port's line state / connect bits, 20 Hz */
+static void diag_task(void *arg)
+{
+    (void)arg;
+    uint32_t last = 0xFFFFFFFF;
+    char buf[128];
+    for (;;) {
+        uint32_t v = USB_DWC_HS.hprt_reg.val & ~((1u << 1) | (1u << 3) | (1u << 5));   /* ignore the sticky change bits */
+        if (v != last) {
+            last = v;
+            amv_usb_host_port_status(buf, sizeof buf);
+            ESP_LOGI(TAG, "port change: %s", buf);
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
 int amv_usb_host_device_count(void)
 {
     usb_host_lib_info_t info;
@@ -397,10 +424,6 @@ esp_err_t amv_usb_host_start(void)
     gpio_config(&io);
     gpio_set_level(AMV_USB_VBUS_EN_GPIO, 1);
 #endif
-    /* Connection, enumeration and port events only log at debug level; keep them visible while the
-     * mouse side is being brought up (CONFIG_LOG_MAXIMUM_LEVEL_DEBUG in sdkconfig.defaults). */
-    static const char *const host_tags[] = { "HUB", "USBH", "HCD DWC", "ENUM", "USB HOST" };
-    for (size_t i = 0; i < sizeof host_tags / sizeof host_tags[0]; i++) esp_log_level_set(host_tags[i], ESP_LOG_DEBUG);
     s_q = xQueueCreate(8, sizeof(msg_t));
     s_ctrl_sem = xSemaphoreCreateBinary();
     if (!s_q || !s_ctrl_sem) return ESP_ERR_NO_MEM;
@@ -418,6 +441,7 @@ esp_err_t amv_usb_host_start(void)
 
     xTaskCreatePinnedToCore(lib_task, "usb_lib", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0);
     xTaskCreatePinnedToCore(client_task, "usb_cli", 4096, NULL, configMAX_PRIORITIES - 2, NULL, 0);
+    xTaskCreatePinnedToCore(diag_task, "usb_diag", 3072, NULL, 3, NULL, 1);
     xTaskCreatePinnedToCore(setup_task, "usb_setup", 6144, NULL, 5, NULL, 1);
     ESP_LOGI(TAG, "USB host up on the High-Speed port; waiting for mice");
     return ESP_OK;

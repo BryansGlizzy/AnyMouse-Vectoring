@@ -8,6 +8,7 @@
  * real hardware (the dongle can dump them) belong in tests/descriptors/ and get added below.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "amv_hid_parse.h"
 
@@ -60,6 +61,18 @@ static const uint8_t pushpop[] = {
     0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05, 0x81, 0x01, 0xB4,
     0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06, 0xC0, 0xC0 };
 
+/* Real descriptors captured by the dongle (tests/descriptors/, run from firmware/esp32p4-dongle) */
+static size_t load_hex(const char *path, uint8_t *out, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    size_t n = 0;
+    unsigned v;
+    while (n < cap && fscanf(f, "%2x", &v) == 1) out[n++] = (uint8_t)v;
+    fclose(f);
+    return n;
+}
+
 int main(void)
 {
     amv_hid_layout_t l;
@@ -103,6 +116,21 @@ int main(void)
 
     printf("push / pop\n");
     CHECK(amv_hid_parse(pushpop, sizeof pushpop, &l) == 0 && l.valid && l.num_buttons == 3 && l.x.bit_off == 8, "same layout as the plain boot mouse");
+
+    printf("real hardware: Razer Basilisk Ultimate (1532:0086), captured by the dongle\n");
+    uint8_t rd[1024];
+    size_t n = load_hex("tests/descriptors/razer_basilisk_ultimate_1532_0086_if0.hex", rd, sizeof rd);
+    CHECK(n == 110, "descriptor file loaded (110 bytes)");
+    CHECK(amv_hid_parse(rd, n, &l) == 0 && l.valid && !l.uses_report_ids, "interface 0 is a vectorable mouse without report IDs");
+    CHECK(l.num_buttons == 5 && l.wheel.bit_off == 24 && l.x.bit_off == 32 && l.y.bit_off == 48 && l.x.bit_size == 16 && !l.pan.present,
+          "5 buttons, wheel @24, X 16-bit @32, Y 16-bit @48 (a 2-byte vendor field sits before the wheel)");
+    /* buttons 1+3, dx=-300, dy=+20, wheel=-1; 5 vendor bytes after the motion fields are ignored */
+    const uint8_t rz[13] = { 0x05, 0, 0, 0xFF, 0xD4, 0xFE, 0x14, 0x00, 1, 2, 3, 4, 5 };
+    CHECK(amv_hid_decode(&l, rz, sizeof rz, &r) && r.dx == -300 && r.dy == 20 && r.wheel == -1 && r.buttons == 5, "decodes a Basilisk report (dx=-300 dy=20 wheel=-1 buttons 1+3)");
+    n = load_hex("tests/descriptors/razer_basilisk_ultimate_1532_0086_if1.hex", rd, sizeof rd);
+    CHECK(n == 159 && amv_hid_parse(rd, n, &l) == 0 && !l.valid, "interface 1 (159 bytes) is not a mouse and is left alone");
+    n = load_hex("tests/descriptors/razer_basilisk_ultimate_1532_0086_if2.hex", rd, sizeof rd);
+    CHECK(n == 61 && amv_hid_parse(rd, n, &l) == 0 && !l.valid, "interface 2 (61 bytes) is not a mouse and is left alone");
 
     printf("malformed input\n");
     const uint8_t trunc[] = { 0x05, 0x01, 0x09, 0x02, 0xA1 };

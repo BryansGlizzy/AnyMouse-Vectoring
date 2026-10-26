@@ -2,6 +2,8 @@
 
 The no-install front-end for the AnyMouse dongle. It tunes the eight direction weights, manages the four profile slots stored on the dongle, and shows the dongle's state, all over the dongle's USB vendor-HID channel using WebHID. Static files, no build step, no server component, nothing leaves your computer.
 
+**Verified** in Chrome against the real board (2026-10-26): connect, live state, weight changes taking effect on the cursor. **Not shown yet:** anything about the attached mouse (name, VID:PID, polling rate, CPI); that needs the mouse-info commands described in the dongle PLAN (section 9.5).
+
 **Needs** Chrome, Edge, Brave or Opera on a computer. Firefox, Safari and phones have no WebHID; they use the native app (planned). The page says so if the browser cannot do it.
 
 ## Run it

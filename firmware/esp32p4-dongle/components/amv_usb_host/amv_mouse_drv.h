@@ -5,7 +5,7 @@
  * Studio and ./anymouse can show and change its real CPI and polling rate even though the PC
  * only sees the dongle.
  *
- * Safety rule (PLAN.md 9.1a): probe and refresh are read-only; a write happens only when a
+ * Safety rule (firmware/esp32p4-dongle/README.md, write policy; PLAN.md section 4.2): probe and refresh are read-only; a write happens only when a
  * client asks, and only for models listed as verified through the dongle on real hardware.
  */
 #include <stdbool.h>
@@ -18,7 +18,7 @@
 #define AMV_DRV_MAX_HID_IFS 6
 #define AMV_DRV_MAX_CFG     2     /* extra vendor interfaces a driver can talk to besides the mouse's */
 
-/* A vendor/configuration interface the host claimed for a driver (PLAN.md 10.2 item 3). `h` is the
+/* A vendor/configuration interface the host claimed for a driver (firmware/esp32p4-dongle/README.md, vendor interfaces). `h` is the
  * host's private handle for the transport calls below. */
 typedef struct {
     uint8_t ifnum;

@@ -12,7 +12,7 @@ Proves that the ESP32-P4's Full-Speed OTG controller can be moved, in software, 
 The Mac saw both HID devices; 20/20 vendor echoes were correct, median round trip about 5 ms. No eFuse was touched. The mouse-side host half has **not** been tested.
 
 ## Build and flash
-Needs ESP-IDF v5.5.4 (`~/esp/esp-idf`, see [PLAN.md](../../PLAN.md) section 3), plus `cmake` and `ninja`.
+Needs ESP-IDF v5.5.4 (`~/esp/esp-idf`, see [README.md](../../README.md#toolchain-and-quickstart)), plus `cmake` and `ninja`.
 ```bash
 . ~/esp/esp-idf/export.sh
 cd firmware/esp32p4-dongle/spikes/m0_phy_swap
@@ -30,4 +30,4 @@ Vendor echo test: open the `0xFF4D` interface with `hidapi`, write a 64-byte rep
 
 ## Notes
 - Uses `espressif/esp_tinyusb` 3.0.0 (new API: `TINYUSB_CONFIG_FULL_SPEED`, `tinyusb_port_t`). `managed_components/`, `build/` and `sdkconfig` are git-ignored.
-- The VID `0x303A` with this placeholder PID is for development only; see PLAN.md section 6.
+- The VID `0x303A` with this placeholder PID is for development only; see PLAN.md section 8.

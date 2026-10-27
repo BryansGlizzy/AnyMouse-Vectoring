@@ -1059,7 +1059,7 @@ static uint8_t driver_write(uint8_t index, bool is_cpi, uint16_t value, amv_mous
 uint8_t amv_mouse_set_cpi(uint8_t index, uint16_t cpi, amv_mouse_info_t *out) { return driver_write(index, true, cpi, out); }
 uint8_t amv_mouse_set_rate(uint8_t index, uint16_t hz, amv_mouse_info_t *out) { return driver_write(index, false, hz, out); }
 
-/* ---------- catalog names, settings (PLAN.md section 10.2) ---------- */
+/* ---------- catalog names, settings (firmware/esp32p4-dongle/README.md) ---------- */
 
 uint8_t amv_mouse_get_model(uint8_t index, amv_mouse_model_t *out)
 {

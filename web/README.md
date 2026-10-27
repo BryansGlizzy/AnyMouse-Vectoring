@@ -2,9 +2,9 @@
 
 The no-install front-end for the AnyMouse dongle. It tunes the eight direction weights, manages the four profile slots stored on the dongle, and shows the dongle's state, all over the dongle's USB vendor-HID channel using WebHID. Static files, no build step, no server component, nothing leaves your computer.
 
-**Verified** in Chrome against the real board (2026-10-26): connect, live state, weight changes taking effect on the cursor. **Mouse card:** shows every device plugged into the dongle: its tier (known protocol, generic HID, boot fallback, not used), name, VID:PID, polling rate (what the mouse reports, its USB interval, and a live measured rate while you move it), CPI (read from the mouse, or entered by you for mice without a protocol), battery and firmware where the mouse reports them, plus the report layout. CPI and polling controls appear only for mouse models verified through the dongle; **Download descriptor** saves the mouse's raw HID report descriptor as a `.hex` file.
+**Verified** in Chrome against the real board (2026-10-26): connect, live state, weight changes taking effect on the cursor. **Mouse card:** shows every device plugged into the dongle: its tier (known protocol, generic HID, boot fallback, not used), name, VID:PID, polling rate (what the mouse reports, its USB interval, and a live measured rate while you move it), CPI (read from the mouse, or entered by you for mice without a protocol), battery and firmware where the mouse reports them, plus the report layout. Controls appear only where the dongle allows a write (today the Razer Basilisk Ultimate wired and the Logitech G Pro behind its Lightspeed receiver): CPI and polling for those, and a **Lift-off** dropdown and a **Motion Sync** switch for any mouse whose driver offers them as writable; anything read-only is listed as a row. The card also shows the catalog's model name, the receiver link state (wired, connected, asleep) and charging. A write to a sleeping wireless mouse fails until you move it. **Download descriptor** saves the mouse's raw HID report descriptor as a `.hex` file.
 
-**Needs** Chrome, Edge, Brave or Opera on a computer. Firefox, Safari and phones have no WebHID; they use the native app (planned). The page says so if the browser cannot do it.
+**Needs** Chrome, Edge, Brave or Opera on a computer. Firefox, Safari and phones have no WebHID; they use the native app (`./anymouse`, Linux). The page says so if the browser cannot do it.
 
 ## Run it
 ```bash
@@ -49,10 +49,15 @@ Flatpak and Snap browsers cannot see hidraw devices; use a native package. On Wi
 
 ## Tests
 ```bash
-cd web && node --test tests/*.test.mjs        # 16 tests, no dependencies
+cd web && node --test tests/*.test.mjs        # 23 tests, no dependencies
 ```
 They check that `proto.js` is current, that the client's requests are byte-identical to the ones recorded from the real firmware, that the demo device answers like the real firmware (replayed from the recording), and the client's behaviour (stale and invalid writes, events, timeouts, profile import). To re-record against a connected dongle: `python3 -I firmware/esp32p4-dongle/tools/capture_fixtures.py` (needs `pip install hidapi`).
 
 **Not covered by automated tests:** the browser's WebHID permission prompt and a real drag on the chart. Those need a person in Chrome.
 
-Protocol, firmware and milestones: [firmware/esp32p4-dongle/PLAN.md](../firmware/esp32p4-dongle/PLAN.md).
+## Not in the Studio (yet)
+- **Live direction needle and calibration mirror** (per-octant landing ratios from FpsAimForge): low priority, planned as [PLAN.md section 9](../firmware/esp32p4-dongle/PLAN.md#9-low-priority-webhid-studio-and-fpsaimforge-tuning). A browser cannot read the game's shared memory, so it needs a native relay.
+- **Firmware update:** not built; the dongle is reflashed over its UART USB-C.
+- **A Measure CPI wizard** for mice with no known protocol, and a Chrome check on Windows and Linux with a static HTTPS deployment: see [PLAN.md](../firmware/esp32p4-dongle/PLAN.md#2-needs-the-linux-box-cachyos).
+
+How the dongle and its protocol are built: [firmware/esp32p4-dongle/README.md](../firmware/esp32p4-dongle/README.md). What is still to do: [firmware/esp32p4-dongle/PLAN.md](../firmware/esp32p4-dongle/PLAN.md).

@@ -10,8 +10,8 @@ Anisotropic, 8-octant polar sensitivity calibration driven by real-time ballisti
 | [PROGRESS.md](PROGRESS.md) | Dated log of milestones, current status per phase, handoff notes and the roadmap checklist |
 | [LICENSE](LICENSE) | GNU AGPL-3.0, the license for this whole repository (see the License section at the end of this file) |
 | [web/README.md](web/README.md) | AnyMouse Studio, the no-install WebHID front-end for the dongle: run, use, files, tests |
-| [firmware/esp32p4-dongle/README.md](firmware/esp32p4-dongle/README.md) | ESP32-P4 dongle quickstart: cabling, build, flash, recovery |
-| [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md) | ESP32-P4 dongle design: verified hardware, architecture, milestones M0 to M6, risks |
+| [firmware/esp32p4-dongle/README.md](firmware/esp32p4-dongle/README.md) | ESP32-P4 dongle as built: status, verified hardware, architecture, mouse tiers and OpenMouse coverage, protocol, quickstart, tests |
+| [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md) | ESP32-P4 dongle open work only: Linux and calibration items, OpenMouse coverage, mouse-side experiments, Windows, stretch goals, risks |
 | [firmware/esp32p4-dongle/spikes/m0_phy_swap/README.md](firmware/esp32p4-dongle/spikes/m0_phy_swap/README.md) | The M0 proof-of-concept: PC-facing USB on the board's second USB-C |
 | [faf/AnyMouse.bundle.json](faf/AnyMouse.bundle.json) | The `FpsAimForge` calibration scenarios |
 
@@ -369,10 +369,10 @@ Deploy vectoring directly to the internal microcontroller:
 - **Path B2 (Binary Trampoline Patching via `morluto/rea`):** Binary patch stock firmware image to maintain stock 2.4GHz receiver compatibility (see Section 8).
 
 ### Phase 4: Universal USB-HID Hardware Pass-Through (ESP32-P4 MitM Dongle)
-The earlier RP2040 concept was replaced by an **ESP32-P4** (Waveshare ESP32-P4-Module-DEV-KIT) on 2026-10-25. The mouse or its 2.4 GHz receiver plugs into the board's USB-A port (High-Speed host); the board connects to the PC over USB-C and appears as an ordinary USB mouse. See [Section 13](#13-esp32-p4-hardware-dongle-phase-4) for the summary and [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md) for the full design.
-- **USB Host:** reads raw HID reports at the mouse's native rate (including 8 kHz receivers).
+The earlier RP2040 concept was replaced by an **ESP32-P4** (Waveshare ESP32-P4-Module-DEV-KIT) on 2026-10-25. The mouse or its 2.4 GHz receiver plugs into the board's USB-A port (High-Speed host); the board connects to the PC over USB-C and appears as an ordinary USB mouse. See [Section 13](#13-esp32-p4-hardware-dongle-phase-4) for the summary, [firmware/esp32p4-dongle/README.md](firmware/esp32p4-dongle/README.md) for how it is built and [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md) for what is still to do.
+- **USB Host:** reads raw HID reports at the mouse's native rate (an 8 kHz receiver has not been tested yet).
 - **Core 0:** extracts the deltas, runs the same octant math as `scale_vector()`, and emits the transformed report to the PC.
-- **Core 1:** vendor-HID control channel for weights, profiles and firmware updates.
+- **Core 1:** vendor-HID control channel for weights, profiles and the attached mouse's settings.
 - **Limit:** the PC-facing controller is Full-Speed, so output to the PC is capped at 1000 Hz.
 
 ---
@@ -584,16 +584,17 @@ The built-in GTK4 + Cairo studio ([`src/gui_gtk4.c`](src/gui_gtk4.c)) provides a
 
 ## 13. ESP32-P4 Hardware Dongle (Phase 4)
 
-**Status: in development** (the dongle reads a real mouse, vectors it and is tuned from the Studio; mouse information and the remaining measurements are next). Design and details live in [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md); this section is the summary.
+**Status: in development, working with real mice** (firmware 0.6.0). The dongle reads a real mouse, vectors it, is tuned from the Studio, and reports (and for some models sets) the mouse's CPI and polling rate. How it is built: [firmware/esp32p4-dongle/README.md](firmware/esp32p4-dongle/README.md). What is still to do: [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md). This section is the summary.
 
 ### What it is
 A small USB man-in-the-middle board. The user plugs their mouse (or its 2.4 GHz receiver) into the board, and the board plugs into the PC. The board scales every movement with the same 8-octant, cosine-interpolated weights as `./anymouse` and appears to the PC as a normal USB mouse, so it works on any OS (including Windows) with no driver and no input interception. The weights are stored on the board.
 
 ### How it is configured
 Over a vendor HID channel on the same USB cable. No Wi-Fi, no USB networking.
-- **Web page (WebHID):** nothing to install; open it in Chrome, Edge or Brave and click Connect. Handles weights, presets, profiles and firmware updates. Chromium only.
+- **Web page (WebHID):** nothing to install; open it in Chrome, Edge or Brave and click Connect. Handles weights, presets, profiles, and the attached mouse's information and settings. Chromium only.
 - **`./anymouse`:** pairs with the dongle automatically. It is the only front-end that can do live `FpsAimForge` auto-calibration, because the game telemetry lives on the PC.
 - Once a profile is saved, the dongle keeps vectoring with no software running.
+- There is no over-the-air firmware update: the board is reflashed over its UART USB-C (the DFU milestone was closed on 2026-10-27).
 
 ### Hardware
 Waveshare **ESP32-P4-Module-DEV-KIT** (ESP32-P4 rev v1.3, 16 MB flash, 32 MB PSRAM), flashed with ESP-IDF v5.5.4.
@@ -604,31 +605,31 @@ Waveshare **ESP32-P4-Module-DEV-KIT** (ESP32-P4 rev v1.3, 16 MB flash, 32 MB PSR
 | USB-C, **non-UART** | To the PC. The P4's Full-Speed OTG controller is moved onto this connector in software; it normally carries USB Serial/JTAG |
 | USB-C, **UART** (CH343) | Flashing and serial console; always works for recovery |
 
-Limit: the PC-facing controller is Full-Speed, so output to the PC is capped at 1000 Hz. The mouse is still read at its native rate (up to 8 kHz), so no motion is lost.
+Limit: the PC-facing controller is Full-Speed, so output to the PC is capped at 1000 Hz. The mouse is still read at its native rate, so no motion is lost.
 
-### Verified so far (2026-10-25)
-- Board identified and probed with `esptool`; no secure boot or flash encryption, so it cannot be bricked by a bad image.
-- Schematic read: the two USB-A stacks share one High-Speed controller through a mux, so neither can face the PC.
-- Proof of concept [`spikes/m0_phy_swap`](firmware/esp32p4-dongle/spikes/m0_phy_swap/README.md): the second USB-C enumerates as a HID mouse plus a vendor HID channel (`0xFF4D`), and 20 of 20 vendor round trips echoed correctly (about 5 ms RTT). No eFuse was burned.
-- Control plane built and tested with no mouse: octant weights are stored in flash (4 profile slots, auto-save, CRC), updated from the host with stale-write detection, and pushed back as events when the device changes them. [`firmware/esp32p4-dongle/tools/dongle_test.py`](firmware/esp32p4-dongle/tools/dongle_test.py) runs 56 checks over the vendor-HID channel, including the real scaling code against an independent reference and persistence across a reboot. The wire protocol is [`common/amv_dongle_proto.h`](common/amv_dongle_proto.h) and the shared scaling math is [`common/amv_octant.h`](common/amv_octant.h).
-- **Web front-end built:** [`web/`](web/README.md) is AnyMouse Studio, a static WebHID page (radar chart, sliders, presets, profile slots, JSON import/export) with a built-in demo mode. 16 Node tests pass, including checks against frames recorded from the real board. It has not yet been tried in a real browser against the board.
-- **Desktop app link built (2026-10-26, firmware 0.4.0):** [`src/dongle.c`](src/dongle.c) identifies the dongle with a `HELLO` nonce handshake instead of USB IDs, syncs weights both ways, and keeps the software engine from re-scaling the dongle's output (the dongle's mouse is never auto-grabbed). 44 link/guard checks pass on Linux against a fake dongle, the whole app compiles on Linux, and `dongle_test.py` passes 56/56 on the board. Not yet exercised: the C client against the real board over hidraw. The web page now uses the same handshake (no VID:PID filter).
-- **Mouse side working (2026-10-26):** report-descriptor parser (30 host checks, including real descriptors), High-Speed USB host, per-report scaling, summed 1 ms frames to the PC with a button-edge queue and a 16-bit/16-button mouse report. A **Razer Basilisk Ultimate** plugged into the dongle's direct USB-A port (jumper on HOST) is read at about 1000 reports/s with no errors, vectored, and works as a normal mouse on the Mac; the Studio was used in Chrome against the board and its weight changes take effect live.
-- **Mouse information (2026-10-26, firmware 0.5.0):** the dongle reports every attached device in three tiers: **known mice** are queried over their own protocol (ported from OpenMouse; the Razer Basilisk Ultimate shows its real CPI, polling rate, battery and firmware and its CPI and polling can be set from the Studio), **generic HID mice** show name, VID:PID, nominal and measured polling rate, layout and a CPI you enter once, and unusable descriptors fall back to the boot protocol or are listed as not used. The Studio has a Mouse card for this; the desktop app's hardware panel and `--dongle-status` read the same data through the dongle (built and tested against a fake dongle; not yet run against the board on Linux).
-- Not yet done: verifying the Finalmouse and Attack Shark drivers through the dongle, the desktop app against the real board, calibration push through the dongle, latency and long-run measurements. `src/evdev_rt.c` still has its own copy of the scaling math.
+### Built and verified
+- **Link and control plane:** the second USB-C enumerates as a HID mouse plus a vendor HID channel (`0xFF4D`) through a software PHY swap, with no eFuse burned. Octant weights are stored in flash (4 profile slots, auto-save, CRC), updated from the host with stale-write detection, and pushed back as events. [`tools/dongle_test.py`](firmware/esp32p4-dongle/tools/dongle_test.py) runs 68 checks over the vendor channel (its last full run was on firmware 0.5.0). The wire protocol is [`common/amv_dongle_proto.h`](common/amv_dongle_proto.h) and the shared scaling math is [`common/amv_octant.h`](common/amv_octant.h).
+- **Mouse side (M0 and M1, signed off 2026-10-27):** report-descriptor parser, High-Speed USB host, per-report scaling, summed 1 ms frames with a button-edge queue and a 16-bit/16-button mouse report. A **Razer Basilisk Ultimate** in the direct USB-A port (jumper on HOST) is read at about 1000 reports/s with no errors, vectored, and works as a normal mouse on the Mac.
+- **Studio:** [`web/`](web/README.md) is AnyMouse Studio, a static WebHID page (radar chart, sliders, presets, profile slots, JSON import/export, a Mouse card with the attached mouse's information and settings) with a built-in demo mode. 23 Node tests pass, including checks against frames recorded from the real board. Used in Chrome on macOS against the board.
+- **Mouse information in three tiers:** known mice are queried over their own protocol (ported from OpenMouse, AGPL-3.0), generic HID mice show name, VID:PID, nominal and measured polling rate and layout (plus a CPI you enter once), and unusable descriptors fall back to the boot protocol or are listed as not used.
+- **OpenMouse coverage so far (firmware 0.6.0):** a generated catalog names all 810 OpenMouse device ids. Drivers: Razer, Finalmouse ULX, Attack Shark R3 (GearHub) and Logitech HID++ 2.0. A **Logitech G Pro behind its Lightspeed receiver** shows name, CPI, rate and battery in the Studio, and its CPI and polling rate can be set from it. Writes follow a rule: a model may be written only when OpenMouse marks it verified and its C port passes transcript tests; until that harness exists only the Razer Basilisk Ultimate and the G Pro are writable.
+- **Desktop app link:** [`src/dongle.c`](src/dongle.c) identifies the dongle with a `HELLO` nonce handshake instead of USB IDs, syncs weights both ways, keeps the software engine from re-scaling the dongle's output, and routes the CPI and polling controls through the dongle. 61 link and guard checks pass on Linux against a fake dongle and the whole app compiles on Linux. **Not yet run against the real board over hidraw.**
+
+### Still open
+Details and priorities in [PLAN.md](firmware/esp32p4-dongle/PLAN.md): the Linux-box checks (`./anymouse` against the board, `src/evdev_rt.c` on the shared math), calibration with the dongle in the loop, the rest of OpenMouse coverage (the transcript harness first, then the ULX and R3 through the dongle, LOD and Motion Sync, more engines), the Windows spike, and stretch goals. A low-priority item is tuning `FpsAimForge` calibration from the Studio.
 
 ### Where to go next
 | I want to... | Read |
 |:---|:---|
-| Build, flash and cable the board | [firmware/esp32p4-dongle/README.md](firmware/esp32p4-dongle/README.md) |
-| Understand the design, milestones and risks | [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md) |
+| Build, flash and cable the board, or see how it works | [firmware/esp32p4-dongle/README.md](firmware/esp32p4-dongle/README.md) |
+| See what is still to do | [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md) |
 | See what was tested and when | [PROGRESS.md](PROGRESS.md) |
-| Know what comes next with real mice (auto-discovery, CPI/polling for known mice, generic fallback, acceptance checklist) | [PLAN.md section 9](firmware/esp32p4-dongle/PLAN.md#9-mouse-discovery-device-info-and-hardware-verification) |
+| Use or hack on the web front-end | [web/README.md](web/README.md) |
 
 ---
 
 ## License
 
-AnyMouse-Vectoring is licensed under the **GNU Affero General Public License v3.0** ([LICENSE](LICENSE)), the same license as the [OpenMouse protocol library](https://github.com/OpenMouse-Project/mouse-protocol) whose codecs and device catalog this project builds on for mouse detection and control (see [PLAN.md section 9](firmware/esp32p4-dongle/PLAN.md#9-mouse-discovery-device-info-and-hardware-verification)). In short: you may use, study, modify and share it, but a modified version that you distribute or offer to users over a network must make its source available under the same license. This is a summary, not legal advice; the LICENSE file governs.
+AnyMouse-Vectoring is licensed under the **GNU Affero General Public License v3.0** ([LICENSE](LICENSE)), the same license as the [OpenMouse protocol library](https://github.com/OpenMouse-Project/mouse-protocol) whose codecs and device catalog this project builds on for mouse detection and control (see [the dongle README](firmware/esp32p4-dongle/README.md#mouse-discovery-and-information)). In short: you may use, study, modify and share it, but a modified version that you distribute or offer to users over a network must make its source available under the same license. This is a summary, not legal advice; the LICENSE file governs.
 
 Hosting `web/` on a public site counts as offering it over a network, so the source must stay available to its users (this repository does that).

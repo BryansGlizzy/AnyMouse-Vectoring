@@ -6,7 +6,7 @@
 // SUPPORTED_HID_FILTERS (what its browser picker offers), and each entry is resolved to an engine
 // by running the registry's own isSupported() checks against a synthetic device, in registry
 // order, exactly as the browser does. Nothing here is hand-maintained, so re-running after an
-// upstream bump shows what changed (PLAN.md 10.2 item 1, 10.4 phase E).
+// upstream bump shows what changed (PLAN.md section 4.3, phase E).
 import { execSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";

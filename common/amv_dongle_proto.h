@@ -38,7 +38,7 @@
 #define AMV_VENDOR_USAGE      0x01   /* application collection usage on that page */
 #define AMV_NUM_SLOTS         4
 
-/* USB identity of the dev build (PLAN.md section 6: replace the PID before sharing builds). */
+/* USB identity of the dev build (PLAN.md section 8: replace the PID before sharing builds). */
 #define AMV_USB_VID           0x303A
 #define AMV_USB_PID           0x4D56
 
@@ -71,7 +71,7 @@
 #define AMV_CMD_GET_MOUSE_DESC   0x10   /* amv_mouse_desc_req_t -> amv_mouse_desc_rep_t (raw report descriptor) */
 #define AMV_CMD_SET_MOUSE_CPI    0x11   /* amv_mouse_set_req_t -> amv_mouse_info_t; KNOWN: written to the mouse, else stored as a label */
 #define AMV_CMD_SET_MOUSE_POLLING 0x12  /* amv_mouse_set_req_t -> amv_mouse_info_t; KNOWN with AMV_MF_CAN_SET_RATE only */
-/* Full OpenMouse coverage (firmware 0.6.0+, PLAN.md section 10). A brand-neutral settings list: a
+/* Full OpenMouse coverage (firmware 0.6.0+, see firmware/esp32p4-dongle/README.md). A brand-neutral settings list: a
  * client renders whatever the mouse offers (CPI, polling, lift-off, Motion Sync, battery) without
  * knowing the brand. SET_MOUSE_CPI / SET_MOUSE_POLLING remain as aliases of SET_MOUSE_SETTING. */
 #define AMV_CMD_GET_MOUSE_MODEL  0x13   /* {index} -> amv_mouse_model_t: the catalog's name for this id */
@@ -110,7 +110,7 @@
 #define AMV_CAP_VECTORED_MOUSE 0x0001   /* the HID mouse on this USB device already carries vectored motion */
 #define AMV_CAP_MOUSE_HOST     0x0002   /* a downstream mouse can be attached (USB host side present) */
 
-/* Device tiers (PLAN.md section 9.1) */
+/* Device tiers (firmware/esp32p4-dongle/README.md, Mouse discovery and information) */
 #define AMV_TIER_KNOWN     1   /* vendor protocol known (OpenMouse driver on the dongle): real CPI / polling */
 #define AMV_TIER_GENERIC   2   /* report descriptor parsed: vectored, info from USB descriptors */
 #define AMV_TIER_BOOT      3   /* descriptor unusable, read in boot protocol (8-bit motion, 3 buttons) */

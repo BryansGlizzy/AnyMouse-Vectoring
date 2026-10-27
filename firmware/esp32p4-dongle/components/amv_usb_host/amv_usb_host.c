@@ -11,6 +11,7 @@
 #include "usb/usb_host.h"
 #include "soc/usb_dwc_struct.h"
 #include "usb/usb_helpers.h"
+#include "amv_catalog.h"
 #include "amv_ctrl.h"
 #include "amv_hid_parse.h"
 #include "amv_mouse_drv.h"
@@ -27,6 +28,21 @@ static const char *TAG = "amv_host";
 #define RATE_WINDOW   10      /* seconds of per-second report counts kept for measured_hz */
 #define REFRESH_MS    5000    /* tier-1 re-read (CPI changes with the mouse's own DPI button) */
 
+/* A vendor interface claimed for a driver (amv_drv_t.cfg_match); owned by the driver's mouse slot */
+typedef struct {
+    bool used;
+    uint8_t ifnum, ep_in, ep_out;
+    uint16_t mps_in, mps_out;
+    bool report_ids;
+    QueueHandle_t q;          /* input reports, in_report_t */
+    SemaphoreHandle_t out_sem;
+    usb_transfer_t *xfer[2];
+    volatile int inflight;
+    volatile bool dying;
+    usb_device_handle_t dev;
+    uint32_t reports;
+} cfg_if_t;
+
 typedef struct {
     bool used;
     uint8_t tier;             /* AMV_TIER_KNOWN / GENERIC / BOOT */
@@ -41,6 +57,7 @@ typedef struct {
     uint8_t hist_pos;
     const amv_drv_t *drv;     /* tier-1 driver, NULL otherwise */
     amv_drv_ctx_t ctx;        /* driver results (written under s_tab) */
+    cfg_if_t cfg[AMV_DRV_MAX_CFG];
     bool probed;
     QueueHandle_t in_q;       /* vendor input reports for drivers with wants_input */
     volatile bool dying;
@@ -81,7 +98,7 @@ static SemaphoreHandle_t s_drv;        /* driver exchanges; teardown waits for t
 static uint16_t s_next_uid = 1;
 static amv_mouse_event_cb_t s_event_cb;
 
-static const amv_drv_t *const DRIVERS[] = { &amv_drv_razer, &amv_drv_finalmouse, &amv_drv_gearhub };
+static const amv_drv_t *const DRIVERS[] = { &amv_drv_razer, &amv_drv_finalmouse, &amv_drv_gearhub, &amv_drv_logitech };
 
 #define TAB_LOCK()   xSemaphoreTake(s_tab, portMAX_DELAY)
 #define TAB_UNLOCK() xSemaphoreGive(s_tab)
@@ -190,6 +207,8 @@ static esp_err_t ctrl_xfer(usb_device_handle_t dev, uint8_t bm, uint8_t req, uin
     return e;
 }
 
+typedef struct { uint8_t len; uint8_t data[64]; } in_report_t;
+
 /* ---------- transport for the tier-1 drivers (amv_mouse_drv.h) ---------- */
 
 esp_err_t amv_host_set_report(amv_drv_ctx_t *c, uint8_t iface, uint8_t type, uint8_t id, const uint8_t *data, uint16_t len)
@@ -207,8 +226,6 @@ esp_err_t amv_host_get_report(amv_drv_ctx_t *c, uint8_t iface, uint8_t type, uin
                      (uint16_t)((type << 8) | id), iface, len, data, actual);
 }
 
-typedef struct { uint8_t len; uint8_t data[64]; } in_report_t;
-
 int amv_host_read_input(amv_drv_ctx_t *c, uint8_t *buf, int cap, int timeout_ms)
 {
     in_report_t r;
@@ -218,7 +235,126 @@ int amv_host_read_input(amv_drv_ctx_t *c, uint8_t *buf, int cap, int timeout_ms)
     return n;
 }
 
+/* ---------- WebHID-shaped transport over claimed vendor interfaces (amv_hl_*) ---------- */
+
+static cfg_if_t *cfg_of(amv_drv_ctx_t *c, int n)
+{
+    return n >= 0 && n < c->n_cfg ? (cfg_if_t *)c->cfg[n].h : NULL;
+}
+
+static void cfg_out_done(usb_transfer_t *t) { xSemaphoreGive((SemaphoreHandle_t)t->context); }
+
+esp_err_t amv_hl_send_report(amv_drv_ctx_t *c, int n, uint8_t report_id, const uint8_t *data, uint16_t len)
+{
+    cfg_if_t *f = cfg_of(c, n);
+    if (!f || f->dying) return ESP_ERR_INVALID_STATE;
+    uint8_t buf[128];
+    uint16_t total = (uint16_t)(len + (report_id ? 1 : 0));
+    if (total > sizeof buf) return ESP_ERR_INVALID_SIZE;
+    if (report_id) buf[0] = report_id;
+    memcpy(buf + (report_id ? 1 : 0), data, len);
+    if (!f->ep_out) {   /* no interrupt OUT endpoint: SET_REPORT(output), as WebHID falls back to */
+        return ctrl_xfer(f->dev, USB_BM_REQUEST_TYPE_DIR_OUT | USB_BM_REQUEST_TYPE_TYPE_CLASS | 1, 0x09,
+                         (uint16_t)((2 << 8) | report_id), f->ifnum, total, buf, NULL);
+    }
+    usb_transfer_t *t;
+    esp_err_t err = usb_host_transfer_alloc(total, 0, &t);
+    if (err != ESP_OK) return err;
+    memcpy(t->data_buffer, buf, total);
+    t->device_handle = f->dev;
+    t->bEndpointAddress = f->ep_out;
+    t->callback = cfg_out_done;
+    t->context = f->out_sem;
+    t->num_bytes = total;
+    xSemaphoreTake(f->out_sem, 0);
+    err = usb_host_transfer_submit(t);
+    if (err == ESP_OK) {
+        if (xSemaphoreTake(f->out_sem, pdMS_TO_TICKS(1000)) != pdTRUE) return ESP_ERR_TIMEOUT;   /* leaked: still owned */
+        if (t->status != USB_TRANSFER_STATUS_COMPLETED) err = ESP_FAIL;
+    }
+    usb_host_transfer_free(t);
+    return err;
+}
+
+esp_err_t amv_hl_send_feature(amv_drv_ctx_t *c, int n, uint8_t report_id, const uint8_t *data, uint16_t len)
+{
+    cfg_if_t *f = cfg_of(c, n);
+    if (!f || f->dying) return ESP_ERR_INVALID_STATE;
+    uint8_t buf[128];
+    uint16_t total = (uint16_t)(len + (report_id ? 1 : 0));
+    if (total > sizeof buf) return ESP_ERR_INVALID_SIZE;
+    if (report_id) buf[0] = report_id;
+    memcpy(buf + (report_id ? 1 : 0), data, len);
+    return ctrl_xfer(f->dev, USB_BM_REQUEST_TYPE_DIR_OUT | USB_BM_REQUEST_TYPE_TYPE_CLASS | 1, 0x09,
+                     (uint16_t)((3 << 8) | report_id), f->ifnum, total, buf, NULL);
+}
+
+esp_err_t amv_hl_receive_feature(amv_drv_ctx_t *c, int n, uint8_t report_id, uint8_t *data, uint16_t cap, int *actual)
+{
+    cfg_if_t *f = cfg_of(c, n);
+    if (!f || f->dying) return ESP_ERR_INVALID_STATE;
+    uint8_t buf[129];
+    uint16_t want = (uint16_t)(cap + (report_id ? 1 : 0));
+    if (want > sizeof buf) return ESP_ERR_INVALID_SIZE;
+    int got = 0;
+    esp_err_t e = ctrl_xfer(f->dev, USB_BM_REQUEST_TYPE_DIR_IN | USB_BM_REQUEST_TYPE_TYPE_CLASS | 1, 0x01,
+                            (uint16_t)((3 << 8) | report_id), f->ifnum, want, buf, &got);
+    if (e != ESP_OK) return e;
+    int skip = (report_id && got > 0) ? 1 : 0;      /* the ID byte is not part of WebHID's data */
+    if (got - skip > cap) got = cap + skip;
+    memcpy(data, buf + skip, (size_t)(got - skip));
+    if (actual) *actual = got - skip;
+    return ESP_OK;
+}
+
+int amv_hl_wait_input(amv_drv_ctx_t *c, int n, uint8_t *report_id, uint8_t *data, int cap, int timeout_ms)
+{
+    cfg_if_t *f = cfg_of(c, n);
+    in_report_t r;
+    if (!f || !f->q || xQueueReceive(f->q, &r, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) return 0;
+    int skip = f->report_ids ? 1 : 0;
+    if (report_id) *report_id = f->report_ids ? r.data[0] : 0;
+    int len = r.len - skip;
+    if (len < 0) len = 0;
+    if (len > cap) len = cap;
+    memcpy(data, r.data + skip, (size_t)len);
+    return len > 0 ? len : 1;                       /* a bare report ID still counts as a report */
+}
+
+void amv_hl_flush_input(amv_drv_ctx_t *c, int n)
+{
+    cfg_if_t *f = cfg_of(c, n);
+    if (f && f->q) xQueueReset(f->q);
+}
+
 /* ---------- interrupt IN handling ---------- */
+
+static void cfg_in_cb(usb_transfer_t *t)
+{
+    cfg_if_t *f = t->context;
+    bool resubmit = false;
+    if (t->status == USB_TRANSFER_STATUS_COMPLETED) {
+        if (t->actual_num_bytes > 0 && f->q) {
+            in_report_t v = { .len = (uint8_t)(t->actual_num_bytes > 64 ? 64 : t->actual_num_bytes) };
+            memcpy(v.data, t->data_buffer, v.len);
+            if (xQueueSend(f->q, &v, 0) != pdTRUE) {   /* full: drop the oldest, keep the newest */
+                in_report_t drop;
+                xQueueReceive(f->q, &drop, 0);
+                xQueueSend(f->q, &v, 0);
+            }
+            f->reports++;
+        }
+        resubmit = !f->dying;
+    } else if (t->status != USB_TRANSFER_STATUS_NO_DEVICE && t->status != USB_TRANSFER_STATUS_CANCELED) {
+        if (t->status == USB_TRANSFER_STATUS_STALL) usb_host_endpoint_clear(t->device_handle, t->bEndpointAddress);
+        resubmit = !f->dying;
+    }
+    if (resubmit) {
+        t->num_bytes = f->mps_in;
+        if (usb_host_transfer_submit(t) == ESP_OK) return;
+    }
+    __atomic_fetch_sub(&f->inflight, 1, __ATOMIC_SEQ_CST);
+}
 
 static void in_cb(usb_transfer_t *t)
 {
@@ -258,7 +394,7 @@ static void in_cb(usb_transfer_t *t)
 
 /* ---------- device setup / teardown (setup task) ---------- */
 
-typedef struct { uint8_t ifnum, subclass, protocol, ep, interval; uint16_t mps, report_len; } hid_if_t;
+typedef struct { uint8_t ifnum, subclass, protocol, ep, ep_out, interval; uint16_t mps, mps_out, report_len; } hid_if_t;
 
 static int collect_hid_interfaces(const usb_config_desc_t *cfg, hid_if_t *out, int max)
 {
@@ -283,6 +419,9 @@ static int collect_hid_interfaces(const usb_config_desc_t *cfg, hid_if_t *out, i
                 cur.ep = e->bEndpointAddress;
                 cur.mps = USB_EP_DESC_GET_MPS(e);
                 cur.interval = e->bInterval;
+            } else if (!(e->bEndpointAddress & 0x80) && (e->bmAttributes & 3) == 3 && !cur.ep_out) {
+                cur.ep_out = e->bEndpointAddress;
+                cur.mps_out = USB_EP_DESC_GET_MPS(e);
             }
         }
     }
@@ -299,6 +438,22 @@ static void teardown_if(mouse_if_t *m)
     for (int k = 0; k < XFERS_PER_EP; k++) {
         if (m->xfer[k] && m->inflight == 0) usb_host_transfer_free(m->xfer[k]);
         m->xfer[k] = NULL;
+    }
+    for (int i = 0; i < AMV_DRV_MAX_CFG; i++) {
+        cfg_if_t *f = &m->cfg[i];
+        if (!f->used) continue;
+        f->dying = true;
+        for (int w = 0; w < 100 && f->inflight > 0; w++) vTaskDelay(pdMS_TO_TICKS(5));
+        for (int k = 0; k < 2; k++) {
+            if (f->xfer[k] && f->inflight == 0) usb_host_transfer_free(f->xfer[k]);
+            f->xfer[k] = NULL;
+        }
+        usb_host_interface_release(s_client, f->dev, f->ifnum);
+        if (f->q) vQueueDelete(f->q);
+        if (f->out_sem) vSemaphoreDelete(f->out_sem);
+        f->q = NULL;
+        f->out_sem = NULL;
+        f->used = false;
     }
     usb_host_interface_release(s_client, m->dev, m->ifnum);
     amv_vector_release((unsigned)(m - s_if));
@@ -502,6 +657,55 @@ static void handle_new(uint8_t addr)
                  started, tier == AMV_TIER_BOOT ? "tier 3, boot protocol" : drv && m->drv ? "tier 1 candidate" : "tier 2, generic");
     }
 
+    /* Vendor interfaces the driver wants (HID++ on a Logitech receiver, ...): claim and listen */
+    if (first && first->drv && first->drv->cfg_match) {
+        int ncfg = 0;
+        for (int k = 0; k < nhid && ncfg < AMV_DRV_MAX_CFG; k++) {
+            if (hi[k].ifnum == first->ifnum || !descs[k] || !hi[k].ep) continue;
+            bool is_mouse_if = false;
+            for (int i = 0; i < MAX_IF; i++) if (s_if[i].used && s_if[i].dev == dev && s_if[i].ifnum == hi[k].ifnum) is_mouse_if = true;
+            if (is_mouse_if || !first->drv->cfg_match(descs[k], (uint16_t)lens[k])) continue;
+            if (usb_host_interface_claim(s_client, dev, hi[k].ifnum, 0) != ESP_OK) {
+                ESP_LOGW(TAG, "  if %u: claim of the %s configuration interface failed", hi[k].ifnum, first->drv->name);
+                continue;
+            }
+            amv_hid_layout_t CL;
+            amv_hid_parse(descs[k], (size_t)lens[k], &CL);
+            cfg_if_t *f = &first->cfg[ncfg];
+            memset(f, 0, sizeof *f);
+            f->dev = dev;
+            f->ifnum = hi[k].ifnum;
+            f->ep_in = hi[k].ep;
+            f->ep_out = hi[k].ep_out;
+            f->mps_in = hi[k].mps ? hi[k].mps : 64;
+            f->mps_out = hi[k].mps_out;
+            f->report_ids = CL.uses_report_ids;
+            f->q = xQueueCreate(16, sizeof(in_report_t));
+            f->out_sem = xSemaphoreCreateBinary();
+            for (int x = 0; x < 2; x++) {
+                if (usb_host_transfer_alloc(f->mps_in, 0, &f->xfer[x]) != ESP_OK) break;
+                usb_transfer_t *t = f->xfer[x];
+                t->device_handle = dev;
+                t->bEndpointAddress = f->ep_in;
+                t->callback = cfg_in_cb;
+                t->context = f;
+                t->num_bytes = f->mps_in;
+                __atomic_fetch_add(&f->inflight, 1, __ATOMIC_SEQ_CST);
+                if (usb_host_transfer_submit(t) != ESP_OK) { __atomic_fetch_sub(&f->inflight, 1, __ATOMIC_SEQ_CST); break; }
+            }
+            f->used = true;
+            ESP_LOGI(TAG, "  if %u: claimed for the %s driver (in 0x%02x%s, %s)", f->ifnum, first->drv->name, f->ep_in,
+                     f->ep_out ? ", out endpoint" : ", output via SET_REPORT", f->report_ids ? "report IDs" : "no report IDs");
+            TAB_LOCK();
+            first->ctx.cfg[ncfg] = (amv_drv_cfg_if_t){ .ifnum = f->ifnum, .report_ids = f->report_ids,
+                                                       .has_out_ep = f->ep_out != 0, .h = f };
+            first->ctx.cfg[ncfg].n_ids = (uint8_t)amv_hid_report_ids(descs[k], (size_t)lens[k], first->ctx.cfg[ncfg].ids,
+                                                                     (int)sizeof first->ctx.cfg[ncfg].ids);
+            first->ctx.n_cfg = (uint8_t)++ncfg;
+            TAB_UNLOCK();
+        }
+    }
+
     /* Tier 1: the mouse already moves the cursor; now ask it about itself over its own protocol */
     if (first && first->drv) {
         ESP_LOGI(TAG, "  %s driver: probing (read-only)", first->drv->name);
@@ -567,6 +771,25 @@ static void refresh_known(void)
 {
     for (int i = 0; i < MAX_IF; i++) {
         mouse_if_t *m = &s_if[i];
+        /* A receiver driver that found no mouse awake (Logitech: asleep, out of range): try again;
+         * the mouse answers once it has been moved. The descriptors are gone, so only drivers that
+         * work purely over claimed configuration interfaces can be probed again. */
+        if (m->used && !m->dying && m->tier != AMV_TIER_KNOWN && m->drv && m->drv->cfg_match && m->ctx.n_cfg) {
+            xSemaphoreTake(s_drv, portMAX_DELAY);
+            amv_drv_ctx_t c = m->ctx;
+            bool live = m->used && !m->dying;
+            esp_err_t e = live ? m->drv->probe(&c) : ESP_FAIL;
+            xSemaphoreGive(s_drv);
+            if (live) {
+                bool changed = e == ESP_OK || c.link != m->ctx.link;
+                TAB_LOCK();
+                m->ctx = c;
+                if (e == ESP_OK) m->tier = AMV_TIER_KNOWN;
+                TAB_UNLOCK();
+                if (changed) emit(AMV_MEV_UPDATED, m->uid);
+            }
+            continue;
+        }
         if (!m->used || m->dying || m->tier != AMV_TIER_KNOWN || !m->drv || !m->drv->refresh) continue;
         xSemaphoreTake(s_drv, portMAX_DELAY);
         amv_drv_ctx_t c = m->ctx;
@@ -575,7 +798,8 @@ static void refresh_known(void)
         xSemaphoreGive(s_drv);
         if (!live) continue;
         bool changed = c.cpi != m->ctx.cpi || c.device_hz != m->ctx.device_hz || c.battery != m->ctx.battery ||
-                       c.error != m->ctx.error;
+                       c.error != m->ctx.error || c.lod != m->ctx.lod || c.motion_sync != m->ctx.motion_sync ||
+                       c.charging != m->ctx.charging || c.link != m->ctx.link;
         TAB_LOCK();
         m->ctx = c;
         TAB_UNLOCK();
@@ -708,7 +932,7 @@ static void fill_info(int slot, uint8_t index, int count, amv_mouse_info_t *o)
     for (int k = 0; k < RATE_WINDOW; k++) if (m->hist[k] > o->measured_hz) o->measured_hz = m->hist[k];
     o->num_buttons = L->num_buttons;
     o->x_bits = L->x.bit_size;
-    snprintf(o->name, sizeof o->name, "%.29s", m->name);
+    snprintf(o->name, sizeof o->name, "%.29s", m->tier == AMV_TIER_KNOWN && m->ctx.name[0] ? m->ctx.name : m->name);
     if (m->drv) {
         o->driver = m->drv->id;
         if (m->ctx.error) o->flags |= AMV_MF_DRV_ERROR;
@@ -834,6 +1058,153 @@ static uint8_t driver_write(uint8_t index, bool is_cpi, uint16_t value, amv_mous
 
 uint8_t amv_mouse_set_cpi(uint8_t index, uint16_t cpi, amv_mouse_info_t *out) { return driver_write(index, true, cpi, out); }
 uint8_t amv_mouse_set_rate(uint8_t index, uint16_t hz, amv_mouse_info_t *out) { return driver_write(index, false, hz, out); }
+
+/* ---------- catalog names, settings (PLAN.md section 10.2) ---------- */
+
+uint8_t amv_mouse_get_model(uint8_t index, amv_mouse_model_t *out)
+{
+    int count;
+    memset(out, 0, sizeof *out);
+    out->index = index;
+    TAB_LOCK();
+    int slot = resolve(index, &count);
+    uint16_t vid = 0, pid = 0;
+    bool driver = false;
+    if (slot != INT32_MIN) {
+        if (slot < 0) { vid = s_ign[-1 - slot].vid; pid = s_ign[-1 - slot].pid; }
+        else { vid = s_if[slot].vid; pid = s_if[slot].pid; driver = s_if[slot].drv != NULL; }
+    }
+    TAB_UNLOCK();
+    if (slot == INT32_MIN) return AMV_ST_NO_MOUSE;
+    const amv_catalog_entry_t *e = amv_catalog_find(vid, pid);
+    out->state = driver ? AMV_MODEL_DRIVER : e ? AMV_MODEL_KNOWN : AMV_MODEL_UNKNOWN;
+    if (e) {
+        snprintf(out->brand, sizeof out->brand, "%s", amv_catalog_brand(e));
+        snprintf(out->model, sizeof out->model, "%s", e->model);
+    }
+    return AMV_ST_OK;
+}
+
+static void add_setting(amv_settings_rep_t *o, uint8_t id, uint8_t flags, uint16_t value)
+{
+    if (o->count < AMV_SETTINGS_MAX) o->s[o->count++] = (amv_setting_t){ .id = id, .flags = flags, .value = value };
+}
+
+#define BIT_OF(id) (1u << (id))
+
+uint8_t amv_mouse_get_settings(uint8_t index, amv_settings_rep_t *o)
+{
+    int count;
+    memset(o, 0, sizeof *o);
+    o->index = index;
+    TAB_LOCK();
+    int slot = resolve(index, &count);
+    if (slot != INT32_MIN && slot >= 0) {
+        const mouse_if_t *m = &s_if[slot];
+        const amv_drv_ctx_t *c = &m->ctx;
+        if (m->tier == AMV_TIER_KNOWN) {
+            o->link = c->link;
+            if (c->cpi) add_setting(o, AMV_SET_CPI, AMV_SETF_READABLE | (c->can_set_cpi ? AMV_SETF_WRITABLE : 0), c->cpi);
+            if (c->device_hz) add_setting(o, AMV_SET_POLLING, AMV_SETF_READABLE | (c->can_set_rate ? AMV_SETF_WRITABLE : 0), c->device_hz);
+            if (c->readable & BIT_OF(AMV_SET_LOD))
+                add_setting(o, AMV_SET_LOD, AMV_SETF_READABLE | ((c->writable & BIT_OF(AMV_SET_LOD)) ? AMV_SETF_WRITABLE : 0), c->lod);
+            if (c->readable & BIT_OF(AMV_SET_MOTION_SYNC))
+                add_setting(o, AMV_SET_MOTION_SYNC, AMV_SETF_READABLE | ((c->writable & BIT_OF(AMV_SET_MOTION_SYNC)) ? AMV_SETF_WRITABLE : 0), c->motion_sync);
+            if (c->battery != 0xFF) add_setting(o, AMV_SET_BATTERY, AMV_SETF_READABLE, c->battery);
+            if (c->readable & BIT_OF(AMV_SET_CHARGING)) add_setting(o, AMV_SET_CHARGING, AMV_SETF_READABLE, c->charging);
+            add_setting(o, AMV_SET_LINK, AMV_SETF_READABLE, c->link);
+        } else {
+            /* tiers 2 and 3: the sensor cannot be reached, the CPI is the user's label */
+            add_setting(o, AMV_SET_CPI, AMV_SETF_READABLE | AMV_SETF_WRITABLE, m->cpi_user);
+        }
+    }
+    TAB_UNLOCK();
+    if (slot == INT32_MIN) { o->count = 0; return AMV_ST_NO_MOUSE; }
+    if (slot < 0) return AMV_ST_UNSUPPORTED;
+    return AMV_ST_OK;
+}
+
+uint8_t amv_mouse_get_options(uint8_t index, uint8_t setting, amv_options_rep_t *o)
+{
+    int count;
+    memset(o, 0, sizeof *o);
+    o->index = index;
+    o->setting = setting;
+    uint8_t st = AMV_ST_OK;
+    TAB_LOCK();
+    int slot = resolve(index, &count);
+    if (slot == INT32_MIN) st = AMV_ST_NO_MOUSE;
+    else if (slot < 0) st = AMV_ST_UNSUPPORTED;
+    else {
+        const mouse_if_t *m = &s_if[slot];
+        const amv_drv_ctx_t *c = &m->ctx;
+        bool known = m->tier == AMV_TIER_KNOWN;
+        if (setting == AMV_SET_CPI) {
+            o->kind = AMV_OPT_RANGE; o->unit = AMV_UNIT_CPI; o->n = 3;
+            o->values[0] = known && c->cpi_min ? c->cpi_min : 50;
+            o->values[1] = known && c->cpi_max ? c->cpi_max : 64000;
+            o->values[2] = known && c->cpi_step ? c->cpi_step : 50;
+        } else if (known && setting == AMV_SET_POLLING && c->n_rates) {
+            o->kind = AMV_OPT_LIST; o->unit = AMV_UNIT_HZ; o->n = c->n_rates > AMV_OPTIONS_MAX ? AMV_OPTIONS_MAX : c->n_rates;
+            memcpy(o->values, c->rates, o->n * sizeof o->values[0]);
+        } else if (known && setting == AMV_SET_LOD && (c->readable & BIT_OF(AMV_SET_LOD)) && c->n_lod) {
+            o->kind = AMV_OPT_LIST; o->unit = c->lod_unit; o->n = c->n_lod;
+            memcpy(o->values, c->lod_opts, o->n * sizeof o->values[0]);
+        } else if (known && setting == AMV_SET_MOTION_SYNC && (c->readable & BIT_OF(AMV_SET_MOTION_SYNC))) {
+            o->kind = AMV_OPT_LIST; o->unit = AMV_UNIT_BOOL; o->n = 2; o->values[0] = 0; o->values[1] = 1;
+        } else {
+            st = AMV_ST_UNSUPPORTED;
+        }
+    }
+    TAB_UNLOCK();
+    return st;
+}
+
+/* LOD and Motion Sync writes: same discipline as driver_write (copy the context, device cannot go away). */
+static uint8_t driver_set_setting(uint8_t index, uint8_t id, uint16_t value)
+{
+    int count;
+    xSemaphoreTake(s_drv, portMAX_DELAY);
+    TAB_LOCK();
+    int slot = resolve(index, &count);
+    mouse_if_t *m = slot >= 0 && slot != INT32_MIN ? &s_if[slot] : NULL;
+    amv_drv_ctx_t c;
+    if (m) c = m->ctx;
+    TAB_UNLOCK();
+    uint8_t st;
+    if (slot == INT32_MIN) st = AMV_ST_NO_MOUSE;
+    else if (!m || m->tier != AMV_TIER_KNOWN || !m->drv || !m->drv->set_setting || !(c.writable & BIT_OF(id))) st = AMV_ST_UNSUPPORTED;
+    else {
+        bool listed = false;
+        if (id == AMV_SET_LOD) for (int i = 0; i < c.n_lod; i++) listed |= c.lod_opts[i] == value;
+        else if (id == AMV_SET_MOTION_SYNC) listed = value <= 1;
+        if (!listed) st = AMV_ST_BAD_VALUE;
+        else {
+            esp_err_t e = m->drv->set_setting(&c, id, value);
+            st = e == ESP_OK ? AMV_ST_OK : e == ESP_ERR_NOT_SUPPORTED ? AMV_ST_UNSUPPORTED :
+                 e == ESP_ERR_INVALID_ARG ? AMV_ST_BAD_VALUE : AMV_ST_DEVICE_ERR;
+            ESP_LOGI(TAG, "%s: set setting %u = %u -> %s", m->name, id, value, st == AMV_ST_OK ? "ok" : "refused");
+            TAB_LOCK();
+            if (m->used) m->ctx = c;
+            TAB_UNLOCK();
+        }
+    }
+    xSemaphoreGive(s_drv);
+    if (st == AMV_ST_OK && m) emit(AMV_MEV_UPDATED, m->uid);
+    return st;
+}
+
+uint8_t amv_mouse_set_setting(uint8_t index, uint8_t id, uint16_t value, amv_settings_rep_t *out)
+{
+    amv_mouse_info_t info;
+    uint8_t st;
+    if (id == AMV_SET_CPI) st = amv_mouse_set_cpi(index, value, &info);
+    else if (id == AMV_SET_POLLING) st = amv_mouse_set_rate(index, value, &info);
+    else if (id == AMV_SET_LOD || id == AMV_SET_MOTION_SYNC) st = driver_set_setting(index, id, value);
+    else st = AMV_ST_UNSUPPORTED;
+    uint8_t g = amv_mouse_get_settings(index, out);
+    return st != AMV_ST_OK ? st : g;
+}
 
 int amv_usb_host_device_count(void)
 {

@@ -347,6 +347,8 @@ Unrelated doc drift noticed while planning: README §7 says the UDP weight chann
 4. **A wireless mouse through its receiver** (a different mouse, later): extended polling rates (the Razer receiver `1532:0088` driver paths are written but untested).
 5. **Save more real descriptors** into `tests/descriptors/` from each new mouse (the Studio's Download descriptor button does it).
 
+**Next major work item: section 10, full OpenMouse coverage on the dongle** (every mouse OpenMouse knows, with DPI, polling rate, battery, LOD and Motion Sync where offered). Item 8 below is part of it.
+
 **TODO, later (at home / with FpsAimForge or other hardware):**
 6. **Linux box:** run `./anymouse --dongle-status`, the GUI and the guard against the real board; try the Studio in Chrome on Linux (udev rule); `src/evdev_rt.c` onto `common/amv_octant.h` plus `make test-common` golden vectors (M2).
 7. **Calibration through the dongle (M3):** `STREAM_DIR` and `PUSH_CALIB` commands, forwarding the calibration snapshot from `src/calibration.c` through `src/dongle.c`, the Studio's read-only calibration mirror, and the FpsAimForge convergence test with the dongle.
@@ -465,3 +467,75 @@ Adding all of it keeps the image around 0.7 to 1.0 MB, inside a 2 MB slot. Per-m
 **Not verified:** the desktop app against the real board over hidraw (CachyOS box), Finalmouse and GearHub drivers (no hardware here), a wireless Razer (receiver `1532:0088`, extended polling rates), and CPI/rate writes on any model other than the Basilisk Ultimate wired.
 
 **Next:** see section 8.
+
+---
+
+## 10. Full OpenMouse Coverage on the Dongle
+
+*Requested 2026-10-26. Goal: the dongle recognises **every mouse the OpenMouse protocol library covers** and, for each, reads (and where safe, sets) **DPI, polling rate, battery, lift-off distance (LOD) and Motion Sync**, as far as that mouse's protocol offers them. Lighting, button remapping, macros, onboard profiles, firmware update and the rest of OpenMouse's feature set are out of scope.*
+
+**Why it is not done yet:** firmware 0.5.0 has three OpenMouse ports (Razer, Finalmouse ULX, GearHub/Attack Shark R3). Everything else falls back to tier 2, which is why the Logitech G Pro's Lightspeed receiver (`046d:c547`) shows as "Generic HID": its HID++ channel is on a separate vendor interface (interface 2, usage page `0xFF00`) that the dongle does not claim yet.
+
+### 10.1 What OpenMouse covers (source scan of commit `326f292`, 2026-10-26)
+
+48 brand folders and about 100 driver classes in `src/drivers/registry.ts`. Per family the port takes only what OpenMouse reads for that family among the five settings above; the scan below is a first pass, to be confirmed per family while porting.
+
+| Group | Families (folder) | Notes |
+|:---|:---|:---|
+| **Hardware on hand, port first** | `razer` (done: DPI/rate/battery; add LOD), `logitech` (HID++ 2.0, the G Pro), `finalmouse` (ULX: DPI/rate/battery/LOD/Motion Sync), `gearhub` (Attack Shark R3) | Verifiable on real hardware here |
+| **Largest catalogs (most product IDs)** | `atk` (ATK/Compx engine, many rebadges), `mchose`, `keychron` (mice only), `steelseries` (24 client classes over a few wire formats), `gwolves`, `incott`, `lamzu` + `lamzu-atlantis`, `rawm`, `redragon`, `pulsar`, `endgame`, `asus`, `vaxee`, `ajazz` (mice) | One engine often covers many brands and dozens of IDs |
+| **Long tail** | `bytech` (IPI), `coolermaster`, `corsair` (+ Bragi), `dareu`, `delux`, `fantech`, `fater`, `glorious` (+ classic, core2), `gravastar`, `hitscan`, `hyperx`, `ksnake`, `microsoft`, `moddo`, `motospeed`, `ninjutso`, `noir`, `orbital`, `rapoo`, `ryunix`, `scyrox`, `teevolution`, `vgn`, `wallhack` (mouse), `wlmouse`, `zaunkoenig` | Small drivers, typically 100 to 700 lines of TypeScript |
+| **Excluded** | `wooting`, `ajazz` AK820, `wallhack` keyboard, and any keyboard-only Keychron entries | Keyboards: the dongle only passes mice through |
+
+Size: the relevant subset is estimated at 15,000 to 25,000 lines of TypeScript, becoming roughly 10,000 to 20,000 lines of C. Section 9.4's flash budget (0.7 to 1.0 MB with everything ported) still holds, which is the reason to do the OTA slot change in 10.3 before this lands.
+
+### 10.2 Design
+
+1. **A catalog for every device, generated from OpenMouse.** `tools/gen_openmouse_catalog.py` reads the pinned OpenMouse checkout and emits `amv_catalog.generated.h`: VID:PID → brand, model, engine id, transport (wired / receiver / dock), and the interface match rule (usage page + usage) that OpenMouse's `isSupported()` uses. The upstream commit is stamped into the header. With only this, the dongle already names every known model ("Logitech G Pro X Superlight via Lightspeed receiver") and reports a new state: **known model, driver not ported yet** (tier 1 without settings), so users see which mice are coming.
+2. **A WebHID-shaped shim (`amv_hidlike`).** Ports call `send_report`, `send_feature_report`, `receive_feature_report` and read an input-report queue with exactly WebHID's report-ID conventions (the ID is passed separately and is not part of the data, except where WebHID itself includes it). This keeps every C port line-by-line comparable with its TypeScript source, which matters for review and for pulling upstream fixes later.
+3. **Multi-interface devices.** The host claims, besides the mouse interface, the vendor or configuration interface an engine's match rule names, keeps reads in flight on its interrupt IN endpoint (routed to the driver, never to the vectoring), and sends output reports through its interrupt OUT endpoint when it has one, falling back to SET_REPORT, just as WebHID does. Needed for Logitech HID++, MCHOSE, Keychron and most receivers.
+4. **Generic settings in the protocol.** `GET_MOUSE` stays as is. New `GET_MOUSE_SETTINGS {index}` returns a list of `{setting id, value, flags (readable, writable)}` and `GET_MOUSE_OPTIONS {index, setting}` its allowed values (rates, LOD steps, CPI range). `SET_MOUSE_SETTING {index, setting, value}` writes one. Setting ids: `CPI`, `POLLING`, `LOD`, `MOTION_SYNC` (read-only: `BATTERY`, `CHARGING`). The existing `SET_MOUSE_CPI` / `SET_MOUSE_POLLING` become aliases. The Studio and `./anymouse` render whatever the mouse offers (an LOD dropdown, a Motion Sync switch) without knowing the brand.
+5. **Receivers and sleep.** Many engines relay through a 2.4 GHz receiver (Logitech device index, Razer and ATK dongles, the GearHub relay). The info gains a state: receiver present, mouse asleep or out of range. The driver retries on wake (the next motion report) rather than failing.
+6. **Engine registry.** Each engine is a C module behind the existing `amv_drv_t` interface, extended with `get_settings` / `set_setting`. Matching follows OpenMouse's registry order and support scores, so the same mouse picks the same engine as in the browser.
+
+### 10.3 Verification without owning every mouse
+
+- **Transcript tests (the main safety net).** `tools/openmouse_transcripts/` runs each upstream TypeScript client in Node against the fake devices OpenMouse's own tests already define (e.g. `FakeAsusMouse`, `fakeBitmouse`), records every report exchanged plus the values the client decoded, and writes them to `tests/openmouse/<engine>.json`. A host-built C test replays each transcript: the port must send **byte-identical requests** and decode **identical values**. This is the same method that keeps `web/` honest against frames recorded from the board. Re-running the generator after an upstream update shows exactly what changed.
+- **Real hardware where available:** the Basilisk Ultimate (done), the G Pro and its receiver, the ULX, the R3, and every new mouse that passes by; the Studio's Download descriptor button and a new *Download transcript* developer button capture what is needed to add it to the tests.
+- **Safety rule, unchanged in spirit:** probing and refresh are read-only for every engine; a write is allowed only for models on the dongle's verified list. **Decision needed (see 10.5):** whether a model that OpenMouse itself marks `verified: true` on hardware and whose port passes its transcripts may also be written, or whether every model needs a test through the dongle first.
+
+### 10.4 Order of work
+
+| Phase | Content | Exit test |
+|:---|:---|:---|
+| **A. Infrastructure** | OTA slots to 4 MB (one cable reflash; profiles survive), catalog generator and "known, not ported" state, `amv_hidlike` shim, multi-interface claim with interrupt OUT, settings protocol (firmware, Studio, `./anymouse`), receiver/asleep state, transcript generator and C replay harness | Every OpenMouse ID resolves to a name on the dongle; Razer port passes transcripts; existing 68 board checks still pass |
+| **B. Hardware on hand** | Logitech HID++ (DPI `0x2201`, report rate `0x8060`/`0x8061`, battery `0x1004`/`0x1000`; via the receiver's device index), Razer LOD, Finalmouse ULX LOD and Motion Sync, GearHub R3 writes | Verified on the G Pro, ULX and R3 through the dongle; their writes enabled |
+| **C. Largest engines** | ATK/Compx, MCHOSE, Keychron mice, SteelSeries, G-Wolves, Incott, Lamzu, RAWM, Redragon, Pulsar, Endgame Gear, ASUS, VAXEE, AJAZZ mice | Transcripts pass; read-only unless verified |
+| **D. Long tail** | The remaining families in 10.1 | Same |
+| **E. Upkeep** | Pin and bump the OpenMouse commit, regenerate catalog and transcripts, port the diffs | A CI-style script flags upstream drift |
+
+Each phase ships on its own: after A every known mouse is named; each engine after that adds real values.
+
+### 10.5 Open decisions
+
+1. **Write policy** (10.3): writes only after a test through the dongle (current rule, slower), or also for models OpenMouse verified on hardware whose C port passes its transcripts (faster, small risk).
+2. **Browser tunnel as a stopgap?** The Studio could run upstream OpenMouse directly through a raw dongle tunnel (PLAN section 9.1a, route 1) for engines not ported yet. It gives the Studio full coverage early but not the desktop app or standalone use. Recommended only as a developer tool for capturing transcripts, not as a user feature.
+
+### 10.6 Status (2026-10-26, firmware 0.6.0)
+
+**Phase A (infrastructure), partly done:**
+- **OTA slots are 4 MB each** (`partitions.csv`). Flashed over UART; the NVS profile survived (gen 283 restored). The image is 0.4 MB.
+- **Catalog:** `tools/openmouse/gen_catalog.sh` (needs Node and `npx`, plus `OPENMOUSE_DIR`) runs OpenMouse's own `SUPPORTED_HID_FILTERS` and registry `isSupported()` checks against synthetic devices and writes `components/amv_catalog/amv_catalog.generated.h`. It holds 810 rows (716 named, 17 vendor-wide, 37 brands, 74 engines) and stamps the upstream commit `326f292`. 53 of the 545 upstream filters matched no engine and are listed with engine "None". `amv_catalog_find()` does an exact lookup, then the vendor-wide row.
+- **Protocol** (additive, still v1): `GET_MOUSE_MODEL` (brand, model, state unknown / known / driver), `GET_MOUSE_SETTINGS`, `GET_MOUSE_OPTIONS`, `SET_MOUSE_SETTING`. Setting ids are CPI, POLLING, LOD, MOTION_SYNC, BATTERY, CHARGING and LINK (wired, connected, asleep). The firmware serves all four; `SET_MOUSE_CPI` and `SET_MOUSE_POLLING` still work.
+- **Config-interface claim and the `amv_hl_*` shim:** a driver's `cfg_match` selects extra vendor interfaces. The host claims them, keeps interrupt IN reads in flight, and sends output reports through an interrupt OUT endpoint or SET_REPORT. The shim keeps WebHID's report-ID convention (`amv_hl_send_report`, `send_feature`, `receive_feature`, `wait_input`, `flush_input`). `amv_hid_report_ids()` was added to the parser.
+- **Receiver asleep state:** a driver that found no awake mouse is probed again every 5 s, and the link state is reported.
+
+**Phase B, Logitech (read only), verified on hardware:** `drv_logitech.c` ports HID++ 2.0 transport, device-index discovery, DPI (0x2201 and 0x2202), report rate (0x8060 and 0x8061), battery (0x1004 and 0x1000) and the mouse's own name (0x0005). On the G Pro receiver (`046d:c547`, interface 2) it read "PRO X Wireless", 800 CPI, 1000 Hz, battery 14%. The Web Studio showed it correctly. With the mouse asleep, every slot answered a HID++ 1.0 error and the driver reported the link asleep, then succeeded on a later refresh.
+- **Not ported yet:** Logitech writes (host-control switching and onboard profiles), the LOD level mapping (depends on the onboard profile format), and the Logitech wired path (untried).
+
+**Not verified:** the four new commands have been built and flashed but not exercised over the vendor channel (the PC link was not on the development Mac). The existing 68-check `dongle_test.py` was not re-run on 0.6.0.
+
+**Not started:** Studio and `./anymouse` UI for the settings list and model names (the Studio already shows the Logitech mouse through the older `GET_MOUSE`); `gen_proto_js.py` groups for the new constants; Razer LOD; Finalmouse LOD and Motion Sync; GearHub R3 writes; the transcript generator and C replay harness; Phases C, D and E.
+
+**Decisions still open:** 10.5 items 1 and 2. The strict write policy applies meanwhile (writes only for models verified through the dongle).
+

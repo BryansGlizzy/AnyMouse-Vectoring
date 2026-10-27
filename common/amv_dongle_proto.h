@@ -71,6 +71,13 @@
 #define AMV_CMD_GET_MOUSE_DESC   0x10   /* amv_mouse_desc_req_t -> amv_mouse_desc_rep_t (raw report descriptor) */
 #define AMV_CMD_SET_MOUSE_CPI    0x11   /* amv_mouse_set_req_t -> amv_mouse_info_t; KNOWN: written to the mouse, else stored as a label */
 #define AMV_CMD_SET_MOUSE_POLLING 0x12  /* amv_mouse_set_req_t -> amv_mouse_info_t; KNOWN with AMV_MF_CAN_SET_RATE only */
+/* Full OpenMouse coverage (firmware 0.6.0+, PLAN.md section 10). A brand-neutral settings list: a
+ * client renders whatever the mouse offers (CPI, polling, lift-off, Motion Sync, battery) without
+ * knowing the brand. SET_MOUSE_CPI / SET_MOUSE_POLLING remain as aliases of SET_MOUSE_SETTING. */
+#define AMV_CMD_GET_MOUSE_MODEL  0x13   /* {index} -> amv_mouse_model_t: the catalog's name for this id */
+#define AMV_CMD_GET_MOUSE_SETTINGS 0x14 /* {index} -> amv_settings_rep_t */
+#define AMV_CMD_GET_MOUSE_OPTIONS  0x15 /* amv_options_req_t -> amv_options_rep_t */
+#define AMV_CMD_SET_MOUSE_SETTING  0x16 /* amv_setting_set_req_t -> amv_settings_rep_t */
 #define AMV_CMD_EVENT_STATE      0x80   /* async: state changed (any source) */
 #define AMV_CMD_EVENT_MOUSE      0x81   /* async: amv_mouse_event_t; a mouse was attached, removed or re-read */
 
@@ -129,6 +136,45 @@
 #define AMV_DRV_RAZER      1
 #define AMV_DRV_FINALMOUSE 2
 #define AMV_DRV_GEARHUB    3
+#define AMV_DRV_LOGITECH   4
+
+/* Settings (GET_MOUSE_SETTINGS entries). Values are u16 in the setting's own unit. */
+#define AMV_SET_CPI          1   /* counts per inch */
+#define AMV_SET_POLLING      2   /* Hz */
+#define AMV_SET_LOD          3   /* lift-off distance, see the options unit */
+#define AMV_SET_MOTION_SYNC  4   /* 0 off, 1 on */
+#define AMV_SET_BATTERY      5   /* percent; read only */
+#define AMV_SET_CHARGING     6   /* AMV_CHG_*; read only */
+#define AMV_SET_LINK         7   /* AMV_LINK_*; read only */
+
+#define AMV_SETF_READABLE    0x01
+#define AMV_SETF_WRITABLE    0x02   /* only for models verified through the dongle */
+
+/* AMV_SET_CHARGING values */
+#define AMV_CHG_UNKNOWN      0
+#define AMV_CHG_DISCHARGING  1
+#define AMV_CHG_CHARGING     2
+#define AMV_CHG_FULL         3
+
+/* AMV_SET_LINK values: how the mouse is reached (receivers sleep, wired mice do not) */
+#define AMV_LINK_WIRED       0   /* also: no radio involved */
+#define AMV_LINK_CONNECTED   1   /* via a receiver, the mouse answered */
+#define AMV_LINK_ASLEEP      2   /* via a receiver, the mouse is asleep or out of range: wakes on motion */
+
+/* GET_MOUSE_OPTIONS reply kinds and units */
+#define AMV_OPT_LIST         0   /* values[n] are the allowed values */
+#define AMV_OPT_RANGE        1   /* values = {min, max, step} */
+#define AMV_UNIT_NONE        0
+#define AMV_UNIT_HZ          1
+#define AMV_UNIT_CPI         2
+#define AMV_UNIT_MM10        3   /* tenths of a millimetre */
+#define AMV_UNIT_LEVEL       4   /* ordinal 1..n, lowest first (Low, Medium, High when n is 3) */
+#define AMV_UNIT_BOOL        5
+
+/* amv_mouse_model_t.state: what the dongle knows about this exact product id */
+#define AMV_MODEL_UNKNOWN    0   /* not in OpenMouse's list */
+#define AMV_MODEL_KNOWN      1   /* in OpenMouse's list, no driver ported to the dongle yet */
+#define AMV_MODEL_DRIVER     2   /* a ported driver talks to it */
 
 /* amv_mouse_info_t.reason (tier IGNORED) */
 #define AMV_IGN_NOT_MOUSE  1   /* no HID mouse collection (keyboard, audio, storage, ...) */
@@ -217,6 +263,44 @@ typedef struct __attribute__((packed)) {
     char     name[30];        /* product string, NUL-terminated */
 } amv_mouse_info_t;
 
+/* GET_MOUSE_MODEL reply. 56 bytes. Names come from the catalog generated out of OpenMouse. */
+typedef struct __attribute__((packed)) {
+    uint8_t  index, state, rsvd[2];   /* state: AMV_MODEL_* */
+    char     brand[16];
+    char     model[36];               /* "" when OpenMouse has no name for this id */
+} amv_mouse_model_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  id;                      /* AMV_SET_* */
+    uint8_t  flags;                   /* AMV_SETF_* */
+    uint16_t value;
+} amv_setting_t;
+
+#define AMV_SETTINGS_MAX 13
+
+/* GET_MOUSE_SETTINGS and SET_MOUSE_SETTING reply. 4 + 4n bytes (at most 56). */
+typedef struct __attribute__((packed)) {
+    uint8_t  index, count, link, rsvd;
+    amv_setting_t s[AMV_SETTINGS_MAX];
+} amv_settings_rep_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  index, setting;
+} amv_options_req_t;
+
+#define AMV_OPTIONS_MAX 24
+
+/* GET_MOUSE_OPTIONS reply. 6 + 2n bytes (at most 54). */
+typedef struct __attribute__((packed)) {
+    uint8_t  index, setting, kind, unit, n, rsvd;
+    uint16_t values[AMV_OPTIONS_MAX];
+} amv_options_rep_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  index, setting;
+    uint16_t value;
+} amv_setting_set_req_t;
+
 /* GET_MOUSE_CAPS reply. 42 bytes. */
 typedef struct __attribute__((packed)) {
     uint8_t  index, driver, n_rates, rsvd;
@@ -286,6 +370,13 @@ _Static_assert(sizeof(amv_hello_req_t) == 8, "hello req size");
 _Static_assert(sizeof(amv_hello_rep_t) == 24, "hello rep size");
 _Static_assert(sizeof(amv_mouse_info_t) == 56, "mouse info size");
 _Static_assert(sizeof(amv_mouse_caps_t) == 42, "mouse caps size");
+_Static_assert(sizeof(amv_mouse_model_t) == 56, "mouse model size");
+_Static_assert(sizeof(amv_setting_t) == 4, "setting size");
+_Static_assert(sizeof(amv_settings_rep_t) == 4 + 4 * AMV_SETTINGS_MAX, "settings rep size");
+_Static_assert(sizeof(amv_settings_rep_t) <= AMV_PAYLOAD_MAX, "settings rep fits a frame");
+_Static_assert(sizeof(amv_options_rep_t) == 6 + 2 * AMV_OPTIONS_MAX, "options rep size");
+_Static_assert(sizeof(amv_options_rep_t) <= AMV_PAYLOAD_MAX, "options rep fits a frame");
+_Static_assert(sizeof(amv_setting_set_req_t) == 4, "setting set size");
 _Static_assert(sizeof(amv_mouse_desc_rep_t) == 56, "mouse desc size");
 _Static_assert(sizeof(amv_mouse_set_req_t) == 4, "mouse set size");
 _Static_assert(sizeof(amv_mouse_event_t) == 4, "mouse event size");

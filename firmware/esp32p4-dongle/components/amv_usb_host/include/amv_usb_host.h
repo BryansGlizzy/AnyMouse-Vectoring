@@ -52,3 +52,8 @@ uint8_t amv_mouse_get_caps(uint8_t index, amv_mouse_caps_t *out);
 uint8_t amv_mouse_get_desc(uint8_t index, uint16_t offset, amv_mouse_desc_rep_t *out);
 uint8_t amv_mouse_set_cpi(uint8_t index, uint16_t cpi, amv_mouse_info_t *out);    /* KNOWN: to the mouse; else a stored label (0 forgets) */
 uint8_t amv_mouse_set_rate(uint8_t index, uint16_t hz, amv_mouse_info_t *out);
+/* Catalog names and the brand-neutral settings list (PLAN.md section 10.2) */
+uint8_t amv_mouse_get_model(uint8_t index, amv_mouse_model_t *out);
+uint8_t amv_mouse_get_settings(uint8_t index, amv_settings_rep_t *out);
+uint8_t amv_mouse_get_options(uint8_t index, uint8_t setting, amv_options_rep_t *out);
+uint8_t amv_mouse_set_setting(uint8_t index, uint8_t setting, uint16_t value, amv_settings_rep_t *out);

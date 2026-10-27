@@ -257,3 +257,28 @@ const uint8_t amv_hid_boot_mouse_desc[] = {
     0xC0, 0xC0,
 };
 const size_t amv_hid_boot_mouse_desc_len = sizeof(amv_hid_boot_mouse_desc);
+
+int amv_hid_report_ids(const uint8_t *d, size_t n, uint8_t *ids, int max)
+{
+    int count = 0;
+    size_t i = 0;
+    while (i < n) {
+        uint8_t b = d[i];
+        if (b == 0xFE) {                       /* long item: skip */
+            if (i + 2 >= n) break;
+            i += 3 + (size_t)d[i + 1];
+            continue;
+        }
+        size_t size = b & 3;
+        if (size == 3) size = 4;
+        if (i + 1 + size > n) break;
+        if (((b >> 2) & 3) == 1 && (b >> 4) == 0x8 && size >= 1) {   /* global item: Report ID */
+            uint8_t id = d[i + 1];
+            bool dup = false;
+            for (int k = 0; k < count; k++) if (ids[k] == id) dup = true;
+            if (!dup && count < max) ids[count++] = id;
+        }
+        i += 1 + size;
+    }
+    return count;
+}

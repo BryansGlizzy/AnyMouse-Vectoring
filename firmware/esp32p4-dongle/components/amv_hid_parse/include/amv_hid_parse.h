@@ -51,6 +51,10 @@ int  amv_hid_parse(const uint8_t *desc, size_t len, amv_hid_layout_t *out);
  * (used to find a vendor configuration interface). */
 bool amv_hid_has_collection(const uint8_t *desc, size_t len, uint16_t page, uint16_t usage);
 
+/* Report IDs declared by the descriptor, in order of first appearance (duplicates dropped);
+ * returns how many were stored (at most `max`). 0 when the descriptor has no report IDs. */
+int amv_hid_report_ids(const uint8_t *desc, size_t len, uint8_t *ids, int max);
+
 /* The HID 1.11 appendix B boot-protocol mouse descriptor (3 buttons, 8-bit X/Y): the layout used
  * when a mouse's own descriptor cannot be parsed and it is switched to boot protocol. */
 extern const uint8_t amv_hid_boot_mouse_desc[];

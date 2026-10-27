@@ -269,6 +269,39 @@ static void handle_request(const uint8_t *in, uint8_t out[AMV_FRAME_SIZE])
         build_frame(out, cmd, seq, s, &p, s == AMV_ST_NO_MOUSE ? 2 : sizeof(p));
         break;
     }
+    case AMV_CMD_GET_MOUSE_MODEL: {
+        if (len < 1) { build_frame(out, cmd, seq, AMV_ST_BAD_LEN, NULL, 0); break; }
+        amv_mouse_model_t p;
+        uint8_t s = amv_mouse_get_model(pl[0], &p);
+        build_frame(out, cmd, seq, s, &p, s == AMV_ST_OK ? sizeof(p) : 0);
+        break;
+    }
+    case AMV_CMD_GET_MOUSE_SETTINGS: {
+        if (len < 1) { build_frame(out, cmd, seq, AMV_ST_BAD_LEN, NULL, 0); break; }
+        amv_settings_rep_t p;
+        uint8_t s = amv_mouse_get_settings(pl[0], &p);
+        build_frame(out, cmd, seq, s, &p, s == AMV_ST_OK ? (uint8_t)(4 + 4 * p.count) : 0);
+        break;
+    }
+    case AMV_CMD_GET_MOUSE_OPTIONS: {
+        if (len < sizeof(amv_options_req_t)) { build_frame(out, cmd, seq, AMV_ST_BAD_LEN, NULL, 0); break; }
+        amv_options_req_t r;
+        memcpy(&r, pl, sizeof r);
+        amv_options_rep_t p;
+        uint8_t s = amv_mouse_get_options(r.index, r.setting, &p);
+        build_frame(out, cmd, seq, s, &p, s == AMV_ST_OK ? (uint8_t)(6 + 2 * p.n) : 0);
+        break;
+    }
+    case AMV_CMD_SET_MOUSE_SETTING: {
+        if (len < sizeof(amv_setting_set_req_t)) { build_frame(out, cmd, seq, AMV_ST_BAD_LEN, NULL, 0); break; }
+        amv_setting_set_req_t r;
+        memcpy(&r, pl, sizeof r);
+        amv_settings_rep_t p;
+        uint8_t s = amv_mouse_set_setting(r.index, r.setting, r.value, &p);
+        /* the list goes back even when the write was refused, so a client can resync */
+        build_frame(out, cmd, seq, s, &p, s == AMV_ST_NO_MOUSE ? 0 : (uint8_t)(4 + 4 * p.count));
+        break;
+    }
     case AMV_CMD_FACTORY_RESET: {
         amv_result_t r = amv_ctrl_factory_reset(AMV_SRC_HOST, &st);
         if (r != AMV_R_OK) amv_ctrl_get_state(&st);

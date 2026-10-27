@@ -502,7 +502,7 @@ Size: the relevant subset is estimated at 15,000 to 25,000 lines of TypeScript, 
 
 - **Transcript tests (the main safety net).** `tools/openmouse_transcripts/` runs each upstream TypeScript client in Node against the fake devices OpenMouse's own tests already define (e.g. `FakeAsusMouse`, `fakeBitmouse`), records every report exchanged plus the values the client decoded, and writes them to `tests/openmouse/<engine>.json`. A host-built C test replays each transcript: the port must send **byte-identical requests** and decode **identical values**. This is the same method that keeps `web/` honest against frames recorded from the board. Re-running the generator after an upstream update shows exactly what changed.
 - **Real hardware where available:** the Basilisk Ultimate (done), the G Pro and its receiver, the ULX, the R3, and every new mouse that passes by; the Studio's Download descriptor button and a new *Download transcript* developer button capture what is needed to add it to the tests.
-- **Safety rule, unchanged in spirit:** probing and refresh are read-only for every engine; a write is allowed only for models on the dongle's verified list. **Decision needed (see 10.5):** whether a model that OpenMouse itself marks `verified: true` on hardware and whose port passes its transcripts may also be written, or whether every model needs a test through the dongle first.
+- **Safety rule, unchanged in spirit:** probing and refresh are read-only for every engine; a write is allowed only for models on the dongle's verified list. **Decided (10.5):** a model OpenMouse marks `verified: true` whose port passes its transcripts may also be written.
 
 ### 10.4 Order of work
 
@@ -516,10 +516,10 @@ Size: the relevant subset is estimated at 15,000 to 25,000 lines of TypeScript, 
 
 Each phase ships on its own: after A every known mouse is named; each engine after that adds real values.
 
-### 10.5 Open decisions
+### 10.5 Decisions (2026-10-26, user)
 
-1. **Write policy** (10.3): writes only after a test through the dongle (current rule, slower), or also for models OpenMouse verified on hardware whose C port passes its transcripts (faster, small risk).
-2. **Browser tunnel as a stopgap?** The Studio could run upstream OpenMouse directly through a raw dongle tunnel (PLAN section 9.1a, route 1) for engines not ported yet. It gives the Studio full coverage early but not the desktop app or standalone use. Recommended only as a developer tool for capturing transcripts, not as a user feature.
+1. **Write policy: decided.** A model's settings may be written when OpenMouse itself marks that exact model `verified: true` **and** its C port passes the transcript tests (10.3). A test through the dongle is no longer required first. Until the transcript harness exists nothing new qualifies, so the only writable models stay the ones already verified through the dongle (Razer Basilisk Ultimate wired). The catalog generator will need to carry OpenMouse's `verified` flag per model for this; that is not done yet. Probing and refresh stay read-only for every engine.
+2. **Browser tunnel as a stopgap: decided no.** Not built, not even as a developer tool; transcripts are captured by the Download descriptor and Download transcript buttons and the Node recorder instead.
 
 ### 10.6 Status (2026-10-26, firmware 0.6.0)
 
@@ -537,5 +537,5 @@ Each phase ships on its own: after A every known mouse is named; each engine aft
 
 **Not started:** Studio and `./anymouse` UI for the settings list and model names (the Studio already shows the Logitech mouse through the older `GET_MOUSE`); `gen_proto_js.py` groups for the new constants; Razer LOD; Finalmouse LOD and Motion Sync; GearHub R3 writes; the transcript generator and C replay harness; Phases C, D and E.
 
-**Decisions still open:** 10.5 items 1 and 2. The strict write policy applies meanwhile (writes only for models verified through the dongle).
+**Decisions:** 10.5 is settled (see above). Logitech writes also still need the host-control and onboard-profile work.
 

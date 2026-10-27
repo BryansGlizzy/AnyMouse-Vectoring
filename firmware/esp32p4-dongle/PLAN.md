@@ -550,3 +550,6 @@ Each phase ships on its own: after A every known mouse is named; each engine aft
 
 **Decisions:** 10.5 is settled (see above). Logitech CPI writes are enabled for the G Pro receiver at the user's request (2026-10-26); rate writes stay off until the failure above is understood. Logitech LOD and the onboard-profile fallback for direct-connect mice are not ported.
 
+**Rate-write lockup, resolved (2026-10-26):** the "lockup" was the G Pro going to sleep. A captured console showed the first failing request was the host-control read (`feature 08 fn 20`), not the rate write, and it got no answer because the mouse was idle. After the mouse was moved, rate writes worked (500 Hz, then 1000 Hz, `ESP_OK`, motion kept flowing). Rate writes are therefore **enabled** for the G Pro receiver. The very first incident was not captured, so it is likely, not proven, to have been the same cause. A same-rate write was not separately tested (the Studio did not appear to resend it).
+- **Still to do:** report "mouse asleep, move it and retry" instead of "refused" when a write meets a sleeping mouse; gate Logitech writes per mouse model, not per receiver id (`VERIFIED_PIDS` covers anything behind `046d:c547`).
+

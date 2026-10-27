@@ -415,7 +415,18 @@ static esp_err_t set_rate_impl(amv_drv_ctx_t *c, uint16_t hz)
     if (c->priv[P_RATE_LEGACY]) {
         const uint8_t ms = (uint8_t)((1000 + hz / 2) / hz);
         if (ms < 1 || ms > 8) return ESP_ERR_INVALID_ARG;
-        if (request(c, c->priv[P_RATE], 0x20, &ms, 1, &r, 1500) != R_OK) return ESP_FAIL;
+        outcome_t o = request(c, c->priv[P_RATE], 0x20, &ms, 1, &r, 1500);
+        if (o != R_OK) {
+            /* diagnostics for the lockup: show everything the receiver sends for 10 s, send nothing */
+            WLOG("rate write (%u ms) failed with outcome %d; listening for 10 s", ms, (int)o);
+            int64_t end = (int64_t)xTaskGetTickCount() + pdMS_TO_TICKS(10000);
+            while ((int64_t)xTaskGetTickCount() < end) {
+                uint8_t id, d[20];
+                int n = amv_hl_wait_input(c, 0, &id, d, sizeof d, 500);
+                if (n > 0) WLOG("  rx id %02x len %d: %02x %02x %02x %02x %02x %02x", id, n, d[0], d[1], d[2], d[3], d[4], d[5]);
+            }
+            return ESP_FAIL;
+        }
         if (request(c, c->priv[P_RATE], 0x10, NULL, 0, &r, 1500) != R_OK || r.data[3] != ms) return ESP_FAIL;
         c->device_hz = hz;
         return ESP_OK;
@@ -481,9 +492,8 @@ static esp_err_t probe(amv_drv_ctx_t *c)
     scan_dpi(c, 0, NULL);                               /* CPI range for the options reply and write validation */
     c->verified = is_verified(c->pid);
     c->can_set_cpi = c->verified && e == ESP_OK && c->cpi_max > 0;
-    /* Rate writes are off: on 2026-10-26 a rate write on the G Pro made the receiver stop delivering motion until it was
-     * replugged (host-control switch worked, the write was never answered). CPI writes stay on. */
-    c->can_set_rate = false;
+    /* A rate write on the G Pro once silenced the receiver until it was replugged (see PLAN.md 10.6). */
+    c->can_set_rate = c->verified && e == ESP_OK && c->n_rates > 0;   /* re-enabled 2026-10-26 to test whether a same-rate write also locks the receiver */
     ESP_LOGI(TAG, "features: dpi %02x%s rate %02x%s onboard %02x; CPI range %u..%u step %u; %u rates", c->priv[P_DPI],
              c->priv[P_DPI_LEGACY] ? " legacy" : "", c->priv[P_RATE], c->priv[P_RATE_LEGACY] ? " legacy" : "", c->priv[P_ONBOARD],
              c->cpi_min, c->cpi_max, c->cpi_step, c->n_rates);

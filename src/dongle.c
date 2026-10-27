@@ -532,7 +532,7 @@ static int run_job(link_t *l) {
     return r < 0 ? -1 : 0;
 }
 
-static const char *DRIVER_BRAND[] = { "", "Razer", "Finalmouse", "Attack Shark" };
+static const char *DRIVER_BRAND[] = { "", "Razer", "Finalmouse", "Attack Shark", "Logitech" };
 
 bool dongle_fill_hw_status(mouse_hw_status_t *out) {
     dongle_mouse_t m[MAX_MICE];
@@ -551,7 +551,7 @@ bool dongle_fill_hw_status(mouse_hw_status_t *out) {
         out->battery_mv = 0;
         out->can_set_cpi = x->tier == AMV_TIER_KNOWN && (x->flags & AMV_MF_CAN_SET_CPI);
         out->can_set_rate = x->tier == AMV_TIER_KNOWN && (x->flags & AMV_MF_CAN_SET_RATE);
-        snprintf(out->brand, sizeof(out->brand), "%s", x->driver < 4 ? DRIVER_BRAND[x->driver] : "");
+        snprintf(out->brand, sizeof(out->brand), "%s", x->driver < 5 ? DRIVER_BRAND[x->driver] : "");
         snprintf(out->model, sizeof(out->model), "%.31s", x->name);
         snprintf(out->node, sizeof(out->node), "via AnyMouse dongle, %s",
                  x->tier == AMV_TIER_KNOWN ? "known protocol" : x->tier == AMV_TIER_BOOT ? "boot fallback" : "generic HID");

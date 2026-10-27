@@ -29,11 +29,12 @@ export const MOCK_RAZER = {
   vid: 0x1532, pid: 0x0086, speed: 1, iface: 0, nominalHz: 1000, measuredHz: 0, deviceHz: 1000, cpi: 1600,
   cpiSource: P.CPI.DEVICE, battery: 100, buttons: 5, xBits: 16, driver: P.DRV.RAZER, reason: 0, name: 'Razer Basilisk Ultimate',
   caps: { rates: [125, 500, 1000], cpiMin: 100, cpiMax: 20000, cpiStep: 50, firmware: '1.7' }, desc: RAZER_DESC,
+  model: { state: P.MODEL.DRIVER, brand: 'Razer', model: 'Basilisk Ultimate (wired)' },
 };
 export const MOCK_GENERIC = {
   tier: P.TIER.GENERIC, flags: P.MF.WHEEL, vid: 0x046d, pid: 0xc077, speed: 1, iface: 0, nominalHz: 125, measuredHz: 0,
   deviceHz: 0, cpi: 0, cpiSource: P.CPI.NONE, battery: null, buttons: 3, xBits: 8, driver: P.DRV.NONE, reason: 0,
-  name: 'USB Optical Mouse', caps: null, desc: Uint8Array.of(0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0xc0),
+  name: 'USB Optical Mouse', caps: null, model: { state: P.MODEL.UNKNOWN, brand: '', model: '' }, desc: Uint8Array.of(0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0xc0),
 };
 export const MOCK_KEYBOARD = {
   tier: P.TIER.IGNORED, flags: 0, vid: 0x05ac, pid: 0x024f, speed: 1, iface: 0, nominalHz: 0, measuredHz: 0, deviceHz: 0, cpi: 0,
@@ -58,6 +59,42 @@ function encodeCaps(m, index) {
   v.setUint16(20, c.cpiMin, true); v.setUint16(22, c.cpiMax, true); v.setUint16(24, c.cpiStep, true);
   for (let i = 0; i < Math.min(c.firmware.length, 15); i++) p[26 + i] = c.firmware.charCodeAt(i);
   return p;
+}
+
+const putStr = (p, at, str, max) => { for (let i = 0; i < Math.min(str.length, max - 1); i++) p[at + i] = str.charCodeAt(i); };
+
+function encodeModel(m, index) {
+  const p = new Uint8Array(56), md = m.model ?? { state: P.MODEL.UNKNOWN, brand: '', model: '' };
+  p[0] = index; p[1] = md.state; putStr(p, 4, md.brand, 16); putStr(p, 20, md.model, 36);
+  return p;
+}
+
+// The settings a mouse offers: derived from its info, plus `extra` ones (LOD, Motion Sync) a test may add.
+function settingsOf(m) {
+  const out = [];
+  const add = (id, value, writable) => out.push({ id, value, writable: !!writable });
+  if (m.tier === P.TIER.KNOWN) {
+    if (m.cpi) add(P.SET.CPI, m.cpi, m.flags & P.MF.CAN_SET_CPI);
+    if (m.deviceHz) add(P.SET.POLLING, m.deviceHz, m.flags & P.MF.CAN_SET_RATE);
+    for (const e of m.extra ?? []) add(e.id, e.value, e.writable);
+    if (m.battery != null) add(P.SET.BATTERY, m.battery, false);
+    add(P.SET.LINK, m.link ?? P.LINK.WIRED, false);
+  }
+  return out;
+}
+
+function encodeSettings(m, index) {
+  const list = settingsOf(m), p = new Uint8Array(4 + 4 * list.length), v = new DataView(p.buffer);
+  p[0] = index; p[1] = list.length; p[2] = m.link ?? P.LINK.WIRED;
+  list.forEach((s, i) => { p[4 + i * 4] = s.id; p[5 + i * 4] = P.SETF.READABLE | (s.writable ? P.SETF.WRITABLE : 0); v.setUint16(6 + i * 4, s.value, true); });
+  return p;
+}
+
+function optionsOf(m, id) {
+  if (id === P.SET.CPI && m.caps) return { kind: P.OPT.RANGE, unit: P.UNIT.CPI, values: [m.caps.cpiMin, m.caps.cpiMax, m.caps.cpiStep] };
+  if (id === P.SET.POLLING && m.caps) return { kind: P.OPT.LIST, unit: P.UNIT.HZ, values: m.caps.rates };
+  const e = (m.extra ?? []).find((x) => x.id === id);
+  return e ? { kind: e.kind ?? P.OPT.LIST, unit: e.unit ?? P.UNIT.NONE, values: e.options } : null;
 }
 
 export class MockHid extends EventTarget {
@@ -249,6 +286,46 @@ export class MockHid extends EventTarget {
         if (isCpi ? value < m.caps.cpiMin || value > m.caps.cpiMax : !m.caps.rates.includes(value)) return { reply: answer(P.ST.BAD_VALUE), events };
         if (isCpi) m.cpi = value; else m.deviceHz = value;
         mouseEvent();
+        return { reply: answer(P.ST.OK), events };
+      }
+      case P.CMD.GET_MOUSE_MODEL: {
+        if (len < 1) return { reply: bad(P.ST.BAD_LEN), events };
+        const m = this.mice[pl[0]];
+        if (!m) return { reply: reply(cmd, seq, P.ST.NO_MOUSE, Uint8Array.of(pl[0], this.mice.length)), events };
+        return { reply: reply(cmd, seq, P.ST.OK, encodeModel(m, pl[0])), events };
+      }
+      case P.CMD.GET_MOUSE_SETTINGS: {
+        if (len < 1) return { reply: bad(P.ST.BAD_LEN), events };
+        const m = this.mice[pl[0]];
+        if (!m) return { reply: reply(cmd, seq, P.ST.NO_MOUSE, Uint8Array.of(pl[0], this.mice.length)), events };
+        return { reply: reply(cmd, seq, P.ST.OK, encodeSettings(m, pl[0])), events };
+      }
+      case P.CMD.GET_MOUSE_OPTIONS: {
+        if (len < 2) return { reply: bad(P.ST.BAD_LEN), events };
+        const m = this.mice[pl[0]];
+        if (!m) return { reply: reply(cmd, seq, P.ST.NO_MOUSE, Uint8Array.of(pl[0], this.mice.length)), events };
+        const o = optionsOf(m, pl[1]);
+        if (!o) return { reply: bad(P.ST.UNSUPPORTED), events };
+        const p = new Uint8Array(6 + 2 * o.values.length), v = new DataView(p.buffer);
+        p[0] = pl[0]; p[1] = pl[1]; p[2] = o.kind; p[3] = o.unit; p[4] = o.values.length;
+        o.values.forEach((x, i) => v.setUint16(6 + i * 2, x, true));
+        return { reply: reply(cmd, seq, P.ST.OK, p), events };
+      }
+      case P.CMD.SET_MOUSE_SETTING: {
+        if (len < 4) return { reply: bad(P.ST.BAD_LEN), events };
+        const i = pl[0], id = pl[1], value = dv.getUint16(2, true), m = this.mice[i];
+        if (!m) return { reply: reply(cmd, seq, P.ST.NO_MOUSE, Uint8Array.of(i, this.mice.length)), events };
+        const answer = (st) => reply(cmd, seq, st, encodeSettings(m, i));
+        const s = settingsOf(m).find((x) => x.id === id);
+        if (!s || !s.writable) return { reply: answer(P.ST.UNSUPPORTED), events };
+        const o = optionsOf(m, id);
+        const okValue = o.kind === P.OPT.RANGE ? value >= o.values[0] && value <= o.values[1] : o.values.includes(value);
+        if (!okValue) return { reply: answer(P.ST.BAD_VALUE), events };
+        if (id === P.SET.CPI) m.cpi = value;
+        else if (id === P.SET.POLLING) m.deviceHz = value;
+        else (m.extra ?? []).find((x) => x.id === id).value = value;
+        const e = new Uint8Array(4); e[0] = this.mice.length; e[1] = P.MEV.UPDATED; new DataView(e.buffer).setUint16(2, m.uid, true);
+        events.push(buildFrame(P.CMD.EVENT_MOUSE, 0, e));
         return { reply: answer(P.ST.OK), events };
       }
       default: return { reply: bad(P.ST.BAD_CMD), events };

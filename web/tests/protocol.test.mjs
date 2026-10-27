@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { P } from '../proto.js';
-import { buildFrame, parseFrame, parseState, parseInfo, parseStats, parseMouse, parseMouseCaps, DongleClient, DongleError } from '../dongle.js';
+import { buildFrame, parseFrame, parseState, parseInfo, parseStats, parseMouse, parseMouseCaps, parseSettings, parseOptions, parseMouseModel, DongleClient, DongleError } from '../dongle.js';
 import { MockHid, MOCK_RAZER, MOCK_GENERIC, MOCK_KEYBOARD } from '../mock_device.js';
 import { importProfile, exportProfile, weightsValid, PRESETS } from '../presets.js';
 
@@ -139,6 +139,44 @@ test('mouse list, descriptor download and setters over the demo device', async (
   assert.equal(await c.getMouseCaps(0), null);
   await new Promise((res) => setTimeout(res, 5));
   assert.equal(events.length, 3); assert.equal(events[0].change, P.MEV.UPDATED);
+});
+
+test('brand-neutral settings: model, list, options and writes over the demo device', async () => {
+  const lod = { id: P.SET.LOD, value: 1, writable: true, options: [1, 2], unit: P.UNIT.MM10 };
+  const sync = { id: P.SET.MOTION_SYNC, value: 0, writable: false, options: [0, 1], unit: P.UNIT.BOOL };
+  const mock = new MockHid({ mice: [{ ...MOCK_RAZER, extra: [lod, sync], link: P.LINK.CONNECTED }, MOCK_GENERIC] });
+  const c = new DongleClient(mock, { timeoutMs: 300 });
+  await c.open();
+  const md = await c.getMouseModel(0);
+  assert.equal(md.state, P.MODEL.DRIVER); assert.equal(md.brand, 'Razer'); assert.equal(md.model, 'Basilisk Ultimate (wired)');
+  assert.equal((await c.getMouseModel(1)).state, P.MODEL.UNKNOWN);
+  const st = await c.getMouseSettings(0);
+  assert.equal(st.link, P.LINK.CONNECTED);
+  assert.deepEqual(st.settings.map((s) => s.id), [P.SET.CPI, P.SET.POLLING, P.SET.LOD, P.SET.MOTION_SYNC, P.SET.BATTERY, P.SET.LINK]);
+  assert.ok(st.settings[0].writable && st.settings[0].readable); assert.ok(!st.settings[3].writable);
+  const cpi = await c.getMouseOptions(0, P.SET.CPI);
+  assert.equal(cpi.kind, P.OPT.RANGE); assert.deepEqual(cpi.range, { min: 100, max: 20000, step: 50 });
+  const rates = await c.getMouseOptions(0, P.SET.POLLING);
+  assert.equal(rates.unit, P.UNIT.HZ); assert.deepEqual(rates.values, MOCK_RAZER.caps.rates);
+  assert.equal(await c.getMouseOptions(0, P.SET.CHARGING), null);
+  let r = await c.setMouseSetting(0, P.SET.LOD, 2);
+  assert.ok(r.ok); assert.equal(r.settings.settings.find((s) => s.id === P.SET.LOD).value, 2);
+  assert.equal((await c.setMouseSetting(0, P.SET.LOD, 9)).status, P.ST.BAD_VALUE);
+  assert.equal((await c.setMouseSetting(0, P.SET.MOTION_SYNC, 1)).status, P.ST.UNSUPPORTED);   // read-only
+  assert.equal((await c.setMouseSetting(1, P.SET.CPI, 800)).status, P.ST.UNSUPPORTED);          // generic mice have none
+  assert.equal((await c.setMouseSetting(7, P.SET.CPI, 800)).status, P.ST.NO_MOUSE);
+  assert.equal((await c.setMouseSetting(0, P.SET.CPI, 3200)).ok, true);
+  assert.equal((await c.getMouseSettings(0)).settings[0].value, 3200);
+});
+
+test('parsers read the wire layout of the C structs', () => {
+  const s = parseSettings(Uint8Array.of(2, 2, P.LINK.ASLEEP, 0, P.SET.CPI, 3, 0x20, 0x03, P.SET.BATTERY, 1, 14, 0));
+  assert.equal(s.link, P.LINK.ASLEEP);
+  assert.deepEqual(s.settings.map((x) => [x.id, x.value, x.writable]), [[P.SET.CPI, 800, true], [P.SET.BATTERY, 14, false]]);
+  const o = parseOptions(Uint8Array.of(0, P.SET.POLLING, P.OPT.LIST, P.UNIT.HZ, 2, 0, 0xe8, 0x03, 0xd0, 0x07));
+  assert.deepEqual(o.values, [1000, 2000]); assert.equal(o.range, null);
+  const mp = new Uint8Array(56); mp[1] = P.MODEL.KNOWN; mp.set(Buffer.from('Logitech'), 4); mp.set(Buffer.from('G Pro X Superlight'), 20);
+  assert.deepEqual(parseMouseModel(mp), { index: 0, state: P.MODEL.KNOWN, brand: 'Logitech', model: 'G Pro X Superlight' });
 });
 
 test('listMice() on firmware without mouse commands returns null', async () => {

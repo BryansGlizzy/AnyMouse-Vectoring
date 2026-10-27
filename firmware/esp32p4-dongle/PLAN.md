@@ -535,7 +535,18 @@ Each phase ships on its own: after A every known mouse is named; each engine aft
 
 **Not verified:** the four new commands have been built and flashed but not exercised over the vendor channel (the PC link was not on the development Mac). The existing 68-check `dongle_test.py` was not re-run on 0.6.0.
 
-**Not started:** Studio and `./anymouse` UI for the settings list and model names (the Studio already shows the Logitech mouse through the older `GET_MOUSE`); `gen_proto_js.py` groups for the new constants; Razer LOD; Finalmouse LOD and Motion Sync; GearHub R3 writes; the transcript generator and C replay harness; Phases C, D and E.
+**Studio, settings side (done 2026-10-26):** `gen_proto_js.py` now emits the setting, option, unit, link, charge and model constants; `web/dongle.js` has `getMouseModel`, `getMouseSettings`, `getMouseOptions` and `setMouseSetting` (each returns null on older firmware); the demo device answers all four; the Mouse card shows the catalog model name, the receiver link state, charging, and a Lift-off dropdown and Motion Sync switch when a mouse offers them as writable (read-only values are listed as rows). 23 Node tests pass. Not yet exercised against the real board.
 
-**Decisions:** 10.5 is settled (see above). Logitech writes also still need the host-control and onboard-profile work.
+**Logitech writes (2026-10-26, user request) - CPI works, rate write disabled.** `drv_logitech.c` sets CPI (0x2202 and 0x2201) and report rate (0x8061 and 0x8060) for the Lightspeed receiver `046d:c547` only. Sequence follows OpenMouse: DPI list check, switch the receiver's mouse to host control (0x8100) if needed, write, read back. The G Pro ("PRO X Wireless") reports DPI 0x2201 legacy (feature 0x0b), rate 0x8060 legacy (0x0a), onboard profiles 0x08, CPI range 100..25600 step 50, rates 125/250/500/1000 (log of 2026-10-26).
+
+- **CPI write verified on the real mouse through the Studio:** 800 to 1000 and back to 800, each read back OK; the first write also switched the mouse to host control. Host control is a persistent change on the mouse, as in OpenMouse.
+- **Rate write failed twice and is disabled** (`can_set_rate = false` in the probe): after the host-control switch the legacy rate write (feature 0x0a, function 0x20, 500 Hz) got no answer, and the receiver then delivered no motion until it was replugged (reports frozen, 0 USB errors). Waiting up to 6 s for a rate-changed notification did not change the outcome. Open questions: whether the mouse or the receiver goes silent, and whether a short or long report, or the host-control state, is the cause. Do not re-enable it without a transcript or a check against OpenMouse's recorded exchange for this model.
+- Added: every write step is logged at INFO (HID++ error codes included), the boot log prints the feature indexes and CPI range, and the Studio allows 9 s for a mouse write.
+- LOD is not ported (its encoding depends on the onboard profile format).
+
+**Next (2026-10-26):** (1) find out why the legacy rate write silences the receiver (compare with OpenMouse's `setLegacyReportRate` exchange, try the long report form, read the rate back without writing); (2) the `./anymouse` settings list (needs the Linux build; the CPI/polling controls already route through the dongle and a brand-table index error for the Logitech driver was fixed in `src/dongle.c`); (3) the transcript generator and C replay harness; (4) decide whether to enable Finalmouse and GearHub writes on the user's evidence that OpenMouse drives them (the rule in 10.5 would need relaxing).
+
+**Not started:** `./anymouse` UI for the settings list and model names; Logitech rate write (see above), Razer LOD; Finalmouse LOD and Motion Sync; GearHub R3 writes; the transcript generator and C replay harness; Phases C, D and E.
+
+**Decisions:** 10.5 is settled (see above). Logitech CPI writes are enabled for the G Pro receiver at the user's request (2026-10-26); rate writes stay off until the failure above is understood. Logitech LOD and the onboard-profile fallback for direct-connect mice are not ported.
 

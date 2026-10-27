@@ -13,7 +13,9 @@ HEADER = os.path.join(ROOT, "common", "amv_dongle_proto.h")
 OUT = os.path.join(ROOT, "web", "proto.js")
 
 GROUPS = [("CMD", "AMV_CMD_"), ("ST", "AMV_ST_"), ("SRC", "AMV_SRC_"), ("TIER", "AMV_TIER_"), ("MF", "AMV_MF_"),
-          ("CPI", "AMV_CPI_"), ("DRV", "AMV_DRV_"), ("IGN", "AMV_IGN_"), ("MEV", "AMV_MEV_")]
+          ("CPI", "AMV_CPI_"), ("DRV", "AMV_DRV_"), ("IGN", "AMV_IGN_"), ("MEV", "AMV_MEV_"),
+          ("SET", "AMV_SET_"), ("SETF", "AMV_SETF_"), ("CHG", "AMV_CHG_"), ("LINK", "AMV_LINK_"), ("OPT", "AMV_OPT_"),
+          ("UNIT", "AMV_UNIT_"), ("MODEL", "AMV_MODEL_")]
 
 
 def parse():

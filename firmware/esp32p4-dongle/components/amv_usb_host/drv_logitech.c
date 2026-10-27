@@ -2,9 +2,13 @@
  * Logitech HID++ 2.0 driver, ported from OpenMouse src/drivers/logitech/hidpp.ts and
  * src/logitech/index.ts (AGPL-3.0). Reads only: DPI (0x2201 / 0x2202), report rate
  * (0x8060 / 0x8061), battery (0x1004 / 0x1000), the mouse's own name (0x0005), and whether a
- * receiver's mouse is awake. Writes are not enabled: changing DPI or rate first needs the mouse
- * switched to host control (hidpp.ts ensureHostControl) and, on direct-connect mice, an onboard
- * profile write, which is not ported (PLAN.md section 10.4 phase B, writes after transcripts).
+ * receiver's mouse is awake.
+ *
+ * Writes (DPI and report rate, the live features only): a receiver's mouse is first switched to host
+ * control (hidpp.ts ensureHostControl, feature 0x8100), then the value is written and read back.
+ * Enabled only for models in VERIFIED_PIDS (the G Pro receiver, enabled by the user on 2026-10-26).
+ * Not ported: lift-off distance (its level mapping depends on the onboard profile format), and the
+ * onboard-profile write that a direct-connect mouse falls back to when it rejects the live rate.
  *
  * Transport: report 0x10 (short, 6 data bytes) or 0x11 (long, 19) on the vendor interface through
  * the amv_hl_* shim, which keeps WebHID's convention: the report ID is separate from the data, so
@@ -21,6 +25,11 @@
 
 static const char *TAG = "drv_logi";
 
+/* Set while a write is in progress: failures are logged at INFO instead of staying silent (reads of a
+ * sleeping mouse fail every few seconds and would flood the log). */
+static bool s_verbose;
+#define WLOG(...) do { if (s_verbose) ESP_LOGI(TAG, __VA_ARGS__); } while (0)
+
 #define LG_VID          0x046D
 #define SW_ID           0x05
 #define SHORT_ID        0x10
@@ -36,9 +45,10 @@ static const char *TAG = "drv_logi";
 #define F_DPI           0x2201
 #define F_RATE_EXT      0x8061
 #define F_RATE          0x8060
+#define F_ONBOARD       0x8100
 
 /* driver-private state lives in ctx->priv */
-enum { P_DEV, P_DPI, P_DPI_LEGACY, P_RATE, P_RATE_LEGACY, P_BATT, P_BATT_KIND, P_NAME, P_BOLT, P_INIT };
+enum { P_DEV, P_DPI, P_DPI_LEGACY, P_RATE, P_RATE_LEGACY, P_BATT, P_BATT_KIND, P_NAME, P_BOLT, P_INIT, P_ONBOARD };
 
 /* Direct-connect product ids (OpenMouse LOGITECH_DIRECT_PRODUCT_IDS): the mouse is the endpoint */
 static const uint16_t DIRECT[] = {
@@ -50,6 +60,15 @@ static const uint16_t DIRECT[] = {
 static bool is_direct(uint16_t pid)
 {
     for (size_t i = 0; i < sizeof DIRECT / sizeof DIRECT[0]; i++) if (DIRECT[i] == pid) return true;
+    return false;
+}
+
+/* Products whose writes are enabled. 0xc547: Lightspeed receiver (PRO X Wireless family). */
+static const uint16_t VERIFIED_PIDS[] = { 0xc547 };
+
+static bool is_verified(uint16_t pid)
+{
+    for (size_t i = 0; i < sizeof VERIFIED_PIDS / sizeof VERIFIED_PIDS[0]; i++) if (VERIFIED_PIDS[i] == pid) return true;
     return false;
 }
 
@@ -81,13 +100,13 @@ static bool has_report(const amv_drv_ctx_t *c, uint8_t id)
 }
 
 /* One HID++ 2.0 request on feature `feat`, function `fn` (already shifted, low nibble 0). */
-static outcome_t request(amv_drv_ctx_t *c, uint8_t feat, uint8_t fn, const uint8_t *params, int np, reply_t *r,
-                         int timeout_ms)
+static outcome_t request_x(amv_drv_ctx_t *c, uint8_t feat, uint8_t fn, const uint8_t *params, int np, reply_t *r,
+                           int timeout_ms, bool force_long)
 {
     uint8_t dev = c->priv[P_DEV];
     uint8_t out[19] = { dev, feat, (uint8_t)((fn & 0xF0) | SW_ID) };
     memcpy(out + 3, params, np);
-    bool use_short = np <= 3 && !c->priv[P_BOLT] && has_report(c, SHORT_ID);
+    bool use_short = !force_long && np <= 3 && !c->priv[P_BOLT] && has_report(c, SHORT_ID);
     amv_hl_flush_input(c, 0);
     if (amv_hl_send_report(c, 0, use_short ? SHORT_ID : LONG_ID, out, use_short ? 6 : 19) != ESP_OK) return R_SEND;
 
@@ -98,19 +117,25 @@ static outcome_t request(amv_drv_ctx_t *c, uint8_t feat, uint8_t fn, const uint8
         if (left <= 0) return last;
         uint8_t id, d[20];
         int n = amv_hl_wait_input(c, 0, &id, d, sizeof d, (int)(left * portTICK_PERIOD_MS));
-        if (n <= 0) return last;
+        if (n <= 0) { WLOG("feature %02x fn %02x: no answer within %d ms", feat, fn, timeout_ms); return last; }
         if ((id != SHORT_ID && id != LONG_ID) || n < 4 || d[0] != dev) continue;
         if (d[1] == feat && d[2] == ((fn & 0xF0) | SW_ID)) {
             if (r) { memcpy(r->data, d, (size_t)n); memset(r->data + n, 0, sizeof r->data - (size_t)n); r->len = n; }
             return R_OK;
         }
         if (d[1] == 0xFF && n >= 5 && d[2] == feat && d[3] == ((fn & 0xF0) | SW_ID)) {
-            ESP_LOGD(TAG, "feature %02x fn %02x: HID++ 2.0 error %02x", feat, fn, d[4]);
+            ESP_LOGD(TAG, "feature %02x fn %02x: HID++ 2.0 error %02x", feat, fn, d[4]); WLOG("feature %02x fn %02x: HID++ 2.0 error %02x", feat, fn, d[4]);
             return R_ERR20;
         }
-        if (d[1] == 0x8F && n >= 5 && d[2] == feat) { last = R_ERR10; ESP_LOGD(TAG, "HID++ 1.0 error %02x", d[4]); return R_ERR10; }
+        if (d[1] == 0x8F && n >= 5 && d[2] == feat) { last = R_ERR10; ESP_LOGD(TAG, "HID++ 1.0 error %02x", d[4]); WLOG("HID++ 1.0 error %02x", d[4]); return R_ERR10; }
         /* anything else is a notification (wake, battery, buttons): keep waiting */
     }
+}
+
+static outcome_t request(amv_drv_ctx_t *c, uint8_t feat, uint8_t fn, const uint8_t *params, int np, reply_t *r,
+                         int timeout_ms)
+{
+    return request_x(c, feat, fn, params, np, r, timeout_ms, false);
 }
 
 /* IRoot.getFeature: index of a feature, 0 when the mouse lacks it. */
@@ -242,6 +267,183 @@ static esp_err_t read_state(amv_drv_ctx_t *c)
     return res;
 }
 
+/* ---- writes ---- */
+
+/* Decode a DPI list (OpenMouse getDpiOptions / readLegacyDpiList): uint16 values, 0 ends it, and a value
+ * with the top three bits set is a range (0xE000 | step) from the previous value to the next one.
+ * Sets cpi_min / cpi_max / cpi_step and, when `want` is nonzero, reports if that value is offered. */
+typedef struct { uint16_t min, max, step; bool found; } dpi_scan_t;
+
+static void parse_dpi_list(const uint8_t *b, int n, uint16_t want, dpi_scan_t *s)
+{
+    uint16_t last = 0;
+    for (int i = 0; i + 1 < n;) {
+        uint16_t v = (uint16_t)((b[i] << 8) | b[i + 1]);
+        if (v == 0) break;
+        if ((v >> 13) == 7) {
+            uint16_t step = v & 0x1FFF, to = i + 3 < n ? (uint16_t)((b[i + 2] << 8) | b[i + 3]) : 0;
+            if (!last || !to || to <= last || !step) break;
+            if (want >= last && want <= to && (want - last) % step == 0) s->found = true;
+            if (!s->step || step < s->step) s->step = step;
+            if (to > s->max) s->max = to;
+            last = to;
+            i += 4;
+        } else {
+            if (v == want) s->found = true;
+            if (!s->min || v < s->min) s->min = v;
+            if (v > s->max) s->max = v;
+            last = v;
+            i += 2;
+        }
+    }
+}
+
+/* Reads the mouse's DPI list. Fills cpi_min/max/step when `c` is writable memory; returns whether `want` is offered. */
+static bool scan_dpi(amv_drv_ctx_t *c, uint16_t want, bool *ok)
+{
+    dpi_scan_t s = { 0 };
+    uint8_t buf[14 * 6];
+    int n = 0;
+    reply_t r;
+    bool got = false;
+    if (!c->priv[P_DPI]) { if (ok) *ok = false; return false; }
+    if (c->priv[P_DPI_LEGACY]) {
+        const uint8_t sensor = 0;
+        if (request(c, c->priv[P_DPI], 0x10, &sensor, 1, &r, 900) == R_OK) {
+            n = r.len > 4 ? r.len - 4 : 0;
+            memcpy(buf, r.data + 4, (size_t)(n > (int)sizeof buf ? (int)sizeof buf : n));
+            got = true;
+        }
+    } else {
+        for (int page = 0; page < 6; page++) {
+            const uint8_t p[2] = { 0x00, (uint8_t)page };
+            if (request(c, c->priv[P_DPI], 0x20, p, 2, &r, 900) != R_OK) break;
+            got = true;
+            int k = r.len > 6 ? r.len - 6 : 0;
+            if (n + k > (int)sizeof buf) k = (int)sizeof buf - n;
+            memcpy(buf + n, r.data + 6, (size_t)k);
+            n += k;
+            bool end = false;
+            for (int i = 1; i < n; i++) if (buf[i - 1] == 0 && buf[i] == 0) end = true;
+            if (end) break;
+        }
+    }
+    if (got) parse_dpi_list(buf, n, want, &s);
+    if (ok) *ok = got;
+    if (!want && got) { c->cpi_min = s.min; c->cpi_max = s.max; c->cpi_step = s.step ? s.step : 50; }
+    return s.found;
+}
+
+/* hidpp.ts ensureHostControl: a receiver's mouse must be in host mode (0x02) before a live write sticks.
+ * Direct-connect mice accept live writes in onboard mode and are left as they are. */
+static esp_err_t ensure_host_control(amv_drv_ctx_t *c)
+{
+    if (is_direct(c->pid) || !c->priv[P_ONBOARD]) return ESP_OK;
+    reply_t r;
+    if (request(c, c->priv[P_ONBOARD], 0x20, NULL, 0, &r, 1000) != R_OK) return ESP_FAIL;
+    if (r.data[3] == 0x02) return ESP_OK;
+    const uint8_t host = 0x02;
+    if (request(c, c->priv[P_ONBOARD], 0x10, &host, 1, &r, 1000) != R_OK) return ESP_FAIL;   /* refused: onboard only */
+    if (request(c, c->priv[P_ONBOARD], 0x20, NULL, 0, &r, 1000) != R_OK || r.data[3] != 0x02) return ESP_FAIL;
+    ESP_LOGI(TAG, "mouse switched to host control");
+    return ESP_OK;
+}
+
+static esp_err_t set_cpi_impl(amv_drv_ctx_t *c, uint16_t cpi)
+{
+    if (!c->can_set_cpi) return ESP_ERR_NOT_SUPPORTED;
+    bool ok;
+    if (!scan_dpi(c, cpi, &ok)) return ok ? ESP_ERR_INVALID_ARG : ESP_FAIL;   /* not advertised by the mouse */
+    if (ensure_host_control(c) != ESP_OK) return ESP_FAIL;
+    reply_t r;
+    if (c->priv[P_DPI_LEGACY]) {
+        const uint8_t p[3] = { 0x00, (uint8_t)(cpi >> 8), (uint8_t)cpi };
+        if (request_x(c, c->priv[P_DPI], 0x30, p, 3, &r, 1500, !is_direct(c->pid)) != R_OK) return ESP_FAIL;
+        const uint8_t sensor = 0;
+        if (request(c, c->priv[P_DPI], 0x20, &sensor, 1, &r, 1500) != R_OK) return ESP_FAIL;
+        c->cpi = (uint16_t)((r.data[4] << 8) | r.data[5]);
+    } else {
+        if (request(c, c->priv[P_DPI], 0x50, NULL, 0, &r, 1500) != R_OK) return ESP_FAIL;
+        const uint8_t lod = r.data[12];
+        const uint8_t p[6] = { 0x00, (uint8_t)(cpi >> 8), (uint8_t)cpi, (uint8_t)(cpi >> 8), (uint8_t)cpi, lod };
+        if (request_x(c, c->priv[P_DPI], 0x60, p, 6, &r, 1500, true) != R_OK) return ESP_FAIL;
+        if (request(c, c->priv[P_DPI], 0x50, NULL, 0, &r, 1500) != R_OK) return ESP_FAIL;
+        c->cpi = (uint16_t)((r.data[4] << 8) | r.data[5]);
+        if ((uint16_t)((r.data[8] << 8) | r.data[9]) != cpi) return ESP_FAIL;
+    }
+    return c->cpi == cpi ? ESP_OK : ESP_FAIL;       /* "The mouse kept X instead of Y" */
+}
+
+/* Extended report rate write. The mouse re-links its radio when the rate changes, so the write's own
+ * answer can be late or missing; OpenMouse treats the mouse's "rate changed" notification (feature
+ * event 0x01 carrying the new rate code) as the confirmation and waits up to 6 s for it. Nothing else is
+ * sent while waiting. */
+static esp_err_t write_rate_ext(amv_drv_ctx_t *c, uint16_t hz, uint8_t code)
+{
+    const uint8_t feat = c->priv[P_RATE], dev = c->priv[P_DEV];
+    uint8_t out[19] = { dev, feat, (uint8_t)(0x30 | SW_ID), code };
+    bool use_short = !c->priv[P_BOLT] && has_report(c, SHORT_ID);
+    amv_hl_flush_input(c, 0);
+    if (amv_hl_send_report(c, 0, use_short ? SHORT_ID : LONG_ID, out, use_short ? 6 : 19) != ESP_OK) { WLOG("rate write: send failed"); return ESP_FAIL; }
+    int64_t end = (int64_t)xTaskGetTickCount() + pdMS_TO_TICKS(6000);
+    bool acked = false;
+    for (;;) {
+        int64_t left = end - (int64_t)xTaskGetTickCount();
+        if (left <= 0) break;
+        uint8_t id, d[20];
+        int n = amv_hl_wait_input(c, 0, &id, d, sizeof d, (int)(left * portTICK_PERIOD_MS));
+        if (n <= 0) break;
+        if ((id != SHORT_ID && id != LONG_ID) || n < 5 || d[0] != dev) continue;
+        if (d[1] == feat && d[2] == (0x30 | SW_ID)) { acked = true; WLOG("rate write acknowledged"); continue; }
+        if (d[1] == 0xFF && d[2] == feat && d[3] == (0x30 | SW_ID)) { WLOG("rate write refused by the mouse: error %02x", d[4]); return ESP_FAIL; }
+        if (d[1] == 0x8F) { WLOG("rate write: HID++ 1.0 error %02x", n >= 5 ? d[4] : 0); return ESP_FAIL; }
+        if (d[1] == feat && d[2] == 0x00 && d[3] == 0x01 && d[4] == code) { WLOG("rate change confirmed by the mouse"); c->device_hz = hz; return ESP_OK; }
+        WLOG("rate write: ignoring report %02x %02x %02x %02x", d[1], d[2], d[3], d[4]);
+    }
+    WLOG("rate write: %s, no confirmation within 6 s", acked ? "acknowledged" : "no answer");
+    return ESP_FAIL;
+}
+
+static esp_err_t set_rate_impl(amv_drv_ctx_t *c, uint16_t hz)
+{
+    if (!c->can_set_rate) return ESP_ERR_NOT_SUPPORTED;
+    bool listed = false;
+    for (int i = 0; i < c->n_rates; i++) listed |= c->rates[i] == hz;
+    if (!listed) return ESP_ERR_INVALID_ARG;
+    if (ensure_host_control(c) != ESP_OK) return ESP_FAIL;
+    reply_t r;
+    if (c->priv[P_RATE_LEGACY]) {
+        const uint8_t ms = (uint8_t)((1000 + hz / 2) / hz);
+        if (ms < 1 || ms > 8) return ESP_ERR_INVALID_ARG;
+        if (request(c, c->priv[P_RATE], 0x20, &ms, 1, &r, 1500) != R_OK) return ESP_FAIL;
+        if (request(c, c->priv[P_RATE], 0x10, NULL, 0, &r, 1500) != R_OK || r.data[3] != ms) return ESP_FAIL;
+        c->device_hz = hz;
+        return ESP_OK;
+    }
+    uint8_t code = 0xFF;
+    for (uint8_t i = 0; i < 7; i++) if (rate_code_to_hz(i) == hz) code = i;
+    if (code == 0xFF) return ESP_ERR_INVALID_ARG;
+    return write_rate_ext(c, hz, code);
+}
+
+static esp_err_t set_cpi(amv_drv_ctx_t *c, uint16_t cpi)
+{
+    s_verbose = true;
+    esp_err_t e = set_cpi_impl(c, cpi);
+    WLOG("set CPI %u -> %s", cpi, esp_err_to_name(e));
+    s_verbose = false;
+    return e;
+}
+
+static esp_err_t set_rate(amv_drv_ctx_t *c, uint16_t hz)
+{
+    s_verbose = true;
+    esp_err_t e = set_rate_impl(c, hz);
+    WLOG("set rate %u -> %s", hz, esp_err_to_name(e));
+    s_verbose = false;
+    return e;
+}
+
 static esp_err_t probe(amv_drv_ctx_t *c)
 {
     c->cfg_iface = c->n_cfg ? c->cfg[0].ifnum : -1;
@@ -264,6 +466,7 @@ static esp_err_t probe(amv_drv_ctx_t *c)
     else if ((f = get_feature(c, F_DPI, 900)) > 0) { c->priv[P_DPI] = (uint8_t)f; c->priv[P_DPI_LEGACY] = 1; }
     if ((f = get_feature(c, F_RATE_EXT, 900)) > 0) { c->priv[P_RATE] = (uint8_t)f; c->priv[P_RATE_LEGACY] = 0; }
     else if ((f = get_feature(c, F_RATE, 900)) > 0) { c->priv[P_RATE] = (uint8_t)f; c->priv[P_RATE_LEGACY] = 1; }
+    if ((f = get_feature(c, F_ONBOARD, 900)) > 0) c->priv[P_ONBOARD] = (uint8_t)f;
     if ((f = get_feature(c, F_BATTERY_1004, 900)) > 0) { c->priv[P_BATT] = (uint8_t)f; c->priv[P_BATT_KIND] = 1; }
     else if ((f = get_feature(c, F_BATTERY_1000, 900)) > 0) { c->priv[P_BATT] = (uint8_t)f; c->priv[P_BATT_KIND] = 2; }
     if (!c->priv[P_DPI]) {
@@ -275,11 +478,20 @@ static esp_err_t probe(amv_drv_ctx_t *c)
     read_name(c);
     read_rates(c);
     esp_err_t e = read_state(c);
-    c->can_set_cpi = c->can_set_rate = false;     /* read-only: see the file header */
+    scan_dpi(c, 0, NULL);                               /* CPI range for the options reply and write validation */
+    c->verified = is_verified(c->pid);
+    c->can_set_cpi = c->verified && e == ESP_OK && c->cpi_max > 0;
+    /* Rate writes are off: on 2026-10-26 a rate write on the G Pro made the receiver stop delivering motion until it was
+     * replugged (host-control switch worked, the write was never answered). CPI writes stay on. */
+    c->can_set_rate = false;
+    ESP_LOGI(TAG, "features: dpi %02x%s rate %02x%s onboard %02x; CPI range %u..%u step %u; %u rates", c->priv[P_DPI],
+             c->priv[P_DPI_LEGACY] ? " legacy" : "", c->priv[P_RATE], c->priv[P_RATE_LEGACY] ? " legacy" : "", c->priv[P_ONBOARD],
+             c->cpi_min, c->cpi_max, c->cpi_step, c->n_rates);
     c->error = e != ESP_OK;
-    ESP_LOGI(TAG, "%04x: \"%s\" on index %u (%s): %u CPI (%s), %u Hz, battery %u%%, read-only", c->pid, c->name,
+    ESP_LOGI(TAG, "%04x: \"%s\" on index %u (%s): %u CPI (%s), %u Hz, battery %u%%, %s", c->pid, c->name,
              c->priv[P_DEV], c->priv[P_DEV] == IDX_DIRECT ? "direct" : "via receiver", c->cpi,
-             c->priv[P_DPI_LEGACY] ? "0x2201" : "0x2202", c->device_hz, c->battery == 0xFF ? 0 : c->battery);
+             c->priv[P_DPI_LEGACY] ? "0x2201" : "0x2202", c->device_hz, c->battery == 0xFF ? 0 : c->battery,
+             c->verified ? "writes enabled" : "read-only");
     return e;
 }
 
@@ -297,9 +509,6 @@ static esp_err_t refresh(amv_drv_ctx_t *c)
     }
     return e;
 }
-
-static esp_err_t set_cpi(amv_drv_ctx_t *c, uint16_t cpi) { (void)c; (void)cpi; return ESP_ERR_NOT_SUPPORTED; }
-static esp_err_t set_rate(amv_drv_ctx_t *c, uint16_t hz) { (void)c; (void)hz; return ESP_ERR_NOT_SUPPORTED; }
 
 const amv_drv_t amv_drv_logitech = {
     .id = AMV_DRV_LOGITECH, .name = "Logitech", .wants_input = false,

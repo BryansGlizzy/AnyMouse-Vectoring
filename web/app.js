@@ -160,7 +160,12 @@ function onDeviceState(ev) {
 
 // ---------- attached mice ----------
 const TIER_LABEL = { [P.TIER.KNOWN]: ['t1', 'Known protocol'], [P.TIER.GENERIC]: ['t2', 'Generic HID'], [P.TIER.BOOT]: ['t3', 'Boot fallback'], [P.TIER.IGNORED]: ['t4', 'Not used'] };
-const DRIVER_LABEL = { [P.DRV.RAZER]: 'Razer', [P.DRV.FINALMOUSE]: 'Finalmouse', [P.DRV.GEARHUB]: 'GearHub / Attack Shark' };
+const DRIVER_LABEL = { [P.DRV.RAZER]: 'Razer', [P.DRV.FINALMOUSE]: 'Finalmouse', [P.DRV.GEARHUB]: 'GearHub / Attack Shark', [P.DRV.LOGITECH]: 'Logitech' };
+const MODEL_TEXT = { [P.MODEL.KNOWN]: 'Recognised from OpenMouse. Its settings are not supported on the dongle yet.' };
+const LINK_TEXT = { [P.LINK.WIRED]: 'wired', [P.LINK.CONNECTED]: 'connected through its receiver', [P.LINK.ASLEEP]: 'asleep or out of range (move it to wake it)' };
+const CHARGE_TEXT = { [P.CHG.DISCHARGING]: 'discharging', [P.CHG.CHARGING]: 'charging', [P.CHG.FULL]: 'full' };
+const LOD_LEVEL = ['Low', 'Medium', 'High'];
+const lodLabel = (opt, v) => opt?.unit === P.UNIT.MM10 ? `${v / 10} mm` : opt?.unit === P.UNIT.LEVEL && opt.values.length === 3 ? LOD_LEVEL[v - 1] : String(v);
 const IGNORE_TEXT = {
   [P.IGN.NOT_MOUSE]: 'Not a mouse (no pointer interface). Left alone.',
   [P.IGN.ABSOLUTE]: 'Absolute pointer (tablet or touch screen). Only relative mice are vectored.',
@@ -180,6 +185,15 @@ async function refreshMice() {
       for (const m of list) {
         const prev = S.mice?.find((x) => x.uid === m.uid);
         m.caps = m.tier === P.TIER.KNOWN ? (prev?.caps ?? await S.client.getMouseCaps(m.index)) : null;
+        if (m.tier !== P.TIER.IGNORED) {
+          // firmware before 0.6.0 answers BAD_CMD: these stay null and the card shows what it always did
+          m.model = prev?.model ?? await S.client.getMouseModel(m.index).catch(() => null);
+          m.set = await S.client.getMouseSettings(m.index).catch(() => null);
+          m.options = prev?.options ?? {};
+          for (const s of m.set?.settings ?? []) {
+            if ((s.id === P.SET.LOD || s.id === P.SET.MOTION_SYNC) && !m.options[s.id]) m.options[s.id] = await S.client.getMouseOptions(m.index, s.id).catch(() => null);
+          }
+        }
       }
       // A CPI read from the mouse drives the effective-DPI column
       const known = list.find((m) => m.tier !== P.TIER.IGNORED && m.cpi);
@@ -216,15 +230,31 @@ function mouseCard(m) {
   } else {
     rows.push(['Polling rate', rateText(m)]);
     rows.push(['CPI', m.cpi ? `${m.cpi}${m.cpiSource === P.CPI.DEVICE ? ' (read from the mouse)' : ' (entered by you)'}` : 'unknown']);
-    if (m.battery != null) rows.push(['Battery', `${m.battery}%`]);
+    if (m.model?.model) rows.push(['Model', `${m.model.brand} ${m.model.model}`.trim()]);
+    if (m.set && m.set.link !== P.LINK.WIRED) rows.push(['Link', LINK_TEXT[m.set.link] ?? `state ${m.set.link}`]);
+    if (m.battery != null) rows.push(['Battery', `${m.battery}%${CHARGE_TEXT[m.set?.settings.find((x) => x.id === P.SET.CHARGING)?.value] ? `, ${CHARGE_TEXT[m.set.settings.find((x) => x.id === P.SET.CHARGING).value]}` : ''}`]);
     if (m.caps?.firmware) rows.push(['Mouse firmware', m.caps.firmware]);
     rows.push(['Report', `${m.xBits}-bit motion, ${m.buttons} buttons${m.flags & P.MF.WHEEL ? ', wheel' : ''}${m.flags & P.MF.PAN ? ', tilt' : ''}${m.flags & P.MF.REPORT_IDS ? ', report IDs' : ''}`]);
     if (m.tier === P.TIER.KNOWN) {
+      for (const s of m.set?.settings ?? []) {
+        const o = m.options?.[s.id];
+        if (s.id === P.SET.LOD && o) {
+          controls += s.writable
+            ? `<label>Lift-off <select class="m-set dev" data-set="${s.id}">${o.values.map((v) => `<option value="${v}"${v === s.value ? ' selected' : ''}>${lodLabel(o, v)}</option>`).join('')}</select></label>`
+            : '';
+          if (!s.writable) rows.push(['Lift-off', lodLabel(o, s.value)]);
+        }
+        if (s.id === P.SET.MOTION_SYNC) {
+          if (s.writable) controls += `<label><input class="m-set dev" type="checkbox" data-set="${s.id}"${s.value ? ' checked' : ''}> Motion Sync</label>`;
+          else rows.push(['Motion Sync', s.value ? 'on' : 'off']);
+        }
+      }
       const canCpi = m.flags & P.MF.CAN_SET_CPI, canRate = m.flags & P.MF.CAN_SET_RATE, c = m.caps;
       if (canCpi && c) controls += `<label>CPI <input class="m-cpi dev" type="number" min="${c.cpiMin}" max="${c.cpiMax}" step="${c.cpiStep}" value="${m.cpi || ''}"></label><button class="m-cpi-set dev" type="button">Set CPI</button>`;
       if (canRate && c?.rates.length) controls += `<label>Polling <select class="m-rate dev">${c.rates.map((r) => `<option value="${r}"${r === m.deviceHz ? ' selected' : ''}>${r} Hz</option>`).join('')}</select></label>`;
       if (!(m.flags & P.MF.VERIFIED)) body += `<p class="note">Read-only: this model has not been tested through the dongle yet, so it will not be written to.</p>`;
     } else {
+      if (m.model?.state === P.MODEL.KNOWN) body += `<p class="note">${esc(MODEL_TEXT[P.MODEL.KNOWN])}</p>`;
       controls = `<label title="Only used for the effective-DPI numbers; the dongle cannot change your mouse's CPI.">Your mouse's CPI <input class="m-cpi dev" type="number" min="50" max="64000" step="50" value="${m.cpi || ''}" placeholder="e.g. 800"></label><button class="m-cpi-set dev" type="button">Remember</button>`;
       body += `<p class="note">No vendor protocol is known for this mouse, so its CPI and polling rate cannot be read or changed here. Its motion is vectored normally.</p>`;
     }
@@ -269,6 +299,17 @@ $('#mice').addEventListener('click', (e) => {
   });
 });
 $('#mice').addEventListener('change', (e) => {
+  if (e.target.matches('.m-set')) {
+    const i = +e.target.closest('.mouse').dataset.i, id = +e.target.dataset.set;
+    const value = e.target.type === 'checkbox' ? (e.target.checked ? 1 : 0) : +e.target.value;
+    act(async () => {
+      const r = await S.client.setMouseSetting(i, id, value);
+      toast(r.ok ? 'Setting changed on the mouse.' : `Not set: ${statusName(r.status)}`, r.ok ? 'good' : 'bad');
+      document.activeElement?.blur();
+      await refreshMice();
+    });
+    return;
+  }
   if (!e.target.matches('.m-rate')) return;
   const i = +e.target.closest('.mouse').dataset.i, hz = +e.target.value;
   act(async () => {

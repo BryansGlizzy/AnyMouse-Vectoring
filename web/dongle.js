@@ -3,6 +3,8 @@
 // real WebHID, on the built-in demo device, and in the Node tests.
 import { P, ST_NAMES } from './proto.js';
 
+// a mouse write can wait for the mouse to confirm (Logitech rate changes: up to 6 s)
+const WRITE_TIMEOUT_MS = 9000;
 export const statusName = (s) => ST_NAMES[s] ?? `status ${s}`;
 
 export class DongleError extends Error {
@@ -70,6 +72,29 @@ export function parseMouseCaps(p) {
   const v = view(p), rates = [];
   for (let i = 0; i < Math.min(p[2], 8); i++) rates.push(v.getUint16(4 + i * 2, true));
   return { index: p[0], driver: p[1], rates, cpiMin: v.getUint16(20, true), cpiMax: v.getUint16(22, true), cpiStep: v.getUint16(24, true), firmware: cstr(p.slice(26, 42)) };
+}
+
+// GET_MOUSE_MODEL reply (amv_mouse_model_t, 56 bytes)
+export function parseMouseModel(p) {
+  return { index: p[0], state: p[1], brand: cstr(p.slice(4, 20)), model: cstr(p.slice(20, 56)) };
+}
+
+// GET_MOUSE_SETTINGS / SET_MOUSE_SETTING reply (amv_settings_rep_t: 4 + 4n bytes)
+export function parseSettings(p) {
+  const v = view(p), n = Math.min(p[1], P.SETTINGS_MAX, (p.length - 4) >> 2), settings = [];
+  for (let i = 0; i < n; i++) {
+    const f = p[5 + i * 4];
+    settings.push({ id: p[4 + i * 4], flags: f, readable: (f & P.SETF.READABLE) !== 0, writable: (f & P.SETF.WRITABLE) !== 0, value: v.getUint16(6 + i * 4, true) });
+  }
+  return { index: p[0], link: p[2], settings };
+}
+
+// GET_MOUSE_OPTIONS reply (amv_options_rep_t: 6 + 2n bytes)
+export function parseOptions(p) {
+  const v = view(p), n = Math.min(p[4], P.OPTIONS_MAX, (p.length - 6) >> 1), values = [];
+  for (let i = 0; i < n; i++) values.push(v.getUint16(6 + i * 2, true));
+  const range = p[2] === P.OPT.RANGE && n >= 3 ? { min: values[0], max: values[1], step: values[2] } : null;
+  return { index: p[0], setting: p[1], kind: p[2], unit: p[3], values, range };
 }
 
 const mouseIndex = (i) => Uint8Array.of(i);
@@ -145,14 +170,14 @@ export class DongleClient extends EventTarget {
   }
 
   /** Low-level: resolves with {status, payload} for any status. Rejects on timeout or transport failure. */
-  async request(cmd, payload) {
+  async request(cmd, payload, timeoutMs = this.timeoutMs) {
     const seq = this._nextSeq();
     const frame = buildFrame(cmd, seq, payload);
     const reply = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(seq);
         reject(new DongleError(`no reply to command 0x${cmd.toString(16)}`, -2));
-      }, this.timeoutMs);
+      }, timeoutMs);
       this.pending.set(seq, { cmd, resolve, reject, timer, t0: performance.now() });
     });
     try {
@@ -274,11 +299,29 @@ export class DongleClient extends EventTarget {
   }
   /** Known mice: written to the mouse. Others: stored on the dongle as a label (0 forgets). */
   async setMouseCpi(i, cpi) {
-    const r = await this.request(P.CMD.SET_MOUSE_CPI, mouseSet(i, cpi));
+    const r = await this.request(P.CMD.SET_MOUSE_CPI, mouseSet(i, cpi), WRITE_TIMEOUT_MS);
     return { status: r.status, ok: r.status === P.ST.OK, mouse: r.payload.length >= 56 ? parseMouse(r.payload) : null };
   }
+  // ---- brand-neutral settings (firmware 0.6.0+). Each returns null when the firmware predates them. ----
+  async getMouseModel(i) {
+    const r = await this.request(P.CMD.GET_MOUSE_MODEL, mouseIndex(i));
+    return r.status === P.ST.OK ? parseMouseModel(r.payload) : null;
+  }
+  async getMouseSettings(i) {
+    const r = await this.request(P.CMD.GET_MOUSE_SETTINGS, mouseIndex(i));
+    return r.status === P.ST.OK ? parseSettings(r.payload) : null;
+  }
+  async getMouseOptions(i, setting) {
+    const r = await this.request(P.CMD.GET_MOUSE_OPTIONS, Uint8Array.of(i, setting));
+    return r.status === P.ST.OK ? parseOptions(r.payload) : null;
+  }
+  async setMouseSetting(i, setting, value) {
+    const p = new Uint8Array(4); p[0] = i; p[1] = setting; view(p).setUint16(2, value, true);
+    const r = await this.request(P.CMD.SET_MOUSE_SETTING, p, WRITE_TIMEOUT_MS);
+    return { status: r.status, ok: r.status === P.ST.OK, settings: r.payload.length >= 4 && r.status === P.ST.OK ? parseSettings(r.payload) : null };
+  }
   async setMousePolling(i, hz) {
-    const r = await this.request(P.CMD.SET_MOUSE_POLLING, mouseSet(i, hz));
+    const r = await this.request(P.CMD.SET_MOUSE_POLLING, mouseSet(i, hz), WRITE_TIMEOUT_MS);
     return { status: r.status, ok: r.status === P.ST.OK, mouse: r.payload.length >= 56 ? parseMouse(r.payload) : null };
   }
 

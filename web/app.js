@@ -160,7 +160,7 @@ function onDeviceState(ev) {
 
 // ---------- attached mice ----------
 const TIER_LABEL = { [P.TIER.KNOWN]: ['t1', 'Known protocol'], [P.TIER.GENERIC]: ['t2', 'Generic HID'], [P.TIER.BOOT]: ['t3', 'Boot fallback'], [P.TIER.IGNORED]: ['t4', 'Not used'] };
-const DRIVER_LABEL = { [P.DRV.RAZER]: 'Razer', [P.DRV.FINALMOUSE]: 'Finalmouse', [P.DRV.GEARHUB]: 'GearHub / Attack Shark', [P.DRV.LOGITECH]: 'Logitech' };
+const DRIVER_LABEL = { [P.DRV.RAZER]: 'Razer', [P.DRV.FINALMOUSE]: 'Finalmouse', [P.DRV.GEARHUB]: 'GearHub / Attack Shark', [P.DRV.LOGITECH]: 'Logitech', [P.DRV.OPENMOUSE]: 'OpenMouse' };
 const MODEL_TEXT = { [P.MODEL.KNOWN]: 'Recognised from OpenMouse. Its settings are not supported on the dongle yet.' };
 const LINK_TEXT = { [P.LINK.WIRED]: 'wired', [P.LINK.CONNECTED]: 'connected through its receiver', [P.LINK.ASLEEP]: 'asleep or out of range (move it to wake it)' };
 const CHARGE_TEXT = { [P.CHG.DISCHARGING]: 'discharging', [P.CHG.CHARGING]: 'charging', [P.CHG.FULL]: 'full' };

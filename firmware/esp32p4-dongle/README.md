@@ -9,10 +9,11 @@ The dongle works standalone: once a profile is saved it vectors with no software
 
 This README describes the dongle **as built**. What is still to do is in [PLAN.md](PLAN.md); the dated history is in [../../PROGRESS.md](../../PROGRESS.md).
 
-## Status (2026-10-27, firmware 0.6.0)
+## Status (2026-10-27, firmware 0.7.0)
 
 - **Working with real mice** (Razer Basilisk Ultimate wired, Logitech G Pro "PRO X Wireless" through its Lightspeed receiver): the PC-facing link, the High-Speed host, per-report scaling, 1 kHz output, flash profiles, the vendor protocol and the Studio. The M0 and M1 exit tests (stability run, PHY reset, the hardware checklist) were signed off by the project owner on 2026-10-27; the only measured figures on file are those in the log entries of PROGRESS.md.
 - **Mouse information** in three tiers (known protocol, generic HID, boot fallback) plus a catalog of 810 OpenMouse device ids, so every mouse OpenMouse knows is named. Drivers: Razer (read, CPI/rate writes verified on the Basilisk Ultimate), Finalmouse ULX and Attack Shark R3 GearHub (read only), Logitech HID++ 2.0 (read; CPI and rate writes on the G Pro receiver).
+- **New in 0.7.0: OpenMouse runs on the dongle unchanged.** OpenMouse's own TypeScript drivers (every family) run in the QuickJS-ng engine (`components/amv_js`) instead of C ports; see [OpenMouse engine](#openmouse-engine-firmware-070). Flashed and booting; **not yet tried with a real mouse** (only against a fake Razer on the host). The C ports remain behind `CONFIG_AMV_OPENMOUSE_JS=n`.
 - **Not built, by decision:** firmware update over the vendor channel (DFU), app rollback, watchdog and soak testing (the M5 milestone was closed on 2026-10-27). Reflash over the UART USB-C. The two 4 MB OTA slots stay in the partition table so DFU can be added later without a layout change.
 - **Open:** calibration through the dongle, the Linux-side checks, the rest of OpenMouse coverage and more. See [PLAN.md](PLAN.md).
 
@@ -107,6 +108,14 @@ Ignored devices are listed with a reason (not a mouse, absolute pointer, unparse
 - **Receivers and sleep:** a driver that found no awake mouse is probed again every 5 s and the link state is reported. A mouse behind a receiver goes to sleep when idle (HID++ 1.0 errors or silence); moving it wakes it.
 - **Logitech (`drv_logitech.c`):** HID++ 2.0 over the receiver's vendor interface: device-index discovery, name (0x0005), DPI (0x2201 and 0x2202), report rate (0x8060 and 0x8061), battery (0x1004 and 0x1000) and onboard profiles (0x8100, host control mode). The G Pro "PRO X Wireless" behind receiver `046d:c547` reports DPI 0x2201 (legacy), rate 0x8060 (legacy), CPI 100..25600 step 50 and rates 125/250/500/1000; it read 800 CPI, 1000 Hz and the battery level correctly in the Studio. A write sequence follows OpenMouse: check the DPI list, switch the mouse to host control (0x8100) if needed, write, read back. **Host control is a persistent change on the mouse**, as in OpenMouse.
 
+### OpenMouse engine (firmware 0.7.0)
+Instead of porting OpenMouse to C family by family, the dongle runs OpenMouse's driver registry itself. Feasibility was checked first: 185 of OpenMouse's 188 runnable test files pass unchanged under QuickJS-ng on a PC (about 2,570 tests; the few failures are test-only Node APIs and one `toLocaleString` message difference).
+- **Engine:** QuickJS-ng 0.17.0, vendored unmodified in `components/amv_js/quickjs-ng/` (MIT). One task on core 1 (48 KB internal stack), heap in PSRAM through a counting allocator. Calls are serialized like the C drivers; between calls nothing runs in JS and input reports wait in the host's queues.
+- **Bundle:** `tools/openmouse/gen_js_bundle.sh` bundles the bridge (`components/amv_js/js/`) with OpenMouse's registry (esbuild) and compiles it to QuickJS bytecode, `components/amv_js/generated/openmouse.bc`, embedded in the image. Bytecode only loads into the same engine version, so the script checks `qjsc` matches the vendored one.
+- **Bridge (`js/`):** `prelude.js` supplies the browser globals the drivers use (timers driven by the C loop, `console`, `crypto.getRandomValues`, `structuredClone`, `localStorage`, `TextDecoder`/`TextEncoder`). `hid_device.js` is a WebHID `HIDDevice` per HID interface: collections parsed from the report descriptor, feature reports returned with the report ID at byte 0 as Chrome does, input reports as `inputreport` events. `bridge.js` exposes `navigator.hid.getDevices()` (all interfaces of the attached mice), picks the driver with OpenMouse's own `clientSupportScore`/`createSupportedClient`, and flattens `MouseStatus` for C.
+- **Driver (`amv_usb_host/drv_openmouse.c`):** matches any id in the catalog with an engine, claims every other HID interface (up to 4), maps the mouse's own interface to SET/GET_REPORT (x = -1) and claimed interfaces to `amv_hl_*`, and fills the usual context (CPI, rate, rates, battery, charging, link, LOD as levels 1-3, Motion Sync). Reported as driver `OPENMOUSE` (5).
+- **Measured on the board (no mouse yet):** bundle loads at boot in 1.2 s; engine heap 4.34 MB in PSRAM; 4.3 KB of the task stack used; internal RAM free 463 KB; image 2.28 MB (engine 0.62 MB code, bytecode 1.18 MB).
+
 **Write policy.** Probing and the 5 s refresh are read-only for every driver. A setting is written only when allowed: today the Razer Basilisk Ultimate wired (`1532:0086`) and anything behind the Logitech receiver `046d:c547` (the G Pro). The decided rule for adding models is that OpenMouse marks the exact model `verified: true` **and** its C port passes the transcript tests; that harness is not built yet (see PLAN.md), so nothing new qualifies until it is. Finalmouse and GearHub stay read-only until then.
 
 ## Protocol
@@ -128,13 +137,14 @@ The authority is [`common/amv_dongle_proto.h`](../../common/amv_dongle_proto.h):
 | `amv_usb_device` | PC side: Full-Speed device on the non-UART USB-C (PHY swap); 16-button / 16-bit mouse report (3-byte boot fallback) plus the vendor channel |
 | `amv_catalog` | Generated catalog of OpenMouse's supported devices; exact and vendor-wide lookup |
 | `amv_hid_parse` | Pure-C report-descriptor parser (also built on the host for tests) |
-| `amv_usb_host` | Mouse side: High-Speed host; enumeration, interface claims, interrupt transfers, tier decision, `amv_hl_*` shim, the `GET_MOUSE*` / `SET_MOUSE_*` handlers, and the drivers `drv_razer.c`, `drv_finalmouse.c`, `drv_gearhub.c`, `drv_logitech.c` (ported from OpenMouse, AGPL-3.0) |
+| `amv_usb_host` | Mouse side: High-Speed host; enumeration, interface claims, interrupt transfers, tier decision, `amv_hl_*` shim, the `GET_MOUSE*` / `SET_MOUSE_*` handlers, and the drivers: `drv_openmouse.c` (default, runs OpenMouse in `amv_js`) or the C ports `drv_razer.c`, `drv_finalmouse.c`, `drv_gearhub.c`, `drv_logitech.c` (`CONFIG_AMV_OPENMOUSE_JS=n`) |
+| `amv_js` | QuickJS-ng engine running OpenMouse's own drivers from embedded bytecode (`generated/openmouse.bc`); the bridge in `js/` |
 | `amv_vector` | Hot path: scales every native report, sums into 1 ms frames, merges several mice, never merges button edges |
 
-`tools/`: `dongle_test.py` (68 board checks), `gen_proto_js.py` (generates `web/proto.js`), `capture_fixtures.py` (records frames for the web tests), `openmouse/` (catalog generator). `tests/`: `test_octant.c`, `test_hid_parse.c`, `descriptors/` (real captured descriptors). `build/`, `managed_components/` and `sdkconfig` are git-ignored.
+`tools/`: `dongle_test.py` (68 board checks), `gen_proto_js.py` (generates `web/proto.js`), `capture_fixtures.py` (records frames for the web tests), `openmouse/` (catalog and JS bundle generators). `tests/`: `test_octant.c`, `test_hid_parse.c`, `js_bridge/` (the bridge against a fake Razer, run with `qjs`), `descriptors/` (real captured descriptors). `build/`, `managed_components/` and `sdkconfig` are git-ignored.
 
 ## Toolchain and quickstart
-**ESP-IDF v5.5.4, pinned** (it supports pre-v3 P4 silicon; never update IDF mid-milestone). Managed component: `espressif/esp_tinyusb`; the host stack is IDF's built-in `usb_host`, and HID handling is ours because we need the raw descriptor. Key `sdkconfig.defaults`: `CONFIG_IDF_TARGET="esp32p4"`, `CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`, 16 MB flash, 360 MHz, `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, `CONFIG_ESP_TASK_WDT_PANIC=y`, `CONFIG_FREERTOS_HZ=1000`. Partitions: `nvs` 24 KB, `otadata`, `ota_0` and `ota_1` 4 MB each, `coredump` 64 KB. The image is about 0.4 MB.
+**ESP-IDF v5.5.4, pinned** (it supports pre-v3 P4 silicon; never update IDF mid-milestone). Managed component: `espressif/esp_tinyusb`; the host stack is IDF's built-in `usb_host`, and HID handling is ours because we need the raw descriptor. Key `sdkconfig.defaults`: `CONFIG_IDF_TARGET="esp32p4"`, `CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`, 16 MB flash, 360 MHz, `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, `CONFIG_ESP_TASK_WDT_PANIC=y`, `CONFIG_FREERTOS_HZ=1000`. Partitions: `nvs` 24 KB, `otadata`, `ota_0` and `ota_1` 4 MB each, `coredump` 64 KB. PSRAM is enabled for the engine heap (`CONFIG_SPIRAM=y`, caps allocation only, so `malloc()` stays internal). The image is about 2.3 MB (0.4 MB without the engine).
 
 Install (macOS and CachyOS alike): `brew install cmake ninja dfu-util ccache python@3.12`, clone `espressif/esp-idf` at `v5.5.4` into `~/esp/esp-idf`, run `install.sh esp32p4`.
 ```bash
@@ -144,7 +154,7 @@ idf.py set-target esp32p4        # first time only
 idf.py build
 idf.py -p <UART USB-C port> flash monitor     # macOS: /dev/cu.usbmodem<serial>; Linux: /dev/ttyACM0 or /dev/ttyUSB0
 ```
-**Always flash and monitor through the UART USB-C.** While the firmware runs, the other USB-C is the PC link and cannot flash. Download mode is not fused off (hold BOOT, tap RST), so a bad image can always be replaced. Regenerating the catalog needs Node and an OpenMouse checkout: `OPENMOUSE_DIR=<checkout> tools/openmouse/gen_catalog.sh`.
+**Always flash and monitor through the UART USB-C.** While the firmware runs, the other USB-C is the PC link and cannot flash. Download mode is not fused off (hold BOOT, tap RST), so a bad image can always be replaced. Regenerating the catalog needs Node and an OpenMouse checkout: `OPENMOUSE_DIR=<checkout> tools/openmouse/gen_catalog.sh`. Regenerating the engine bundle also needs `qjsc` 0.17.0 (`brew install quickjs-ng`): `OPENMOUSE_DIR=<checkout> tools/openmouse/gen_js_bundle.sh`.
 
 The console prints every 5 s: input reports, frames out, raw vs out counts, and per mouse VID:PID, report count and errors. IDF logs one harmless `USB HOST: Enqueue URB error: ESP_ERR_INVALID_STATE` when a mouse disappears while a read is being re-queued.
 
@@ -163,6 +173,7 @@ python3 -I firmware/esp32p4-dongle/tools/dongle_test.py          # 68 checks ove
 cc -std=c11 -Wall -Wextra -Icommon firmware/esp32p4-dongle/tests/test_octant.c -lm -o /tmp/test_octant && /tmp/test_octant   # from the repo root
 (cd firmware/esp32p4-dongle && cc -std=c11 -Wall -Wextra -Icomponents/amv_hid_parse/include tests/test_hid_parse.c components/amv_hid_parse/amv_hid_parse.c -o /tmp/test_hid_parse && /tmp/test_hid_parse)   # descriptor parser, 30 checks
 (cd web && node --test tests/*.test.mjs)                          # Studio, 23 tests
+(cd firmware/esp32p4-dongle && qjs --std --module tests/js_bridge/razer_fake.test.js)   # OpenMouse bridge vs a fake Basilisk Ultimate, 11 checks
 make test-dongle                                                  # Linux only: 61 link and guard checks against a fake dongle
 ```
 `dongle_test.py` covers the `HELLO` handshake, host-to-device writes (valid, invalid, stale), device-to-host events, bypass, profile slots, factory reset, the real scaling code against an independent float64 reference, persistence across a reboot, and the mouse list, descriptor and refusal paths with a Razer attached. It leaves the dongle at factory defaults. Its last full run was on firmware 0.5.0; **the four 0.6.0 commands (`GET_MOUSE_MODEL`, `GET_MOUSE_SETTINGS`, `GET_MOUSE_OPTIONS`, `SET_MOUSE_SETTING`) have no checks yet** (PLAN.md).
@@ -174,3 +185,4 @@ make test-dongle                                                  # Linux only: 
 - **Control plane:** round trip about 2 ms median from a macOS host; 282 scaling steps matched an independent reference exactly (drift 0).
 - **Writes through the dongle:** Razer CPI write about 85 ms; Logitech CPI writes (800 to 1000 and back) were read back correctly; Logitech report-rate writes (500, then 1000 Hz) returned `ESP_OK` and motion kept flowing, but only while the mouse was awake (see PLAN.md for the sleeping-mouse message still to do).
 - **Space:** the control plane plus PC-side USB was 283 KB; adding the USB host stack with hubs added 69 KB and cost 6 KB of free internal RAM (559 to 553 KB). The 0.6.0 image with the catalog and four drivers is about 0.4 MB of a 4 MB slot, so porting more OpenMouse families is limited by effort, not space (estimate: 0.7 to 1.0 MB with every family).
+- **OpenMouse engine (0.7.0, no mouse attached):** load at boot 1.2 s; heap 4.34 MB in PSRAM (6.6 MB on a 64-bit PC); task stack 4.3 KB used of 48 KB; internal RAM free 463 KB (was 553 KB); idle for over 5 minutes with no errors. Per family loaded alone (PC, scaled to 32-bit by the measured 0.66): engine baseline about 90 KB, median family about 130 KB, Logitech about 640 KB; bytecode median 18 KB, largest 130 KB.

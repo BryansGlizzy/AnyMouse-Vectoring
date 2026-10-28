@@ -137,6 +137,7 @@
 #define AMV_DRV_FINALMOUSE 2
 #define AMV_DRV_GEARHUB    3
 #define AMV_DRV_LOGITECH   4
+#define AMV_DRV_OPENMOUSE  5   /* OpenMouse's own drivers, run on the dongle (components/amv_js) */
 
 /* Settings (GET_MOUSE_SETTINGS entries). Values are u16 in the setting's own unit. */
 #define AMV_SET_CPI          1   /* counts per inch */

@@ -1,7 +1,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "amv_ctrl.h"
+#include "amv_js.h"
 #include "amv_proto.h"
 #include "amv_usb_device.h"
 #include "amv_usb_host.h"
@@ -20,6 +22,9 @@ void app_main(void)
     ESP_LOGW(TAG, "AMV_HOST_ONLY: PC-side USB device NOT started");
 #endif
     amv_vector_start();
+#if CONFIG_AMV_OPENMOUSE_JS
+    if (amv_js_start() != ESP_OK) ESP_LOGE(TAG, "OpenMouse engine not started; mice stay generic");
+#endif
     ESP_ERROR_CHECK(amv_usb_host_start());
 
     for (;;) {
@@ -33,6 +38,16 @@ void app_main(void)
         ESP_LOGI(TAG, "in=%u frames=%u raw=(%lld,%lld) out=(%lld,%lld) btn_overflow=%u", (unsigned)vs.reports_in,
                  (unsigned)vs.frames_out, (long long)vs.raw_dx, (long long)vs.raw_dy, (long long)vs.out_dx,
                  (long long)vs.out_dy, (unsigned)vs.button_overflow);
+#if CONFIG_AMV_OPENMOUSE_JS
+        amv_js_stats_t js;
+        amv_js_get_stats(&js);
+        if (js.ready) {
+            ESP_LOGI(TAG, "openmouse: %d session(s), heap %u KB (peak %u KB), stack free %u B; internal RAM free %u KB, PSRAM free %u KB",
+                     js.sessions, (unsigned)(js.heap_used / 1024), (unsigned)(js.heap_peak / 1024), (unsigned)js.stack_free,
+                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                     (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024));
+        }
+#endif
         char port[128];
         amv_usb_host_port_status(port, sizeof port);
         ESP_LOGI(TAG, "usb host: %d device(s) enumerated; %s", amv_usb_host_device_count(), port);

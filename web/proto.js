@@ -74,6 +74,7 @@ export const P = {
     FINALMOUSE: 2,
     GEARHUB: 3,
     LOGITECH: 4,
+    OPENMOUSE: 5,
   },
   IGN: {
     NOT_MOUSE: 1,
@@ -157,7 +158,7 @@ export const SRC_NAMES = { 0: 'HOST', 1: 'DEVICE', 2: 'LOAD', 3: 'BOOT' };
 export const TIER_NAMES = { 1: 'KNOWN', 2: 'GENERIC', 3: 'BOOT', 4: 'IGNORED' };
 export const MF_NAMES = { 1: 'REPORT_IDS', 2: 'WHEEL', 4: 'PAN', 8: 'ALSO_KEYBOARD', 16: 'VERIFIED', 32: 'CAN_SET_CPI', 64: 'CAN_SET_RATE', 128: 'DRV_ERROR' };
 export const CPI_NAMES = { 0: 'NONE', 1: 'USER', 2: 'DEVICE' };
-export const DRV_NAMES = { 0: 'NONE', 1: 'RAZER', 2: 'FINALMOUSE', 3: 'GEARHUB', 4: 'LOGITECH' };
+export const DRV_NAMES = { 0: 'NONE', 1: 'RAZER', 2: 'FINALMOUSE', 3: 'GEARHUB', 4: 'LOGITECH', 5: 'OPENMOUSE' };
 export const IGN_NAMES = { 1: 'NOT_MOUSE', 2: 'ABSOLUTE', 3: 'UNPARSED', 4: 'NO_SLOT', 5: 'CLAIM' };
 export const MEV_NAMES = { 1: 'ATTACHED', 2: 'REMOVED', 3: 'UPDATED' };
 export const SET_NAMES = { 1: 'CPI', 2: 'POLLING', 3: 'LOD', 4: 'MOTION_SYNC', 5: 'BATTERY', 6: 'CHARGING', 7: 'LINK' };

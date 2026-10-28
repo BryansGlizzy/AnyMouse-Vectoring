@@ -16,7 +16,7 @@
 #include "amv_dongle_proto.h"
 
 #define AMV_DRV_MAX_HID_IFS 6
-#define AMV_DRV_MAX_CFG     2     /* extra vendor interfaces a driver can talk to besides the mouse's */
+#define AMV_DRV_MAX_CFG     4     /* extra vendor interfaces a driver can talk to besides the mouse's */
 
 /* A vendor/configuration interface the host claimed for a driver (firmware/esp32p4-dongle/README.md, vendor interfaces). `h` is the
  * host's private handle for the transport calls below. */
@@ -39,6 +39,7 @@ typedef struct amv_drv_ctx_s {
     /* set by the host before probe */
     void          *dev;       /* usb_device_handle_t */
     uint16_t       vid, pid;
+    char           product[40];   /* USB product string (WebHID's productName) */
     uint8_t        mouse_iface;
     amv_drv_hid_if_t hid_ifs[AMV_DRV_MAX_HID_IFS];
     uint8_t        n_hid_ifs;
@@ -87,9 +88,11 @@ typedef struct {
     /* Optional: does this HID interface (report descriptor) carry the driver's configuration
      * channel? The host claims every such interface besides the mouse's own, before probe. */
     bool      (*cfg_match)(const uint8_t *desc, uint16_t len);
+    /* Optional: the mouse is going away; called before its interfaces are released. */
+    void      (*release)(amv_drv_ctx_t *c);
 } amv_drv_t;
 
-extern const amv_drv_t amv_drv_razer, amv_drv_finalmouse, amv_drv_gearhub, amv_drv_logitech;
+extern const amv_drv_t amv_drv_razer, amv_drv_finalmouse, amv_drv_gearhub, amv_drv_logitech, amv_drv_openmouse;
 
 /* Transport provided by amv_usb_host.c. Types: 1 input, 2 output, 3 feature. */
 esp_err_t amv_host_set_report(amv_drv_ctx_t *c, uint8_t iface, uint8_t type, uint8_t id, const uint8_t *data, uint16_t len);

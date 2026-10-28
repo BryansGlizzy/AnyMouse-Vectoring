@@ -16,7 +16,7 @@ The dongle is a USB man-in-the-middle that runs the 8-octant vectoring in hardwa
 | M4 Web Studio | Built; used in Chrome on macOS | §2.3 |
 | M5 hardening and DFU | **Closed on 2026-10-27. Not implemented**: no DFU, rollback self-test, watchdog, brown-out or soak run. Flash over the UART USB-C | None. The 4 MB OTA slots stay so DFU can be added later |
 | M6 stretch goals | Open | §7 |
-| Section 10, full OpenMouse coverage | In progress (firmware 0.6.0) | §4 |
+| Section 10, full OpenMouse coverage | **Direction changed 2026-10-27:** OpenMouse's own drivers run on the dongle in QuickJS-ng (firmware 0.7.0, flashed, loads at boot); real-mouse test pending | §4.0 |
 
 ---
 
@@ -58,6 +58,16 @@ The weights already travel through the dongle: calibration writes `g_state.octan
 
 *Goal (2026-10-26): the dongle recognises every mouse the OpenMouse protocol library covers and, for each, reads (and where safe, sets) DPI, polling rate, battery, lift-off distance (LOD) and Motion Sync, as far as that mouse's protocol offers them. Lighting, button remapping, macros, onboard profiles, firmware update and the rest of OpenMouse are out of scope.*
 
+### 4.0 OpenMouse engine on the dongle (decided 2026-10-27, user)
+Porting TypeScript to C family by family needed hardware tests for every port. Instead the dongle now runs OpenMouse's driver registry **unchanged** in QuickJS-ng (README, [OpenMouse engine](README.md#openmouse-engine-firmware-070)). This replaces the C ports (kept behind `CONFIG_AMV_OPENMOUSE_JS=n`) and makes the transcript harness below unnecessary: OpenMouse's own test suite runs under the same engine (185 of 188 runnable files pass on a PC). Phases C, D and E reduce to re-running `tools/openmouse/gen_js_bundle.sh` on an OpenMouse update.
+
+Open, in order:
+1. **First real-mouse run** (none was on hand on 2026-10-27): Razer Basilisk Ultimate, then the G Pro receiver. Check OpenMouse picks the driver, readStatus values match the 0.6.0 C ports, CPI and rate writes from the Studio, unplug/replug (session closed, heap returns), and log per-call time and heap peak.
+2. Re-check the write allowlist against the engine (`drv_openmouse.c` keeps the 0.6.0 list: `1532:0086`, `046d:c547`), then decide whether OpenMouse's own `verified`/`valuesVerified` flags plus its passing tests are enough to open writes to other models (§4.2 rule).
+3. Run OpenMouse's test suite under QuickJS as part of the bundle script, so a bump is checked the way it was by hand (`tools/openmouse/qjs_suite/`; the three real-timer files need `QJS_REAL_TIMERS=1`).
+4. **Per-family loading** (for the Teensy 4.1 port, and faster boot here): compile each family to its own bytecode module, map VID:PID to candidate families through the catalog, load only those, let OpenMouse's scoring pick, free the runtime on unplug; the full registry stays as the fallback. Shared vendor ids (`0x3554` Pulsar/Lamzu/Scyrox, `0x3151` GearHub/Fantech, `0x258a` Glorious/Redragon) load every candidate. Needs a small C module loader for esbuild's shared chunks. Measured budget: engine about 90 KB, median family about 130 KB, Logitech about 640 KB (32-bit estimate).
+5. A sleeping receiver mouse: the engine reports a failed readStatus as a driver error, not as `AMV_LINK_ASLEEP` the way the C Logitech driver did.
+
 **Built (see [README.md](README.md#mouse-discovery-and-information)):** the generated catalog of 810 ids (every known model is named), 4 MB OTA slots, the settings protocol and its Studio UI, the vendor-interface claim with the WebHID-shaped `amv_hl_*` shim, the receiver/asleep state, the Razer, Finalmouse, GearHub and Logitech drivers, Logitech CPI and rate writes verified on a G Pro.
 
 ### 4.1 What OpenMouse covers (source scan of commit `326f292`)
@@ -88,6 +98,8 @@ Each phase ships on its own: every known mouse is already named, and each engine
 | **E. Upkeep** | Pin and bump the OpenMouse commit, regenerate catalog and transcripts, port the diffs; look at the 53 upstream filters that matched no engine | Not started | A CI-style script flags upstream drift |
 
 ### 4.4 Open items
+
+*Superseded by §4.0 where it concerns C ports; kept for the record.*
 
 **Verification without owning every mouse (gates all further writes).**
 - **Transcript tests:** `tools/openmouse_transcripts/` runs each upstream TypeScript client in Node against the fake devices OpenMouse's own tests define (e.g. `FakeAsusMouse`, `fakeBitmouse`), records every report exchanged plus the values the client decoded, and writes them to `tests/openmouse/<engine>.json`. A host-built C test replays each transcript: the port must send **byte-identical requests** and decode **identical values**. It is the same method that keeps `web/` honest against frames recorded from the board, and re-running the generator after an upstream update shows exactly what changed.

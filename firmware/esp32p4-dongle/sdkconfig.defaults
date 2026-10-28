@@ -12,3 +12,7 @@ CONFIG_ESP_TIMER_TASK_STACK_SIZE=4096
 # USB host (mouse side, High-Speed OTG): hubs so several mice work, room for long report descriptors
 CONFIG_USB_HOST_HUBS_SUPPORTED=y
 CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=1024
+# PSRAM (32 MB in package): the OpenMouse engine's heap (components/amv_js). malloc() stays in
+# internal RAM; only the engine asks for PSRAM, explicitly.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y

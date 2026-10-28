@@ -98,7 +98,11 @@ static SemaphoreHandle_t s_drv;        /* driver exchanges; teardown waits for t
 static uint16_t s_next_uid = 1;
 static amv_mouse_event_cb_t s_event_cb;
 
+#if CONFIG_AMV_OPENMOUSE_JS
+static const amv_drv_t *const DRIVERS[] = { &amv_drv_openmouse };
+#else
 static const amv_drv_t *const DRIVERS[] = { &amv_drv_razer, &amv_drv_finalmouse, &amv_drv_gearhub, &amv_drv_logitech };
+#endif
 
 #define TAB_LOCK()   xSemaphoreTake(s_tab, portMAX_DELAY)
 #define TAB_UNLOCK() xSemaphoreGive(s_tab)
@@ -433,6 +437,7 @@ static int collect_hid_interfaces(const usb_config_desc_t *cfg, hid_if_t *out, i
 static void teardown_if(mouse_if_t *m)
 {
     xSemaphoreTake(s_drv, portMAX_DELAY);   /* let a running driver exchange finish */
+    if (m->drv && m->drv->release) m->drv->release(&m->ctx);   /* its transport is still valid here */
     for (int w = 0; w < 100 && m->inflight > 0; w++) vTaskDelay(pdMS_TO_TICKS(5));
     if (m->inflight > 0) ESP_LOGW(TAG, "if %d: %d transfers still in flight at teardown", m->ifnum, m->inflight);
     for (int k = 0; k < XFERS_PER_EP; k++) {
@@ -637,6 +642,7 @@ static void handle_new(uint8_t addr)
             m->ctx.vid = m->vid;
             m->ctx.pid = m->pid;
             m->ctx.mouse_iface = m->ifnum;
+            snprintf(m->ctx.product, sizeof m->ctx.product, "%s", prod);
             if (drv->wants_input) m->in_q = xQueueCreate(8, sizeof(in_report_t));
             m->ctx.in_q = m->in_q;
         }

@@ -72,3 +72,22 @@ To run the whole check: `measure_pc.py 20` in one terminal, `console.py 20` in a
 - **A press and release inside one 125 us slot would merge** (only the latest button state is sent).
 - No OpenMouse engine (CPI and rate for known mice) beyond the hand-written Finalmouse polling command; that needs the per-family loading in the ESP32 PLAN section 4.0.
 - Not tested: the Attack Shark R3 receiver, a Razer, a hub, long runs, and the PC link while the PC sleeps.
+
+Vendor protocol firmware version is 0.1.0 (HELLO and GET_INFO). Boot restores
+weights, bypass and active slot from the CRC-checked EEPROM boot record. State
+changes are saved from loop() after 2 seconds without another change; failed
+saves retry after another 2 seconds. Console `w` and `b` use the same handler as
+Studio, bump generation, and emit EVENT_STATE with source DEVICE. `i` shows
+version, generation, active slot and valid-slot mask.
+
+GET_STATS uses the shared ESP32 32-byte protocol-counter layout: sets_ok,
+stale_rejects, bad_value_rejects, saves, loads, events_sent, events_dropped,
+test_scales. All eight fields currently return zero: none corresponds to the
+host-report or PC-transmit counters. Those real counters remain in the console
+stats. The `[ pc ]` line also reports `vendor-loop max` in microseconds for loop
+iterations that receive/retry a request or drain an event. Hardware must verify
+8 kHz performance under vendor traffic and EEPROM writes.
+
+Vendor requests and EEPROM calls run only in setup()/loop(), never the host ISR.
+Replies retry under backpressure; events may drop. Reboot waits until the reply
+has been queued and all vendor IN transfers complete, without blocking motion.

@@ -61,6 +61,22 @@ int main() {
     fail=true; request(AMV_CMD_SAVE_PROFILE,&slot,1,AMV_ST_STORE_ERR); request(AMV_CMD_LOAD_PROFILE,&slot,1,AMV_ST_STORE_ERR); request(AMV_CMD_FACTORY_RESET,nullptr,0,AMV_ST_STORE_ERR); fail=false;
     slot=9; request(AMV_CMD_SAVE_PROFILE,&slot,1,AMV_ST_BAD_SLOT); request(AMV_CMD_LOAD_PROFILE,&slot,1,AMV_ST_BAD_SLOT);
     request(AMV_CMD_FACTORY_RESET); event(AMV_SRC_HOST); assert(mask==0);
+    amv_profile_t boot; for (auto &w : boot.w) w = 1.75f;
+    amv_proto_restore(3, &boot, true);
+    amv_state_payload_t snapshot; amv_proto_snapshot(&snapshot);
+    assert(snapshot.active_slot == 3 && snapshot.bypass && snapshot.w[0] == 1.75f);
+    uint8_t device[64] = {AMV_MAGIC0, AMV_MAGIC1, AMV_PROTO_VERSION, AMV_CMD_SET_BYPASS, 0, 0, 1, 0};
+    uint32_t before = snapshot.gen;
+    amv_proto_handle(device, out, AMV_SRC_DEVICE);
+    amv_proto_snapshot(&snapshot); assert(snapshot.gen == before + 1 && !snapshot.bypass);
+    event(AMV_SRC_DEVICE);
+    amv_set_weights_req_t weights = {}; weights.base_gen = AMV_GEN_ANY;
+    for (unsigned i=0; i<8; ++i) weights.w[i] = 2;
+    device[3] = AMV_CMD_SET_WEIGHTS; device[6] = sizeof weights;
+    memcpy(device + 8, &weights, sizeof weights);
+    amv_proto_handle(device, out, AMV_SRC_DEVICE);
+    amv_proto_snapshot(&snapshot); assert(snapshot.gen == before + 2 && snapshot.w[0] == 2);
+    event(AMV_SRC_DEVICE);
     // Replay actual shared fixtures, allowing platform-specific identity/version fields.
     std::ifstream f("../../web/tests/fixtures/frames.json"); assert(f); std::string line; unsigned replayed=0;
     while(std::getline(f,line)) {

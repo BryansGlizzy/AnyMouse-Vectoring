@@ -11,6 +11,7 @@ Talks to the dongle over its 0xFF4D vendor interface and checks:
 Needs `pip install hidapi`. Protocol constants are parsed from common/amv_dongle_proto.h so
 this script cannot drift from the firmware. Run:  python3 -I tools/dongle_test.py
 """
+import argparse
 import math
 import os
 import re
@@ -19,8 +20,6 @@ import statistics
 import struct
 import sys
 import time
-
-import hid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HEADER = os.path.normpath(os.path.join(HERE, "..", "..", "..", "common", "amv_dongle_proto.h"))
@@ -31,31 +30,54 @@ for m in re.finditer(r"^#define\s+(AMV_\w+)\s+(0x[0-9A-Fa-f]+|\d+(?:\.\d+)?)", o
     v = m.group(2)
     C[m.group(1)] = int(v, 16) if v.startswith("0x") else (float(v) if "." in v else int(v))
 
-VID, PID = C["AMV_USB_VID"], C["AMV_USB_PID"]
 HDR = struct.Struct("<8B")          # magic0, magic1, ver, cmd, seq, status, len, rsvd
 STATE = struct.Struct("<I8fBB")     # gen, w[8], bypass, active_slot (38 bytes)
 EVENT = struct.Struct("<I8fBBB")    # state + source (39 bytes)
 
 
 class Dongle:
-    def __init__(self):
+    def __init__(self, profile="auto"):
+        if profile not in ("auto", "esp32", "teensy"):
+            raise ValueError(f"unknown dongle profile: {profile}")
         self.h = None
         self.seq = 0
         self.events = []
+        self.profile = profile
+        self.product = ""
+        self.hello = None
         self.open()
 
     def open(self, timeout=15.0):
+        import hid
         end = time.time() + timeout
         while time.time() < end:
-            for d in hid.enumerate(VID, PID):
-                if d["usage_page"] == C["AMV_VENDOR_USAGE_PAGE"]:
-                    self.h = hid.device()
-                    self.h.open_path(d["path"])
-                    self.h.set_nonblocking(True)
-                    self.drain()
-                    return
+            for d in hid.enumerate():
+                if d.get("usage_page") != C["AMV_VENDOR_USAGE_PAGE"]:
+                    continue
+                self.h = hid.device()
+                self.h.open_path(d["path"])
+                self.h.set_nonblocking(True)
+                self.drain()
+                nonce = bytes(random.randrange(256) for _ in range(C["AMV_HELLO_NONCE_LEN"]))
+                try:
+                    s, b = self.request(C["AMV_CMD_HELLO"], nonce, timeout=0.5)
+                except TimeoutError:
+                    self.close()
+                    continue
+                if s != 0 or len(b) < 24:
+                    self.close()
+                    continue
+                ident, echoed, proto, major, minor, patch, caps, mac = struct.unpack("<I8sBBBBH6s", b[:24])
+                if ident != C["AMV_HELLO_IDENT"] or echoed != nonce or proto != C["AMV_PROTO_VERSION"]:
+                    self.close()
+                    continue
+                self.product = d.get("product_string") or ""
+                self.hello = dict(fw=(major, minor, patch), caps=caps, mac=mac.hex(":"))
+                if self.profile == "auto":
+                    self.profile = "teensy" if self.hello["fw"] == (0, 1, 0) or "Teensy 4.1" in self.product else "esp32"
+                return
             time.sleep(0.25)
-        raise RuntimeError("dongle vendor interface not found")
+        raise RuntimeError("AnyMouse dongle vendor interface not found (HELLO handshake required)")
 
     def drain(self):
         while self.h.read(64):
@@ -185,17 +207,35 @@ def check(name, cond, detail=""):
     return bool(cond)
 
 
-def main():
-    d = Dongle()
+def skip(name, detail=""):
+    results.append((name, None))
+    print(f"  [SKIP] {name}" + (f"  ({detail})" if detail else ""))
+
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description="Bidirectional test of the AnyMouse dongle's vendor-HID protocol")
+    p.add_argument("--profile", choices=("auto", "esp32", "teensy"), default="auto",
+                   help="dongle command set; auto uses the HELLO firmware version and USB product string (default: auto)")
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    d = Dongle(profile=args.profile)
     rnd = random.Random(1234)
     NEUTRAL = [1.0] * 8
 
+    print(f"Profile: {d.profile} ({d.product or 'USB product string unavailable'})")
     print("== info ==")
     i = d.info()
     print("  ", i)
     check("proto version matches header", i["proto"] == C["AMV_PROTO_VERSION"])
-    check("MAC is the board's efuse MAC", i["mac"] == "30:ed:a0:ea:6c:ab", i["mac"])
-    check("chip rev reported", i["chip_rev"] > 0, f"{i['chip_rev']}")
+    if d.profile == "teensy":
+        skip("MAC is the board's efuse MAC", "ESP32-specific check")
+        skip("chip rev reported", "Teensy reports chip_rev 0")
+    else:
+        check("MAC is the board's efuse MAC", i["mac"] == "30:ed:a0:ea:6c:ab", i["mac"])
+        check("chip rev reported", i["chip_rev"] > 0, f"{i['chip_rev']}")
 
     print("== HELLO handshake (identity is proven by the protocol, not by VID:PID) ==")
     nonce = bytes(rnd.randrange(256) for _ in range(C["AMV_HELLO_NONCE_LEN"]))
@@ -234,31 +274,44 @@ def main():
         s2, b2 = d.request(C["AMV_CMD_GET_MOUSE"], bytes([count + 5]))
         check("index out of range answers NO_MOUSE with the count", s2 == C["AMV_ST_NO_MOUSE"] and b2[1] == count, f"status {s2}")
         # Descriptor, fetched in pieces, must be a well-formed HID descriptor that starts a mouse collection
-        desc, off = b"", 0
-        while True:
-            s3, b3 = d.request(C["AMV_CMD_GET_MOUSE_DESC"], struct.pack("<BBH", 0, 0, off))
-            if s3 != 0:
-                break
-            _, _, total, o, n, _ = struct.unpack("<BBHHBB", b3[:8])
-            desc += b3[8:8 + n]; off += n
-            if off >= total or n == 0:
-                break
-        check("report descriptor retrieved in pieces", s3 == 0 and len(desc) == total and len(desc) > 20, f"{len(desc)} of {total}")
-        check("descriptor declares a Generic Desktop Mouse", desc[:4] == bytes([0x05, 0x01, 0x09, 0x02]), desc[:6].hex())
+        if d.profile == "teensy":
+            skip("report descriptor retrieved in pieces", "not supported by this dongle")
+            skip("descriptor declares a Generic Desktop Mouse", "not supported by this dongle")
+        else:
+            desc, off = b"", 0
+            while True:
+                s3, b3 = d.request(C["AMV_CMD_GET_MOUSE_DESC"], struct.pack("<BBH", 0, 0, off))
+                if s3 != 0:
+                    break
+                _, _, total, o, n, _ = struct.unpack("<BBHHBB", b3[:8])
+                desc += b3[8:8 + n]; off += n
+                if off >= total or n == 0:
+                    break
+            check("report descriptor retrieved in pieces", s3 == 0 and len(desc) == total and len(desc) > 20, f"{len(desc)} of {total}")
+            check("descriptor declares a Generic Desktop Mouse", desc[:4] == bytes([0x05, 0x01, 0x09, 0x02]), desc[:6].hex())
         if tier == C["AMV_TIER_KNOWN"]:
-            s4, b4 = d.request(C["AMV_CMD_GET_MOUSE_CAPS"], bytes([0]))
-            caps = struct.unpack("<BBBB8HHHH16s", b4[:42]) if s4 == 0 else None
-            check("known mouse has capabilities", caps is not None)
-            if caps:
-                rates = list(caps[4:4 + caps[2]])
-                print(f"   caps: rates {rates}, CPI {caps[12]}..{caps[13]} step {caps[14]}, firmware {caps[15].split(bytes(1))[0].decode()!r}")
-                check("rates and CPI range plausible", len(rates) > 0 and caps[12] < caps[13])
-                # Refusals only: nothing here changes the mouse
-                bad = max(rates) * 3 + 7
-                s5, _ = d.request(C["AMV_CMD_SET_MOUSE_POLLING"], struct.pack("<BBH", 0, 0, bad))
-                check("a polling rate the mouse does not accept is refused", s5 == C["AMV_ST_BAD_VALUE"], f"status {s5}")
-                s6, _ = d.request(C["AMV_CMD_SET_MOUSE_CPI"], struct.pack("<BBH", 0, 0, 7))
-                check("a CPI below the range is refused", s6 == C["AMV_ST_BAD_VALUE"], f"status {s6}")
+            if d.profile == "teensy":
+                skip("known mouse has capabilities", "not supported by this dongle")
+                skip("rates and CPI range plausible", "not supported by this dongle")
+                skip("a polling rate the mouse does not accept is refused", "not supported by this dongle")
+                skip("a CPI below the range is refused", "not supported by this dongle")
+            else:
+                s4, b4 = d.request(C["AMV_CMD_GET_MOUSE_CAPS"], bytes([0]))
+                caps = struct.unpack("<BBBB8HHHH16s", b4[:42]) if s4 == 0 else None
+                check("known mouse has capabilities", caps is not None)
+                if caps:
+                    rates = list(caps[4:4 + caps[2]])
+                    print(f"   caps: rates {rates}, CPI {caps[12]}..{caps[13]} step {caps[14]}, firmware {caps[15].split(bytes(1))[0].decode()!r}")
+                    check("rates and CPI range plausible", len(rates) > 0 and caps[12] < caps[13])
+                    # Refusals only: nothing here changes the mouse
+                    bad = max(rates) * 3 + 7
+                    s5, _ = d.request(C["AMV_CMD_SET_MOUSE_POLLING"], struct.pack("<BBH", 0, 0, bad))
+                    check("a polling rate the mouse does not accept is refused", s5 == C["AMV_ST_BAD_VALUE"], f"status {s5}")
+                    s6, _ = d.request(C["AMV_CMD_SET_MOUSE_CPI"], struct.pack("<BBH", 0, 0, 7))
+                    check("a CPI below the range is refused", s6 == C["AMV_ST_BAD_VALUE"], f"status {s6}")
+        elif d.profile == "teensy":
+            skip("generic mouse has no vendor capabilities", "not supported by this dongle")
+            skip("polling cannot be set on a generic mouse", "not supported by this dongle")
         else:
             s4, _ = d.request(C["AMV_CMD_GET_MOUSE_CAPS"], bytes([0]))
             check("generic mouse has no vendor capabilities", s4 == C["AMV_ST_UNSUPPORTED"], f"status {s4}")
@@ -312,15 +365,21 @@ def main():
     check("GEN_ANY applies regardless", s == 0)
 
     print("== device -> host: self-originated change ==")
-    d.drain()
-    cur = d.state()
-    s, _ = d.request(C["AMV_CMD_TEST_SELF_CHANGE"], struct.pack("<BfH", 5, 2.5, 300))
-    check("self-change scheduled", s == 0)
-    ev = d.wait_event(lambda e: e[-1] == C["AMV_SRC_DEVICE"], timeout=2.0)
-    check("device-originated event received", ev is not None)
-    if ev:
-        check("event carries the new weight", abs(ev[1 + 5] - 2.5) < 1e-6 and ev[0] > cur["gen"], f"gen {ev[0]}, w5={ev[6]:.3f}")
-        check("host readback matches event", d.state()["w"] == list(ev[1:9]))
+    if d.profile == "teensy":
+        skip("self-change scheduled", "not supported by this dongle")
+        skip("device-originated event received", "not supported by this dongle")
+        skip("event carries the new weight", "not supported by this dongle")
+        skip("host readback matches event", "not supported by this dongle")
+    else:
+        d.drain()
+        cur = d.state()
+        s, _ = d.request(C["AMV_CMD_TEST_SELF_CHANGE"], struct.pack("<BfH", 5, 2.5, 300))
+        check("self-change scheduled", s == 0)
+        ev = d.wait_event(lambda e: e[-1] == C["AMV_SRC_DEVICE"], timeout=2.0)
+        check("device-originated event received", ev is not None)
+        if ev:
+            check("event carries the new weight", abs(ev[1 + 5] - 2.5) < 1e-6 and ev[0] > cur["gen"], f"gen {ev[0]}, w5={ev[6]:.3f}")
+            check("host readback matches event", d.state()["w"] == list(ev[1:9]))
 
     print("== bypass ==")
     d.set_weights([0.5] * 8, C["AMV_GEN_ANY"])
@@ -402,7 +461,7 @@ def main():
     d.request(C["AMV_CMD_REBOOT"])
     d.close()
     time.sleep(1.0)
-    d = Dongle()
+    d = Dongle(profile=d.profile)
     st = d.state()
     check("weights survive reboot (auto-save)", st["w"] == wp)
     check("active slot survives reboot", st["slot"] == 1, f"slot {st['slot']}")
@@ -418,8 +477,10 @@ def main():
     check("no events dropped", stats["events_dropped"] == 0)
     d.close()
 
-    failed = [n for n, ok in results if not ok]
-    print(f"\n{len(results) - len(failed)}/{len(results)} checks passed")
+    failed = [n for n, ok in results if ok is False]
+    passed = sum(ok is True for _, ok in results)
+    skipped = sum(ok is None for _, ok in results)
+    print(f"\n{passed}/{len(results) - skipped} checks passed; {skipped} skipped")
     if failed:
         print("FAILED:", *failed, sep="\n  - ")
     return 1 if failed else 0

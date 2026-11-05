@@ -99,11 +99,17 @@ function optionsOf(m, id) {
 
 export class MockHid extends EventTarget {
   /** init: {gen, w, bypass, slot, filledSlots:[...]} to start from a recorded device state. */
-  constructor(init = {}, { latencyMs = 0, autosaveMs = 2000 } = {}) {
+  constructor(init = {}, { latencyMs = 0, autosaveMs = 2000, profile = 'esp32' } = {}) {
     super();
     this.opened = false;
     this.latencyMs = latencyMs;
     this.autosaveMs = autosaveMs;
+    this.profile = profile;
+    this.productName = profile === 'teensy' ? 'AnyMouse Vectoring Dongle (Teensy 4.1)' : 'AnyMouse Vectoring Dongle';
+    this.unsupported = profile === 'teensy' ? new Set([
+      P.CMD.GET_MOUSE_CAPS, P.CMD.GET_MOUSE_DESC, P.CMD.GET_MOUSE_MODEL, P.CMD.GET_MOUSE_SETTINGS, P.CMD.GET_MOUSE_OPTIONS,
+      P.CMD.SET_MOUSE_CPI, P.CMD.SET_MOUSE_POLLING, P.CMD.SET_MOUSE_SETTING, P.CMD.TEST_SELF_CHANGE,
+    ]) : new Set();
     this._saveTimer = null;
     this.gen = init.gen ?? 1;
     this.w = (init.w ?? [1, 1, 1, 1, 1, 1, 1, 1]).map(f32);
@@ -168,11 +174,13 @@ export class MockHid extends EventTarget {
     const dv = new DataView(pl.buffer, pl.byteOffset, pl.byteLength);
     const state = (status) => reply(cmd, seq, status, this._statePayload());
     const bad = (s) => reply(cmd, seq, s);
+    const fw = this.profile === 'teensy' ? [0, 1, 0] : [0, 5, 0];
+    if (this.unsupported.has(cmd)) return { reply: bad(P.ST.BAD_CMD), events };
 
     switch (cmd) {
       case P.CMD.GET_INFO: {
         const p = new Uint8Array(18), v = new DataView(p.buffer);
-        p.set([P.PROTO_VERSION, 0, 5, 0], 0); v.setUint16(4, 103, true); p[6] = P.NUM_SLOTS; p[7] = this.mice.filter((m) => m.tier !== P.TIER.IGNORED).length;
+        p.set([P.PROTO_VERSION, ...fw], 0); v.setUint16(4, this.profile === 'teensy' ? 0 : 103, true); p[6] = P.NUM_SLOTS; p[7] = this.mice.filter((m) => m.tier !== P.TIER.IGNORED).length;
         p.set([0x30, 0xed, 0xa0, 0xea, 0x6c, 0xab], 8); v.setUint32(14, (Date.now() - this.bootMs) >>> 0, true);
         return { reply: reply(cmd, seq, P.ST.OK, p), events };
       }
@@ -180,7 +188,7 @@ export class MockHid extends EventTarget {
         if (len !== P.HELLO_NONCE_LEN) return { reply: bad(P.ST.BAD_LEN), events };
         const p = new Uint8Array(24), v = new DataView(p.buffer);
         v.setUint32(0, P.HELLO_IDENT, true); p.set(pl.slice(0, P.HELLO_NONCE_LEN), 4);
-        p.set([P.PROTO_VERSION, 0, 5, 0], 12); v.setUint16(16, P.CAP_VECTORED_MOUSE | P.CAP_MOUSE_HOST, true);
+        p.set([P.PROTO_VERSION, ...fw], 12); v.setUint16(16, P.CAP_VECTORED_MOUSE | P.CAP_MOUSE_HOST, true);
         p.set([0x30, 0xed, 0xa0, 0xea, 0x6c, 0xab], 18);
         return { reply: reply(cmd, seq, P.ST.OK, p), events };
       }

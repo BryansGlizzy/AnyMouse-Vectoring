@@ -125,6 +125,7 @@ export class DongleClient extends EventTarget {
     this.timeoutMs = timeoutMs;
     this.seq = 0;
     this.pending = new Map();
+    this.unsupportedCommands = new Set();
     this.lastRttMs = null;
     this._onReport = this._onReport.bind(this);
   }
@@ -188,8 +189,12 @@ export class DongleClient extends EventTarget {
       reply.catch(() => {});
       throw new DongleError(`send failed: ${e.message}`, -1);
     }
-    return reply;
+    const r = await reply;
+    if (r.status === P.ST.BAD_CMD) this.unsupportedCommands.add(cmd);
+    return r;
   }
+
+  isUnsupported(cmd) { return this.unsupportedCommands.has(cmd); }
 
   // ---- typed API: state-bearing calls return {status, ok, state}; the state is the result, or the
   // ---- device's current state when the call was refused (STALE / BAD_VALUE / ...).
@@ -278,13 +283,14 @@ export class DongleClient extends EventTarget {
     const r = await this.request(P.CMD.GET_MOUSE_CAPS, mouseIndex(i));
     return r.status === P.ST.OK ? parseMouseCaps(r.payload) : null;
   }
-  /** The raw HID report descriptor of mouse i, fetched in 48-byte pieces. */
+  /** The raw HID report descriptor, or null when this dongle does not implement GET_MOUSE_DESC. */
   async getMouseDescriptor(i) {
     const parts = [];
     let off = 0, total = 1;
     while (off < total) {
       const q = new Uint8Array(4); q[0] = i; view(q).setUint16(2, off, true);
       const r = await this.request(P.CMD.GET_MOUSE_DESC, q);
+      if (r.status === P.ST.BAD_CMD) return null;
       if (r.status !== P.ST.OK) throw new DongleError(statusName(r.status), r.status);
       const v = view(r.payload), n = r.payload[6];
       total = v.getUint16(2, true);

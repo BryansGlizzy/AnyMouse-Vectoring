@@ -31,7 +31,24 @@ static int s_fail;
 
 /* ---------- fake dongle ---------- */
 
-typedef enum { FAKE_GOOD, FAKE_LEGACY, FAKE_FOREIGN, FAKE_SILENT, FAKE_BAD_NONCE, FAKE_V2, FAKE_NO_VECTOR } fake_mode_t;
+typedef enum { FAKE_GOOD, FAKE_LEGACY, FAKE_FOREIGN, FAKE_SILENT, FAKE_BAD_NONCE, FAKE_V2, FAKE_NO_VECTOR, FAKE_TEENSY } fake_mode_t;
+
+static bool fake_teensy_unsupported(uint8_t cmd) {
+    switch (cmd) {
+    case AMV_CMD_GET_MOUSE_CAPS:
+    case AMV_CMD_GET_MOUSE_DESC:
+    case AMV_CMD_GET_MOUSE_MODEL:
+    case AMV_CMD_GET_MOUSE_SETTINGS:
+    case AMV_CMD_GET_MOUSE_OPTIONS:
+    case AMV_CMD_SET_MOUSE_CPI:
+    case AMV_CMD_SET_MOUSE_POLLING:
+    case AMV_CMD_SET_MOUSE_SETTING:
+    case AMV_CMD_TEST_SELF_CHANGE:
+        return true;
+    default:
+        return false;
+    }
+}
 
 typedef struct {
     int fd;
@@ -119,6 +136,11 @@ static void *fake_main(void *arg) {
         uint8_t ver = f->mode == FAKE_V2 ? 2 : AMV_PROTO_VERSION;
         pthread_mutex_lock(&f->mtx);
         amv_state_payload_t st;
+        if (f->mode == FAKE_TEENSY && fake_teensy_unsupported(h->cmd)) {
+            fake_send(f, h->cmd, h->seq, AMV_ST_BAD_CMD, ver, NULL, 0);
+            pthread_mutex_unlock(&f->mtx);
+            continue;
+        }
         if (f->mode == FAKE_LEGACY && h->cmd >= AMV_CMD_GET_MOUSE && h->cmd <= AMV_CMD_SET_MOUSE_POLLING) {
             fake_send(f, h->cmd, h->seq, AMV_ST_BAD_CMD, ver, NULL, 0);   /* firmware before 0.5.0 */
             pthread_mutex_unlock(&f->mtx);
@@ -127,8 +149,10 @@ static void *fake_main(void *arg) {
         switch (h->cmd) {
         case AMV_CMD_HELLO: {
             if (f->mode == FAKE_LEGACY) { fake_send(f, h->cmd, h->seq, AMV_ST_BAD_CMD, ver, NULL, 0); break; }
-            amv_hello_rep_t r = { .ident = AMV_HELLO_IDENT, .proto_ver = ver, .fw_major = 0, .fw_minor = 4, .fw_patch = 0,
-                                  .caps = f->mode == FAKE_NO_VECTOR ? 0 : AMV_CAP_VECTORED_MOUSE,
+            amv_hello_rep_t r = { .ident = AMV_HELLO_IDENT, .proto_ver = ver, .fw_major = 0,
+                                  .fw_minor = f->mode == FAKE_TEENSY ? 1 : 4, .fw_patch = 0,
+                                  .caps = f->mode == FAKE_NO_VECTOR ? 0 : AMV_CAP_VECTORED_MOUSE |
+                                          (f->mode == FAKE_TEENSY ? AMV_CAP_MOUSE_HOST : 0),
                                   .mac = { 0x30, 0xED, 0xA0, 0xEA, 0x6C, 0xAB } };
             memcpy(r.nonce, pl, sizeof(r.nonce));
             if (f->mode == FAKE_BAD_NONCE) r.nonce[0] ^= 0xFF;
@@ -136,7 +160,8 @@ static void *fake_main(void *arg) {
             break;
         }
         case AMV_CMD_GET_INFO: {
-            amv_info_payload_t r = { .proto_ver = AMV_PROTO_VERSION, .fw_major = 0, .fw_minor = 3, .num_slots = 4 };
+            amv_info_payload_t r = { .proto_ver = AMV_PROTO_VERSION, .fw_major = 0,
+                                     .fw_minor = f->mode == FAKE_TEENSY ? 1 : 3, .num_slots = 4 };
             fake_send(f, h->cmd, h->seq, AMV_ST_OK, ver, &r, sizeof(r));
             break;
         }
@@ -630,6 +655,37 @@ static void test_mouse_details(void) {
     publish(&(dongle_status_t){ 0 }, NULL);
 }
 
+static void test_teensy_optional_commands(void) {
+    printf("Teensy subset: optional commands answer BAD_CMD\n");
+    fake_t f;
+    link_t l = { .fd = fake_start(&f, FAKE_TEENSY), .sync = true };
+    dongle_status_t st = { 0 };
+    CHECK(handshake(&l, &st) == PROBE_OK && !st.legacy && st.fw[0] == 0 && st.fw[1] == 1 && st.fw[2] == 0,
+          "Teensy firmware 0.1.0 recognised by HELLO");
+    CHECK(st.caps == (AMV_CAP_VECTORED_MOUSE | AMV_CAP_MOUSE_HOST), "Teensy capabilities accepted");
+    CHECK(fetch_state(&l, true) == 1, "required GET_WEIGHTS still works");
+    st.link = DONGLE_LINKED;
+    publish(&st, "fake-teensy");
+    CHECK(fetch_slots(&l) == 0, "profile slots remain available");
+
+    CHECK(fetch_mice(&l) == 0, "optional mouse-detail BAD_CMD responses do not fail the fetch");
+    dongle_mouse_t m[MAX_MICE];
+    int n = dongle_get_mice(m, MAX_MICE);
+    CHECK(n == 2 && !m[0].has_caps && !m[0].has_settings && !m[0].has_model,
+          "basic mouse list kept when extended details are unavailable");
+    CHECK(m[0].caps_unsupported && m[0].settings_unsupported && m[0].model_unsupported,
+          "BAD_CMD recorded as not supported by this dongle");
+    CHECK(write_through(&l, 0, true, 3200) == AMV_ST_BAD_CMD && f.mouse_sets == 0,
+          "SET_MOUSE_CPI BAD_CMD returned to the caller without changing the mouse");
+    CHECK(write_through(&l, 0, false, 500) == AMV_ST_BAD_CMD && f.mouse_sets == 0,
+          "SET_MOUSE_POLLING BAD_CMD returned to the caller without changing the mouse");
+    dongle_status_t cur;
+    CHECK(dongle_get_status(&cur) && cur.link == DONGLE_LINKED, "link remains connected after optional writes fail");
+    CHECK(fetch_state(&l, false) == 1 && fetch_mice(&l) == 0, "state and basic mouse requests still answer afterwards");
+    fake_stop(&f, l.fd);
+    publish(&(dongle_status_t){ 0 }, NULL);
+}
+
 static void test_pc_link_speed(void) {
     printf("PC link ceiling from the bus speed\n");
     char root[] = "/tmp/amv_usbspeed_XXXXXX";
@@ -743,6 +799,7 @@ int main(void) {
     test_mice();
     test_slots();
     test_mouse_details();
+    test_teensy_optional_commands();
     test_pc_link_speed();
     test_guard();
     printf(s_fail ? "\n%d check(s) FAILED\n" : "\nAll checks passed\n", s_fail);

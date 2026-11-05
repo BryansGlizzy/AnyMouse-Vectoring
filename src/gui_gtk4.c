@@ -1062,6 +1062,8 @@ static void refresh_dongle_mice(void) {
         g_string_append_printf(g, " · USB interval %u Hz · measured %u Hz", x->nominal_hz, x->measured_hz);
         if (x->battery != 0xFF) g_string_append_printf(g, " · battery %u%%", x->battery);
         if (m[i].has_caps && m[i].caps.firmware[0]) g_string_append_printf(g, " · fw %s", m[i].caps.firmware);
+        if (m[i].caps_unsupported || m[i].settings_unsupported || m[i].model_unsupported)
+            g_string_append(g, " · extended mouse details not supported by this dongle");
         if (x->tier != AMV_TIER_KNOWN && m[i].has_model && m[i].model.state == AMV_MODEL_DRIVER)
             g_string_append(g, " · driver present, mouse did not answer");
     }

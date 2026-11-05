@@ -186,13 +186,15 @@ async function refreshMice() {
         const prev = S.mice?.find((x) => x.uid === m.uid);
         m.caps = m.tier === P.TIER.KNOWN ? (prev?.caps ?? await S.client.getMouseCaps(m.index)) : null;
         if (m.tier !== P.TIER.IGNORED) {
-          // firmware before 0.6.0 answers BAD_CMD: these stay null and the card shows what it always did
+          // Older and Teensy firmware answer BAD_CMD: omit the values and label the unsupported features.
           m.model = prev?.model ?? await S.client.getMouseModel(m.index).catch(() => null);
           m.set = await S.client.getMouseSettings(m.index).catch(() => null);
           m.options = prev?.options ?? {};
           for (const s of m.set?.settings ?? []) {
             if ((s.id === P.SET.LOD || s.id === P.SET.MOTION_SYNC) && !m.options[s.id]) m.options[s.id] = await S.client.getMouseOptions(m.index, s.id).catch(() => null);
           }
+          m.unsupported = [P.CMD.GET_MOUSE_CAPS, P.CMD.GET_MOUSE_MODEL, P.CMD.GET_MOUSE_SETTINGS, P.CMD.GET_MOUSE_OPTIONS]
+            .some((cmd) => S.client.isUnsupported(cmd));
         }
       }
       // A CPI read from the mouse drives the effective-DPI column
@@ -258,6 +260,7 @@ function mouseCard(m) {
       controls = `<label title="Only used for the effective-DPI numbers; the dongle cannot change your mouse's CPI.">Your mouse's CPI <input class="m-cpi dev" type="number" min="50" max="64000" step="50" value="${m.cpi || ''}" placeholder="e.g. 800"></label><button class="m-cpi-set dev" type="button">Remember</button>`;
       body += `<p class="note">No vendor protocol is known for this mouse, so its CPI and polling rate cannot be read or changed here. Its motion is vectored normally.</p>`;
     }
+    if (m.unsupported) body += '<p class="note">Extended mouse details and settings are not supported by this dongle.</p>';
     if (m.tier === P.TIER.BOOT) body += `<p class="note warn">Its own HID descriptor could not be read, so it runs in the simple boot mode: 8-bit motion, 3 buttons, no wheel. Please download the descriptor and report it.</p>`;
     if (m.flags & P.MF.DRV_ERROR) body += `<p class="note warn">The mouse did not answer its ${esc(drv ?? 'vendor')} protocol on the last try.</p>`;
     controls += `<button class="m-desc dev" type="button">Download descriptor</button>`;
@@ -280,6 +283,8 @@ function renderMice() {
   note.textContent = `${used} in use${S.mice.length > used ? `, ${S.mice.length - used} ignored` : ''}`;
 }
 
+const mouseStatusName = (status) => status === P.ST.BAD_CMD ? 'not supported by this dongle' : statusName(status);
+
 $('#mice').addEventListener('click', (e) => {
   const card = e.target.closest('.mouse');
   if (!card) return;
@@ -287,12 +292,13 @@ $('#mice').addEventListener('click', (e) => {
   if (e.target.matches('.m-cpi-set')) act(async () => {
     const v = parseInt(card.querySelector('.m-cpi').value, 10) || 0;
     const r = await S.client.setMouseCpi(i, v);
-    toast(r.ok ? (r.mouse?.cpiSource === P.CPI.DEVICE ? `Mouse set to ${r.mouse.cpi} CPI.` : 'CPI remembered for this mouse.') : `Not set: ${statusName(r.status)}`, r.ok ? 'good' : 'bad');
+    toast(r.ok ? (r.mouse?.cpiSource === P.CPI.DEVICE ? `Mouse set to ${r.mouse.cpi} CPI.` : 'CPI remembered for this mouse.') : `Not set: ${mouseStatusName(r.status)}`, r.ok ? 'good' : 'bad');
     document.activeElement?.blur();
     await refreshMice();
   });
   if (e.target.matches('.m-desc')) act(async () => {
     const d = await S.client.getMouseDescriptor(i), m = S.mice[i];
+    if (!d) { toast('Descriptor download is not supported by this dongle.'); return; }
     const text = Array.from(d, (b) => b.toString(16).padStart(2, '0')).join(' ') + '\n';
     const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(new Blob([text], { type: 'text/plain' })), download: `${(m.name || 'mouse').replace(/\W+/g, '_').toLowerCase()}_${hex4(m.vid)}_${hex4(m.pid)}_if${m.iface}.hex` });
     document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
@@ -304,7 +310,7 @@ $('#mice').addEventListener('change', (e) => {
     const value = e.target.type === 'checkbox' ? (e.target.checked ? 1 : 0) : +e.target.value;
     act(async () => {
       const r = await S.client.setMouseSetting(i, id, value);
-      toast(r.ok ? 'Setting changed on the mouse.' : `Not set: ${statusName(r.status)}`, r.ok ? 'good' : 'bad');
+      toast(r.ok ? 'Setting changed on the mouse.' : `Not set: ${mouseStatusName(r.status)}`, r.ok ? 'good' : 'bad');
       document.activeElement?.blur();
       await refreshMice();
     });
@@ -314,7 +320,7 @@ $('#mice').addEventListener('change', (e) => {
   const i = +e.target.closest('.mouse').dataset.i, hz = +e.target.value;
   act(async () => {
     const r = await S.client.setMousePolling(i, hz);
-    toast(r.ok ? `Polling rate set to ${r.mouse.deviceHz} Hz.` : `Not set: ${statusName(r.status)}`, r.ok ? 'good' : 'bad');
+    toast(r.ok ? `Polling rate set to ${r.mouse.deviceHz} Hz.` : `Not set: ${mouseStatusName(r.status)}`, r.ok ? 'good' : 'bad');
     document.activeElement?.blur();
     await refreshMice();
   });
@@ -355,7 +361,8 @@ async function attach(hid, demo = false) {
     client.addEventListener('state', onDeviceState);
     client.addEventListener('mouse', onMouseEvent);
     banner('');
-    setState(demo ? 'demo' : 'connected', demo ? 'Demo (simulated dongle)' : `Connected · firmware ${S.info.fw}`);
+    const product = hid.productName || 'AnyMouse Vectoring Dongle';
+    setState(demo ? 'demo' : 'connected', demo ? `Demo (${product})` : `Connected · ${product} · firmware ${S.info.fw}`);
     setEnabled(true);
     render();
     await refreshMice();
@@ -522,7 +529,8 @@ function render({ skipRadar = false, keepMaster = false } = {}) {
   const rows = [];
   if (on) {
     const pending = S.inFlight || S.dirty;
-    rows.push(['Firmware', `${S.info.fw} (protocol ${S.info.proto})`], ['Chip revision', `v${(S.info.chipRev / 100).toFixed(2)}`],
+    rows.push(['Device', S.hid.productName || 'AnyMouse Vectoring Dongle'], ['Firmware', `${S.info.fw} (protocol ${S.info.proto})`],
+      ['Chip revision', S.info.chipRev ? `v${(S.info.chipRev / 100).toFixed(2)}` : 'not reported'],
       ['Serial (MAC)', S.info.mac], ['Active profile', `slot ${S.dev.slot + 1}`], ['Revision', `#${S.dev.gen}${pending ? ' (sending…)' : ''}`],
       ['Last round trip', S.client.lastRttMs == null ? '—' : `${S.client.lastRttMs.toFixed(1)} ms`],
       ['Mice attached', S.mice === null ? 'not reported by this firmware' : String(S.mice.filter((m) => m.tier !== P.TIER.IGNORED).length)]);

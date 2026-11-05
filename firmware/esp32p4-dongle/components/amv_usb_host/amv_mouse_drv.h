@@ -41,6 +41,8 @@ typedef struct amv_drv_ctx_s {
     uint16_t       vid, pid;
     char           product[40];   /* USB product string (WebHID's productName) */
     uint8_t        mouse_iface;
+    uint8_t        mouse_ep_out;   /* the mouse interface's interrupt OUT endpoint, 0 = none (output reports then use SET_REPORT) */
+    uint16_t       mouse_mps_out;
     amv_drv_hid_if_t hid_ifs[AMV_DRV_MAX_HID_IFS];
     uint8_t        n_hid_ifs;
     QueueHandle_t  in_q;      /* vendor input reports (drivers with wants_input) */

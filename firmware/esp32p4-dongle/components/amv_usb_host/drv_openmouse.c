@@ -20,8 +20,9 @@ static const char *TAG = "drv_openmouse";
 #define MAX_SESS   4
 #define NO_DRIVER  0xFF      /* ctx.priv[1]: OpenMouse has no driver for this device; don't ask again */
 
-/* Writes allowed (VID << 16 | PID): Basilisk Ultimate wired, the G Pro's Lightspeed receiver. */
-static const uint32_t VERIFIED[] = { 0x15320086, 0x046dc547 };
+/* Writes allowed (VID << 16 | PID): Basilisk Ultimate wired, the G Pro's Lightspeed receiver, and
+ * (enabled by the user on 2026-11-04) the Finalmouse UltralightX dongle. */
+static const uint32_t VERIFIED[] = { 0x15320086, 0x046dc547, 0x361d0100 };
 
 /* A stable copy of the transport part of the context: the host's copies come and go, the
  * engine keeps calling through this one until release. */

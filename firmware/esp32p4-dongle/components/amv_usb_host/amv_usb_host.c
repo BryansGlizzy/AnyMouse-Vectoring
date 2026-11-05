@@ -59,6 +59,8 @@ typedef struct {
     amv_drv_ctx_t ctx;        /* driver results (written under s_tab) */
     cfg_if_t cfg[AMV_DRV_MAX_CFG];
     bool probed;
+    uint32_t retry_reports;   /* report count when a failed own-interface probe was last retried */
+    uint8_t fail_n, skip;     /* failed retries so far, and the periods skipped while backing off */
     QueueHandle_t in_q;       /* vendor input reports for drivers with wants_input */
     volatile bool dying;
     usb_device_handle_t dev;
@@ -95,6 +97,7 @@ static SemaphoreHandle_t s_ctrl_sem;
 static SemaphoreHandle_t s_ctrl_mtx;   /* one control transfer at a time (setup task, proto task) */
 static SemaphoreHandle_t s_tab;        /* s_if / s_ign contents seen by other tasks */
 static SemaphoreHandle_t s_drv;        /* driver exchanges; teardown waits for them */
+static SemaphoreHandle_t s_out_sem;    /* completion of an interrupt OUT transfer on a mouse's own interface */
 static uint16_t s_next_uid = 1;
 static amv_mouse_event_cb_t s_event_cb;
 
@@ -215,11 +218,48 @@ typedef struct { uint8_t len; uint8_t data[64]; } in_report_t;
 
 /* ---------- transport for the tier-1 drivers (amv_mouse_drv.h) ---------- */
 
+static void own_out_done(usb_transfer_t *t) { xSemaphoreGive((SemaphoreHandle_t)t->context); }
+
+/* An output report on the mouse's own interface, `data` starting with the report ID as hidraw's
+ * write() and WebHID's sendReport() put it on the wire. Interrupt OUT endpoint, 1 s limit. */
+static esp_err_t own_out_send(amv_drv_ctx_t *c, const uint8_t *data, uint16_t len)
+{
+    usb_transfer_t *t;
+    esp_err_t err = usb_host_transfer_alloc(len, 0, &t);
+    if (err != ESP_OK) return err;
+    memcpy(t->data_buffer, data, len);
+    t->device_handle = c->dev;
+    t->bEndpointAddress = c->mouse_ep_out;
+    t->callback = own_out_done;
+    t->context = s_out_sem;
+    t->num_bytes = len;
+    xSemaphoreTake(s_out_sem, 0);
+    err = usb_host_transfer_submit(t);
+    if (err == ESP_OK) {
+        if (xSemaphoreTake(s_out_sem, pdMS_TO_TICKS(1000)) != pdTRUE) return ESP_ERR_TIMEOUT;   /* leaked: still owned */
+        if (t->status != USB_TRANSFER_STATUS_COMPLETED) err = ESP_FAIL;
+    }
+    usb_host_transfer_free(t);
+    return err;
+}
+
 esp_err_t amv_host_set_report(amv_drv_ctx_t *c, uint8_t iface, uint8_t type, uint8_t id, const uint8_t *data, uint16_t len)
 {
     uint8_t buf[128];
     if (len > sizeof buf) return ESP_ERR_INVALID_SIZE;
     memcpy(buf, data, len);
+    /* Output reports go to the interface's interrupt OUT endpoint when it has one, as the PC's own
+     * HID stacks do; a device that has one may ignore the control-pipe SET_REPORT. If the endpoint
+     * write fails, SET_REPORT is still tried. */
+    if (type == 2 && iface == c->mouse_iface && c->mouse_ep_out) {
+        esp_err_t e = own_out_send(c, buf, len);
+        if (e == ESP_OK) {
+            ESP_LOGD(TAG, "if %u: output report %u (%u bytes) sent on OUT endpoint 0x%02x", iface, id, len, c->mouse_ep_out);
+            return ESP_OK;
+        }
+        ESP_LOGW(TAG, "if %u: output report %u on OUT endpoint 0x%02x failed (%s); trying SET_REPORT", iface, id,
+                 c->mouse_ep_out, esp_err_to_name(e));
+    }
     return ctrl_xfer(c->dev, USB_BM_REQUEST_TYPE_DIR_OUT | USB_BM_REQUEST_TYPE_TYPE_CLASS | 1, 0x09,
                      (uint16_t)((type << 8) | id), iface, len, buf, NULL);
 }
@@ -555,8 +595,10 @@ static void handle_new(uint8_t addr)
             descs[k] = NULL;
             continue;
         }
-        ESP_LOGI(TAG, "  if %u: HID subclass %u protocol %u, ep 0x%02x mps %u interval %u, report descriptor %d bytes:",
-                 hi[k].ifnum, hi[k].subclass, hi[k].protocol, hi[k].ep, hi[k].mps, hi[k].interval, lens[k]);
+        ESP_LOGI(TAG, "  if %u: HID subclass %u protocol %u, ep 0x%02x mps %u interval %u, %s, report descriptor %d bytes:",
+                 hi[k].ifnum, hi[k].subclass, hi[k].protocol, hi[k].ep, hi[k].mps, hi[k].interval,
+                 hi[k].ep_out ? "OUT endpoint present" : "no OUT endpoint", lens[k]);
+        if (hi[k].ep_out) ESP_LOGI(TAG, "  if %u: interrupt OUT endpoint 0x%02x mps %u", hi[k].ifnum, hi[k].ep_out, hi[k].mps_out);
         ESP_LOG_BUFFER_HEX(TAG, descs[k], lens[k]);
     }
 
@@ -642,6 +684,8 @@ static void handle_new(uint8_t addr)
             m->ctx.vid = m->vid;
             m->ctx.pid = m->pid;
             m->ctx.mouse_iface = m->ifnum;
+            m->ctx.mouse_ep_out = hi[k].ep_out;
+            m->ctx.mouse_mps_out = hi[k].mps_out;
             snprintf(m->ctx.product, sizeof m->ctx.product, "%s", prod);
             if (drv->wants_input) m->in_q = xQueueCreate(8, sizeof(in_report_t));
             m->ctx.in_q = m->in_q;
@@ -780,7 +824,13 @@ static void refresh_known(void)
         /* A receiver driver that found no mouse awake (Logitech: asleep, out of range): try again;
          * the mouse answers once it has been moved. The descriptors are gone, so only drivers that
          * work purely over claimed configuration interfaces can be probed again. */
-        if (m->used && !m->dying && m->tier != AMV_TIER_KNOWN && m->drv && m->drv->cfg_match && m->ctx.n_cfg) {
+        /* A driver that talks over the mouse's own interface (Finalmouse) has no claimed interfaces.
+         * A failed first probe is retried when the mouse has produced reports since the last
+         * attempt, i.e. it is awake and in use; after four failures only every sixth period. */
+        bool cfg_retry = m->drv && m->drv->cfg_match && m->ctx.n_cfg;
+        bool own_retry = m->drv && m->drv->wants_input && m->probed && !m->ctx.n_cfg && m->reports != m->retry_reports;
+        if (own_retry && m->fail_n >= 4 && (++m->skip % 6) != 0) own_retry = false;
+        if (m->used && !m->dying && m->tier != AMV_TIER_KNOWN && (cfg_retry || own_retry)) {
             xSemaphoreTake(s_drv, portMAX_DELAY);
             amv_drv_ctx_t c = m->ctx;
             bool live = m->used && !m->dying;
@@ -792,6 +842,11 @@ static void refresh_known(void)
                 m->ctx = c;
                 if (e == ESP_OK) m->tier = AMV_TIER_KNOWN;
                 TAB_UNLOCK();
+                if (own_retry) {
+                    m->retry_reports = m->reports;           /* replies to this probe are not "activity" */
+                    if (e == ESP_OK) { m->fail_n = 0; ESP_LOGI(TAG, "\"%s\": driver answered on retry", m->name); }
+                    else if (m->fail_n < 255) m->fail_n++;
+                }
                 if (changed) emit(AMV_MEV_UPDATED, m->uid);
             }
             continue;
@@ -1243,6 +1298,7 @@ esp_err_t amv_usb_host_start(void)
     s_ctrl_mtx = xSemaphoreCreateMutex();
     s_tab = xSemaphoreCreateMutex();
     s_drv = xSemaphoreCreateMutex();
+    s_out_sem = xSemaphoreCreateBinary();
     if (!s_q || !s_ctrl_sem || !s_ctrl_mtx || !s_tab || !s_drv) return ESP_ERR_NO_MEM;
 
     /* peripheral_map 0 selects the High-Speed controller on the P4; esp_tinyusb keeps the Full-Speed one */

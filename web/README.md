@@ -6,6 +6,14 @@ The no-install front-end for the AnyMouse dongle. It tunes the eight direction w
 
 **Needs** Chrome, Edge, Brave or Opera on a computer. Firefox, Safari and phones have no WebHID; they use the native app (`./anymouse`, Linux). The page says so if the browser cannot do it.
 
+## Hosting (the public copy)
+The public Studio is **https://anymouse.futurelabz.dev**, served from `root@webserver.lan:/opt/webserver/anymouse-webhid/`. That directory is a plain copy of this folder, so **every change under `web/` must be rsynced there** or the public page drifts from the repository (a stale `proto.js` against newer firmware is the likeliest harm). Use the script, which does a dry run unless told otherwise:
+```bash
+tools/deploy-web.sh          # lists what would change, changes nothing
+tools/deploy-web.sh --go     # syncs (never deletes on the host; skips tests/, README.md and package.json)
+```
+Run the tests first (`cd web && node --test tests/*.test.mjs`). The skipped files are an assumption about what the host should serve; the dry run shows what differs. The host needs the usual HTTPS (WebHID requires a secure context); the Linux permission rule for the browser is under **Linux** below.
+
 ## Run it
 ```bash
 python3 -m http.server 8765 --directory web      # from the repo root

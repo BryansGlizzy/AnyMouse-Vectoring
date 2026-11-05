@@ -45,6 +45,7 @@
 /* Overridable for tests */
 static const char *s_hidraw_class = "/sys/class/hidraw";
 static const char *s_dev_dir = "/dev";
+static const char *s_usb_devices = "/sys/bus/usb/devices";
 
 typedef struct {
     char name[32];          /* hidrawN */
@@ -74,11 +75,14 @@ static char s_rejected[MAX_REJECTED][PATH_MAX];  /* candidates that failed the h
 static int  s_rejected_n;
 static dongle_mouse_t s_mice[MAX_MICE];          /* guarded by s_mtx */
 static int  s_nmice = -1;                        /* -1: unknown / unsupported */
+static dongle_slots_t s_slots;                   /* guarded by s_mtx */
+static int  s_pc_link_hz;                        /* ceiling of the dongle -> PC link, 0 = unknown; guarded by s_mtx */
 
-/* One pending mouse write, executed by the dongle thread (it owns the hidraw link) */
+/* One pending request that must run on the dongle thread (it owns the hidraw link): a mouse
+ * write, or a profile-slot / bypass change. `cmd` is the AMV_CMD_* it becomes. */
 static pthread_mutex_t s_job_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  s_job_cv = PTHREAD_COND_INITIALIZER;
-static struct { bool pending, done; uint8_t index, cmd; uint16_t value; int status; } s_job;
+static struct { bool pending, done; uint8_t index, cmd, setting; uint16_t value; int status; } s_job;
 
 static uint64_t dongle_now_ms(void) {
     struct timespec ts;
@@ -237,7 +241,11 @@ static void adopt_state(link_t *l, const amv_state_payload_t *p, bool to_engine)
     s_status.bypass = p->bypass != 0;
     s_status.active_slot = p->active_slot;
     memcpy(s_status.weights, w, sizeof(w));
+    bool slot_view_changed = s_slots.active != p->active_slot || s_slots.bypass != (p->bypass != 0);
+    s_slots.active = p->active_slot;
+    s_slots.bypass = p->bypass != 0;
     pthread_mutex_unlock(&s_mtx);
+    if (slot_view_changed) atomic_fetch_add(&g_state.dongle_slots_rev, 1U);
 }
 
 static void handle_event(link_t *l, const uint8_t *f) {
@@ -436,6 +444,10 @@ static bool same_mice(const dongle_mouse_t *a, int na, const dongle_mouse_t *b, 
         amv_mouse_info_t x = a[i].info, y = b[i].info;
         x.measured_hz = y.measured_hz = 0;      /* changes all the time; not worth a GUI refresh */
         if (memcmp(&x, &y, sizeof x) != 0 || a[i].has_caps != b[i].has_caps) return false;
+        if (a[i].has_settings != b[i].has_settings ||
+            (a[i].has_settings && memcmp(&a[i].settings, &b[i].settings, sizeof a[i].settings) != 0)) return false;
+        if (a[i].has_model != b[i].has_model ||
+            (a[i].has_model && memcmp(&a[i].model, &b[i].model, sizeof a[i].model) != 0)) return false;
     }
     return true;
 }
@@ -474,6 +486,29 @@ static int fetch_mice(link_t *l) {
                 m[n].has_caps = true;
             }
         }
+        if (m[n].info.tier != AMV_TIER_IGNORED) {
+            /* Everything the driver could read (battery, Motion Sync, lift-off, link state, ...).
+             * Firmware before 0.6.0 answers BAD_CMD: the list then simply has no settings. */
+            r = request(l, AMV_CMD_GET_MOUSE_SETTINGS, &i, 1, REQUEST_TIMEOUT_MS, rep, NULL);
+            if (r < 0) return -1;
+            h = (const amv_hdr_t *)rep;
+            if (r == 1 && h->status == AMV_ST_OK && h->len >= 4 && h->len <= sizeof(amv_settings_rep_t)) {
+                memcpy(&m[n].settings, rep + AMV_HEADER_SIZE, h->len);
+                if (m[n].settings.count <= AMV_SETTINGS_MAX && h->len >= 4U + 4U * m[n].settings.count)
+                    m[n].has_settings = true;
+                else
+                    memset(&m[n].settings, 0, sizeof m[n].settings);
+            }
+            r = request(l, AMV_CMD_GET_MOUSE_MODEL, &i, 1, REQUEST_TIMEOUT_MS, rep, NULL);
+            if (r < 0) return -1;
+            h = (const amv_hdr_t *)rep;
+            if (r == 1 && h->status == AMV_ST_OK && h->len >= sizeof(amv_mouse_model_t)) {
+                memcpy(&m[n].model, rep + AMV_HEADER_SIZE, sizeof m[n].model);
+                m[n].model.brand[sizeof m[n].model.brand - 1] = '\0';
+                m[n].model.model[sizeof m[n].model.model - 1] = '\0';
+                m[n].has_model = true;
+            }
+        }
         n++;
     }
     publish_mice(m, n);
@@ -490,15 +525,61 @@ int dongle_get_mice(dongle_mouse_t *out, int max) {
     return n;
 }
 
-int dongle_mouse_set(uint8_t index, bool cpi, uint16_t value) {
+/* ---- profile slots stored on the dongle ---- */
+
+static void publish_slots(uint8_t mask) {
+    pthread_mutex_lock(&s_mtx);
+    bool changed = !s_slots.known || s_slots.mask != mask;
+    s_slots.known = true;
+    s_slots.count = AMV_NUM_SLOTS;
+    s_slots.mask = mask;
+    pthread_mutex_unlock(&s_mtx);
+    if (changed) atomic_fetch_add(&g_state.dongle_slots_rev, 1U);
+}
+
+static void forget_slots(void) {
+    pthread_mutex_lock(&s_mtx);
+    bool had = s_slots.known;
+    memset(&s_slots, 0, sizeof s_slots);
+    pthread_mutex_unlock(&s_mtx);
+    if (had) atomic_fetch_add(&g_state.dongle_slots_rev, 1U);
+}
+
+/* Which slots hold a saved profile. -1: link gone; 0: done or unsupported (the old answer is kept). */
+static int fetch_slots(link_t *l) {
+    uint8_t rep[AMV_FRAME_SIZE];
+    int r = request(l, AMV_CMD_GET_SLOTS, NULL, 0, REQUEST_TIMEOUT_MS, rep, NULL);
+    if (r < 0) return -1;
+    if (r == 0) return 0;
+    const amv_hdr_t *h = (const amv_hdr_t *)rep;
+    if (h->status != AMV_ST_OK || h->len < 1) return 0;      /* firmware before 0.3.0 has no GET_SLOTS */
+    publish_slots(rep[AMV_HEADER_SIZE]);
+    return 0;
+}
+
+bool dongle_get_slots(dongle_slots_t *out) {
+    pthread_mutex_lock(&s_mtx);
+    *out = s_slots;
+    bool linked = s_status.link == DONGLE_LINKED;
+    pthread_mutex_unlock(&s_mtx);
+    if (!linked) memset(out, 0, sizeof *out);
+    return linked && out->known;
+}
+
+/* ---- requests that run on the dongle thread ---- */
+
+/* Queue one request and wait for the dongle thread to run it. AMV_ST_* status, or -1: not linked,
+ * link lost, or no answer in time. */
+static int submit_job(uint8_t cmd, uint8_t index, uint8_t setting, uint16_t value) {
     dongle_status_t st;
     if (!dongle_get_status(&st)) return -1;
     pthread_mutex_lock(&s_job_mtx);
     while (s_job.pending) pthread_cond_wait(&s_job_cv, &s_job_mtx);
     s_job.pending = true;
     s_job.done = false;
+    s_job.cmd = cmd;
     s_job.index = index;
-    s_job.cmd = cpi ? AMV_CMD_SET_MOUSE_CPI : AMV_CMD_SET_MOUSE_POLLING;
+    s_job.setting = setting;
     s_job.value = value;
     struct timespec dl;
     clock_gettime(CLOCK_REALTIME, &dl);
@@ -512,18 +593,62 @@ int dongle_mouse_set(uint8_t index, bool cpi, uint16_t value) {
     return status;
 }
 
-/* Dongle thread: run a pending mouse write. -1: link gone. */
+int dongle_mouse_set(uint8_t index, bool cpi, uint16_t value) {
+    return submit_job(cpi ? AMV_CMD_SET_MOUSE_CPI : AMV_CMD_SET_MOUSE_POLLING, index, 0, value);
+}
+
+int dongle_set_mouse_setting(uint8_t index, uint8_t setting, uint16_t value) {
+    return submit_job(AMV_CMD_SET_MOUSE_SETTING, index, setting, value);
+}
+
+int dongle_slot_load(uint8_t slot) { return submit_job(AMV_CMD_LOAD_PROFILE, slot, 0, 0); }
+int dongle_slot_save(uint8_t slot) { return submit_job(AMV_CMD_SAVE_PROFILE, slot, 0, 0); }
+int dongle_set_bypass(bool on)     { return submit_job(AMV_CMD_SET_BYPASS, on ? 1 : 0, 0, 0); }
+
+/* LOAD_PROFILE / SAVE_PROFILE / SET_BYPASS: one byte in, the dongle's state back. */
+static int run_state_cmd(link_t *l, uint8_t cmd, uint8_t arg, int *status) {
+    /* A slot must hold what the user sees: send pending local edits first (the dongle thread
+     * normally does this on its next turn, but the save must not overtake them). Only on the
+     * daemon link: a one-shot CLI process holds default weights, which must never reach the dongle. */
+    if (cmd == AMV_CMD_SAVE_PROFILE && l->sync && sync_step(l) < 0) return -1;
+    uint8_t rep[AMV_FRAME_SIZE];
+    int r = request(l, cmd, &arg, 1, REQUEST_TIMEOUT_MS, rep, NULL);
+    if (r < 0) return -1;
+    if (r == 0) { *status = -1; return 0; }
+    const amv_hdr_t *h = (const amv_hdr_t *)rep;
+    *status = h->status;
+    amv_state_payload_t p;
+    if (h->status == AMV_ST_OK && state_from_reply(rep, &p)) {
+        /* Only a load changes the weights in effect: the engine must follow it */
+        adopt_state(l, &p, cmd == AMV_CMD_LOAD_PROFILE);
+    }
+    return fetch_slots(l);
+}
+
+/* Dongle thread: run a pending request. -1: link gone. */
 static int run_job(link_t *l) {
     pthread_mutex_lock(&s_job_mtx);
     bool todo = s_job.pending && !s_job.done;
-    amv_mouse_set_req_t req = { .index = s_job.index, .value = s_job.value };
-    uint8_t cmd = s_job.cmd;
+    uint8_t cmd = s_job.cmd, index = s_job.index, setting = s_job.setting;
+    uint16_t value = s_job.value;
     pthread_mutex_unlock(&s_job_mtx);
     if (!todo) return 0;
-    uint8_t rep[AMV_FRAME_SIZE];
-    int r = request(l, cmd, &req, sizeof req, MOUSE_SET_TIMEOUT_MS, rep, NULL);
-    int status = r == 1 ? ((const amv_hdr_t *)rep)->status : -1;
-    if (r >= 0) fetch_mice(l);
+
+    int status = -1, r = 0;
+    if (cmd == AMV_CMD_SAVE_PROFILE || cmd == AMV_CMD_LOAD_PROFILE || cmd == AMV_CMD_SET_BYPASS) {
+        r = run_state_cmd(l, cmd, index, &status);
+    } else {
+        uint8_t rep[AMV_FRAME_SIZE];
+        if (cmd == AMV_CMD_SET_MOUSE_SETTING) {
+            amv_setting_set_req_t req = { .index = index, .setting = setting, .value = value };
+            r = request(l, cmd, &req, sizeof req, MOUSE_SET_TIMEOUT_MS, rep, NULL);
+        } else {
+            amv_mouse_set_req_t req = { .index = index, .value = value };
+            r = request(l, cmd, &req, sizeof req, MOUSE_SET_TIMEOUT_MS, rep, NULL);
+        }
+        status = r == 1 ? ((const amv_hdr_t *)rep)->status : -1;
+        if (r >= 0) fetch_mice(l);
+    }
     pthread_mutex_lock(&s_job_mtx);
     s_job.status = status;
     s_job.done = true;
@@ -534,9 +659,19 @@ static int run_job(link_t *l) {
 
 static const char *DRIVER_BRAND[] = { "", "Razer", "Finalmouse", "Attack Shark", "Logitech" };
 
+static const amv_setting_t *find_setting(const dongle_mouse_t *m, uint8_t id) {
+    if (!m->has_settings) return NULL;
+    for (int k = 0; k < m->settings.count && k < AMV_SETTINGS_MAX; k++)
+        if (m->settings.s[k].id == id) return &m->settings.s[k];
+    return NULL;
+}
+
 bool dongle_fill_hw_status(mouse_hw_status_t *out) {
     dongle_mouse_t m[MAX_MICE];
     int n = dongle_get_mice(m, MAX_MICE);
+    pthread_mutex_lock(&s_mtx);
+    int pc_hz = s_pc_link_hz;
+    pthread_mutex_unlock(&s_mtx);
     for (int i = 0; i < n; i++) {
         const amv_mouse_info_t *x = &m[i].info;
         if (x->tier == AMV_TIER_IGNORED) continue;
@@ -546,13 +681,50 @@ bool dongle_fill_hw_status(mouse_hw_status_t *out) {
         out->vid = x->vid;
         out->pid = x->pid;
         out->dpi = x->cpi;
-        out->polling_rate_hz = x->device_hz ? x->device_hz : x->nominal_hz;
+        /* polling_rate_hz is only ever what the mouse itself reported. The USB interval of a
+         * High-Speed mouse is 8000 Hz whatever it is set to, so it is carried separately. */
+        out->polling_rate_hz = x->device_hz;
+        out->nominal_hz = x->nominal_hz;
+        out->measured_hz = x->measured_hz;
+        out->pc_link_hz = pc_hz;
         out->battery_pct = x->battery == 0xFF ? 0 : x->battery;
         out->battery_mv = 0;
+        out->link = -1;
         out->can_set_cpi = x->tier == AMV_TIER_KNOWN && (x->flags & AMV_MF_CAN_SET_CPI);
         out->can_set_rate = x->tier == AMV_TIER_KNOWN && (x->flags & AMV_MF_CAN_SET_RATE);
+
+        if (x->tier == AMV_TIER_KNOWN) {
+            const amv_setting_t *bat = find_setting(&m[i], AMV_SET_BATTERY);
+            if (bat && bat->value <= 100) out->battery_pct = bat->value;
+            const amv_setting_t *ms = find_setting(&m[i], AMV_SET_MOTION_SYNC);
+            if (ms) {
+                out->motion_sync_known = true;
+                out->motion_sync = ms->value != 0;
+                out->can_set_motion_sync = (ms->flags & AMV_SETF_WRITABLE) != 0;
+            }
+            const amv_setting_t *lod = find_setting(&m[i], AMV_SET_LOD);
+            if (lod) {
+                out->lod_level = lod->value;
+                out->can_set_lod = (lod->flags & AMV_SETF_WRITABLE) != 0;
+            }
+            const amv_setting_t *chg = find_setting(&m[i], AMV_SET_CHARGING);
+            out->charging = chg && chg->value == AMV_CHG_CHARGING;
+            const amv_setting_t *lk = find_setting(&m[i], AMV_SET_LINK);
+            if (lk) out->link = lk->value;
+            else if (m[i].has_settings) out->link = m[i].settings.link;
+        }
+        /* The dongle has a driver for this model but the mouse did not answer it (a receiver whose
+         * mouse is asleep, or a protocol exchange that failed): say so instead of showing blanks. */
+        out->driver_error = (x->flags & AMV_MF_DRV_ERROR) ||
+                            (x->tier != AMV_TIER_KNOWN && m[i].has_model && m[i].model.state == AMV_MODEL_DRIVER);
+
         snprintf(out->brand, sizeof(out->brand), "%s", x->driver < 5 ? DRIVER_BRAND[x->driver] : "");
         snprintf(out->model, sizeof(out->model), "%.31s", x->name);
+        if (m[i].has_model && m[i].model.model[0]) {
+            /* The catalog's name is better than the USB product string ("UltralightX dongle") */
+            snprintf(out->brand, sizeof(out->brand), "%s", m[i].model.brand);
+            snprintf(out->model, sizeof(out->model), "%.31s", m[i].model.model);
+        }
         snprintf(out->node, sizeof(out->node), "via AnyMouse dongle, %s",
                  x->tier == AMV_TIER_KNOWN ? "known protocol" : x->tier == AMV_TIER_BOOT ? "boot fallback" : "generic HID");
         if (m[i].has_caps) {
@@ -565,7 +737,7 @@ bool dongle_fill_hw_status(mouse_hw_status_t *out) {
 }
 
 /* Index of the first mouse the dongle uses, or -1 */
-static int first_mouse_index(void) {
+int dongle_first_mouse_index(void) {
     dongle_mouse_t m[MAX_MICE];
     int n = dongle_get_mice(m, MAX_MICE);
     for (int i = 0; i < n; i++) if (m[i].info.tier != AMV_TIER_IGNORED) return m[i].info.index;
@@ -573,7 +745,7 @@ static int first_mouse_index(void) {
 }
 
 int dongle_first_mouse_set(bool cpi, uint16_t value) {
-    int i = first_mouse_index();
+    int i = dongle_first_mouse_index();
     return i < 0 ? -1 : dongle_mouse_set((uint8_t)i, cpi, value);
 }
 
@@ -584,6 +756,26 @@ static void format_status_line(const dongle_status_t *st, char *out, size_t sz) 
              st->fw[0], st->fw[1], st->fw[2], st->proto_ver,
              st->mac[0], st->mac[1], st->mac[2], st->mac[3], st->mac[4], st->mac[5],
              st->legacy ? " (pre-HELLO firmware: please update)" : "");
+}
+
+/* Ceiling in reports/s of the dongle -> PC link, from the bus speed Linux negotiated for the dongle
+ * ("usb5/5-2" -> /sys/bus/usb/devices/5-2/speed, in Mbit/s). The dongle's PC side is Full-Speed USB,
+ * whose interrupt endpoints poll at most once per millisecond. 0: unknown. */
+static int pc_link_hz_of(const char *usb_parent) {
+    const char *dev = strrchr(usb_parent, '/');
+    dev = dev ? dev + 1 : usb_parent;
+    if (!dev[0]) return 0;
+    char path[PATH_MAX], buf[32] = "";
+    snprintf(path, sizeof(path), "%s/%.64s/speed", s_usb_devices, dev);
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    if (!fgets(buf, sizeof(buf), f)) buf[0] = '\0';
+    fclose(f);
+    double mbit = atof(buf);
+    if (mbit <= 0) return 0;
+    if (mbit < 5) return 125;           /* low speed: 8 ms */
+    if (mbit < 100) return 1000;        /* full speed: 1 ms frames */
+    return 8000;                        /* high speed and above: 125 us microframes */
 }
 
 /* Open the first eligible candidate and run the handshake. Leaves l->fd open only when linked. */
@@ -640,6 +832,10 @@ static void try_link(link_t *l, uint64_t *next_scan) {
         memcpy(st.weights, s_status.weights, sizeof(st.weights));
         pthread_mutex_unlock(&s_mtx);
         publish(&st, pick->key);
+        pthread_mutex_lock(&s_mtx);
+        s_pc_link_hz = pc_link_hz_of(pick->usb_parent);
+        pthread_mutex_unlock(&s_mtx);
+        fetch_slots(l);
         fetch_mice(l);
         printf("[DONGLE] Linked AnyMouse dongle on %s: %s; adopted its weights (gen %u)%s\n",
                st.node, line, st.gen, st.vectoring ? "; software vectoring stays idle" : "");
@@ -679,6 +875,7 @@ static void drop_link(link_t *l) {
     printf("[DONGLE] AnyMouse dongle disconnected\n");
     publish(&(dongle_status_t){ 0 }, NULL);
     publish_mice(NULL, -1);
+    forget_slots();
     pthread_mutex_lock(&s_job_mtx);              /* fail a write that was waiting for this link */
     if (s_job.pending && !s_job.done) { s_job.status = -1; s_job.done = true; pthread_cond_broadcast(&s_job_cv); }
     pthread_mutex_unlock(&s_job_mtx);
@@ -705,7 +902,7 @@ void *dongle_thread(void *arg) {
                     sync_step(&l) < 0 || run_job(&l) < 0;
         if (!gone && (l.mice_dirty || dongle_now_ms() >= next_mice)) {
             next_mice = dongle_now_ms() + MICE_PERIOD_MS;
-            gone = fetch_mice(&l) < 0;
+            gone = fetch_mice(&l) < 0 || fetch_slots(&l) < 0;
         }
         if (gone) drop_link(&l);
     }
@@ -730,6 +927,21 @@ int dongle_cli(const char *action, const char *arg) {
             printf("Usage: --dongle-bypass on|off\n");
             return 2;
         }
+    }
+
+    int slot_cmd = 0, slot = -1;        /* --dongle-slot load|save N (N counts from 1) */
+    if (strcmp(action, "--dongle-slot") == 0) {
+        char verb[16] = "";
+        int num = 0;
+        if (arg && sscanf(arg, "%15s %d", verb, &num) == 2 && num >= 1 && num <= AMV_NUM_SLOTS) {
+            if (strcmp(verb, "load") == 0) slot_cmd = AMV_CMD_LOAD_PROFILE;
+            else if (strcmp(verb, "save") == 0) slot_cmd = AMV_CMD_SAVE_PROFILE;
+        }
+        if (!slot_cmd) {
+            printf("Usage: --dongle-slot load|save N   (N = 1 to %d)\n", AMV_NUM_SLOTS);
+            return 2;
+        }
+        slot = num - 1;
     }
 
     for (int i = 0; i < n; i++) {
@@ -761,6 +973,32 @@ int dongle_cli(const char *action, const char *arg) {
                 printf("Setting bypass failed.\n");
                 rc = 1;
             }
+        } else if (slot_cmd) {
+            int status = -1;
+            if (fetch_state(&l, false) != 1) {
+                printf("%s: no reply to GET_WEIGHTS\n", st.node);
+                rc = 1;
+            } else if (run_state_cmd(&l, slot_cmd, (uint8_t)slot, &status) < 0 || status < 0) {
+                printf("%s: no reply\n", st.node);
+                rc = 1;
+            } else if (status == AMV_ST_EMPTY) {
+                printf("Slot %d is empty (nothing was ever saved there).\n", slot + 1);
+                rc = 1;
+            } else if (status != AMV_ST_OK) {
+                printf("The dongle refused it (status %d).\n", status);
+                rc = 1;
+            } else {
+                dongle_status_t cur;
+                dongle_get_status(&cur);
+                printf("%s slot %d; the dongle now works from slot %u.\n",
+                       slot_cmd == AMV_CMD_LOAD_PROFILE ? "Loaded" : "Saved the weights in effect to", slot + 1,
+                       cur.active_slot + 1U);
+                if (slot_cmd == AMV_CMD_LOAD_PROFILE) {
+                    printf("  ");
+                    for (int k = 0; k < 8; k++) printf("%s=%.3f ", OCTANT_INFO[k].short_name, cur.weights[k]);
+                    printf("\n");
+                }
+            }
         } else if (fetch_state(&l, false) == 1) {
             char line[160];
             format_status_line(&st, line, sizeof(line));
@@ -773,6 +1011,17 @@ int dongle_cli(const char *action, const char *arg) {
             printf("  ");
             for (int k = 0; k < 8; k++) printf("%s=%.3f ", OCTANT_INFO[k].short_name, cur.weights[k]);
             printf("\n");
+            fetch_slots(&l);
+            dongle_slots_t sl;
+            pthread_mutex_lock(&s_mtx);
+            sl = s_slots;
+            pthread_mutex_unlock(&s_mtx);
+            if (sl.known) {
+                printf("  Profiles   : ");
+                for (int k = 0; k < sl.count; k++)
+                    printf("[%d%s%s] ", k + 1, (sl.mask >> k & 1) ? " saved" : " empty", k == cur.active_slot ? ", active" : "");
+                printf("\n");
+            }
             l.sync = false;
             fetch_mice(&l);
             pthread_mutex_lock(&s_mtx);
@@ -787,12 +1036,28 @@ int dongle_cli(const char *action, const char *arg) {
                 const amv_mouse_info_t *x = &mice[k].info;
                 printf("  Mouse %d    : %s [%04x:%04x] %s", k, x->name, x->vid, x->pid, x->tier <= 4 ? TIER[x->tier] : "?");
                 if (x->tier != AMV_TIER_IGNORED) {
-                    printf(", CPI %s%u, polling %u Hz", x->cpi ? "" : "unknown ", x->cpi, x->device_hz ? x->device_hz : x->nominal_hz);
+                    printf(", CPI %s%u", x->cpi ? "" : "unknown ", x->cpi);
+                    if (x->device_hz) printf(", polling %u Hz (set on the mouse)", x->device_hz);
+                    else printf(", polling rate not reported by the mouse");
+                    printf(" [USB interval %u Hz, measured %u Hz]", x->nominal_hz, x->measured_hz);
                     if (x->battery != 0xFF) printf(", battery %u%%", x->battery);
                     if (mice[k].has_caps && mice[k].caps.firmware[0]) printf(", firmware %s", mice[k].caps.firmware);
                     if (x->tier == AMV_TIER_KNOWN) printf("%s", (x->flags & AMV_MF_VERIFIED) ? " (writable)" : " (read-only: model not verified)");
                 }
                 printf("\n");
+                if (x->tier != AMV_TIER_IGNORED) {
+                    if (mice[k].has_model && mice[k].model.model[0])
+                        printf("      Catalog   : %s %s%s\n", mice[k].model.brand, mice[k].model.model,
+                               mice[k].model.state == AMV_MODEL_DRIVER ? "" : " (no driver)");
+                    const amv_setting_t *ms = find_setting(&mice[k], AMV_SET_MOTION_SYNC);
+                    const amv_setting_t *lk = find_setting(&mice[k], AMV_SET_LINK);
+                    static const char *LINK[] = { "wired", "connected", "asleep (move the mouse)" };
+                    if (ms) printf("      Motion Sync: %s\n", ms->value ? "on" : "off");
+                    if (lk) printf("      Link       : %s\n", lk->value < 3 ? LINK[lk->value] : "?");
+                    if (x->tier != AMV_TIER_KNOWN && mice[k].has_model && mice[k].model.state == AMV_MODEL_DRIVER)
+                        printf("      Note       : the dongle has a driver for this mouse but it did not answer; "
+                               "battery, Motion Sync and the real polling rate are unknown (retried every few seconds)\n");
+                }
             }
         } else {
             printf("%s: no reply to GET_WEIGHTS\n", st.node);

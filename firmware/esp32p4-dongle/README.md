@@ -13,9 +13,11 @@ This README describes the dongle **as built**. What is still to do is in [PLAN.m
 
 - **Working with real mice** (Razer Basilisk Ultimate wired, Logitech G Pro "PRO X Wireless" through its Lightspeed receiver): the PC-facing link, the High-Speed host, per-report scaling, 1 kHz output, flash profiles, the vendor protocol and the Studio. The M0 and M1 exit tests (stability run, PHY reset, the hardware checklist) were signed off by the project owner on 2026-10-27; the only measured figures on file are those in the log entries of PROGRESS.md.
 - **Mouse information** in three tiers (known protocol, generic HID, boot fallback) plus a catalog of 810 OpenMouse device ids, so every mouse OpenMouse knows is named. Drivers: Razer (read, CPI/rate writes verified on the Basilisk Ultimate), Finalmouse ULX and Attack Shark R3 GearHub (read only), Logitech HID++ 2.0 (read; CPI and rate writes on the G Pro receiver).
+- **Finalmouse UltralightX (2026-11-04):** works through the dongle after the host started sending a mouse's output reports on its interrupt OUT endpoint (see [PLAN.md §4.0](PLAN.md)); CPI and polling writes verified from both the desktop app and the Studio (user, 2026-11-04). The ULX is on the write allowlist.
 - **New in 0.7.0: OpenMouse runs on the dongle unchanged.** OpenMouse's own TypeScript drivers (every family) run in the QuickJS-ng engine (`components/amv_js`) instead of C ports; see [OpenMouse engine](#openmouse-engine-firmware-070). Flashed and booting; **not yet tried with a real mouse** (only against a fake Razer on the host). The C ports remain behind `CONFIG_AMV_OPENMOUSE_JS=n`.
 - **Not built, by decision:** firmware update over the vendor channel (DFU), app rollback, watchdog and soak testing (the M5 milestone was closed on 2026-10-27). Reflash over the UART USB-C. The two 4 MB OTA slots stay in the partition table so DFU can be added later without a layout change.
 - **Open:** calibration through the dongle, the Linux-side checks, the rest of OpenMouse coverage and more. See [PLAN.md](PLAN.md).
+- **Teensy 4.1 (2026-11-04):** the second board now runs a bring-up bridge ([`../teensy41-dongle/`](../teensy41-dongle/README.md)): a Finalmouse ULX dongle on its host port, vectored, out the main USB port at **8 kHz** (both Teensy ports are High-Speed, so the Full-Speed 1000 Hz cap of this board does not apply). The PC received 8000 frames/s in the self-test and up to 7.1k with a live mouse. No vendor channel, Studio support or OpenMouse engine on it yet. Hardware checks from 2026-11-03: [Teensy 4.1](#teensy-41-port-target-hardware-bring-up-2026-11-03).
 
 ## Documents
 | File | Purpose |
@@ -116,7 +118,7 @@ Instead of porting OpenMouse to C family by family, the dongle runs OpenMouse's 
 - **Driver (`amv_usb_host/drv_openmouse.c`):** matches any id in the catalog with an engine, claims every other HID interface (up to 4), maps the mouse's own interface to SET/GET_REPORT (x = -1) and claimed interfaces to `amv_hl_*`, and fills the usual context (CPI, rate, rates, battery, charging, link, LOD as levels 1-3, Motion Sync). Reported as driver `OPENMOUSE` (5).
 - **Measured on the board (no mouse yet):** bundle loads at boot in 1.2 s; engine heap 4.34 MB in PSRAM; 4.3 KB of the task stack used; internal RAM free 463 KB; image 2.28 MB (engine 0.62 MB code, bytecode 1.18 MB).
 
-**Write policy.** Probing and the 5 s refresh are read-only for every driver. A setting is written only when allowed: today the Razer Basilisk Ultimate wired (`1532:0086`) and anything behind the Logitech receiver `046d:c547` (the G Pro). The decided rule for adding models is that OpenMouse marks the exact model `verified: true` **and** its C port passes the transcript tests; that harness is not built yet (see PLAN.md), so nothing new qualifies until it is. Finalmouse and GearHub stay read-only until then.
+**Write policy.** Probing and the 5 s refresh are read-only for every driver. A setting is written only when allowed: today the Razer Basilisk Ultimate wired (`1532:0086`), anything behind the Logitech receiver `046d:c547` (the G Pro), and and the Finalmouse UltralightX dongle (`361d:0100`, enabled by the user on 2026-11-04 and confirmed working from the desktop app and the Studio). The decided rule for adding models is that OpenMouse marks the exact model `verified: true` **and** its C port passes the transcript tests; that harness is not built yet (see PLAN.md), so nothing new qualifies until it is. GearHub stays read-only until then.
 
 ## Protocol
 
@@ -143,7 +145,23 @@ The authority is [`common/amv_dongle_proto.h`](../../common/amv_dongle_proto.h):
 
 `tools/`: `dongle_test.py` (68 board checks), `gen_proto_js.py` (generates `web/proto.js`), `capture_fixtures.py` (records frames for the web tests), `openmouse/` (catalog and JS bundle generators). `tests/`: `test_octant.c`, `test_hid_parse.c`, `js_bridge/` (the bridge against a fake Razer, run with `qjs`), `descriptors/` (real captured descriptors). `build/`, `managed_components/` and `sdkconfig` are git-ignored.
 
+## Linux permissions (WebHID and `./anymouse` without root)
+The dongle's two hidraw nodes are created `root:root 0600`, so a normal user, `./anymouse --dongle-status` and Chrome's WebHID chooser all fail with *permission denied* until a udev rule grants the seat user access. The Studio's device chooser then lists the dongle but cannot open it. Minimal rule (dongle only; it matches the `AnyMouse` manufacturer string, so a changed USB id does not matter):
+```bash
+echo 'SUBSYSTEM=="hidraw", ATTRS{manufacturer}=="AnyMouse", TAG+="uaccess"' | sudo tee /etc/udev/rules.d/71-anymouse-dongle.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger --action=add --subsystem-match=hidraw
+```
+`sudo ./anymouse --install-udev` installs the same dongle rule plus rules for mice and `/dev/uinput`, which is broader (see "Running Without sudo" in the project README). A Flatpak or Snap browser cannot see hidraw at all; Chrome and Brave from the distribution packages can. Opening the **UART console** (`/dev/ttyACM0`) resets the board (the CH343 reset circuit), so reading it re-enumerates the dongle toward the PC.
+
 ## Toolchain and quickstart
+**Linux without installing ESP-IDF:** PlatformIO (already used for the Teensy) builds this project and fetches the pinned ESP-IDF v5.5.4 itself (a 43 MB download). `platformio.ini` is in this folder:
+```bash
+cd firmware/esp32p4-dongle
+pio run -e p4                                   # about 45 s the first time, 15 s after; image about 2.4 MB
+esptool --chip esp32p4 -p /dev/ttyACM0 -b 460800 write-flash --flash-mode dio --flash-freq 40m --flash-size 16MB 0x20000 .pio/build/p4/firmware.bin
+```
+Flash only the app (`0x20000`) so the bootloader, partition table and your saved profiles are left alone, and back the old one up first (`esptool ... read-flash 0x20000 0x260000 backup.bin`). Always through the UART USB-C. The `idf.py` flow below remains the reference.
+
 **ESP-IDF v5.5.4, pinned** (it supports pre-v3 P4 silicon; never update IDF mid-milestone). Managed component: `espressif/esp_tinyusb`; the host stack is IDF's built-in `usb_host`, and HID handling is ours because we need the raw descriptor. Key `sdkconfig.defaults`: `CONFIG_IDF_TARGET="esp32p4"`, `CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y`, 16 MB flash, 360 MHz, `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, `CONFIG_ESP_TASK_WDT_PANIC=y`, `CONFIG_FREERTOS_HZ=1000`. Partitions: `nvs` 24 KB, `otadata`, `ota_0` and `ota_1` 4 MB each, `coredump` 64 KB. PSRAM is enabled for the engine heap (`CONFIG_SPIRAM=y`, caps allocation only, so `malloc()` stays internal). The image is about 2.3 MB (0.4 MB without the engine).
 
 Install (macOS and CachyOS alike): `brew install cmake ninja dfu-util ccache python@3.12`, clone `espressif/esp-idf` at `v5.5.4` into `~/esp/esp-idf`, run `install.sh esp32p4`.
@@ -174,7 +192,8 @@ cc -std=c11 -Wall -Wextra -Icommon firmware/esp32p4-dongle/tests/test_octant.c -
 (cd firmware/esp32p4-dongle && cc -std=c11 -Wall -Wextra -Icomponents/amv_hid_parse/include tests/test_hid_parse.c components/amv_hid_parse/amv_hid_parse.c -o /tmp/test_hid_parse && /tmp/test_hid_parse)   # descriptor parser, 30 checks
 (cd web && node --test tests/*.test.mjs)                          # Studio, 23 tests
 (cd firmware/esp32p4-dongle && qjs --std --module tests/js_bridge/razer_fake.test.js)   # OpenMouse bridge vs a fake Basilisk Ultimate, 11 checks
-make test-dongle                                                  # Linux only: 61 link and guard checks against a fake dongle
+(cd firmware/esp32p4-dongle && node tests/js_bridge/finalmouse_fake.test.mjs)            # the same bridge vs a fake Finalmouse ULX (real descriptor, vendor replies on INPUT reports of the mouse's own interface), 10 checks; Node only, no qjs
+make test-dongle                                                  # Linux only: 104 link, slot, settings and guard checks against a fake dongle
 ```
 `dongle_test.py` covers the `HELLO` handshake, host-to-device writes (valid, invalid, stale), device-to-host events, bypass, profile slots, factory reset, the real scaling code against an independent float64 reference, persistence across a reboot, and the mouse list, descriptor and refusal paths with a Razer attached. It leaves the dongle at factory defaults. Its last full run was on firmware 0.5.0; **the four 0.6.0 commands (`GET_MOUSE_MODEL`, `GET_MOUSE_SETTINGS`, `GET_MOUSE_OPTIONS`, `SET_MOUSE_SETTING`) have no checks yet** (PLAN.md).
 
@@ -186,3 +205,19 @@ make test-dongle                                                  # Linux only: 
 - **Writes through the dongle:** Razer CPI write about 85 ms; Logitech CPI writes (800 to 1000 and back) were read back correctly; Logitech report-rate writes (500, then 1000 Hz) returned `ESP_OK` and motion kept flowing, but only while the mouse was awake (see PLAN.md for the sleeping-mouse message still to do).
 - **Space:** the control plane plus PC-side USB was 283 KB; adding the USB host stack with hubs added 69 KB and cost 6 KB of free internal RAM (559 to 553 KB). The 0.6.0 image with the catalog and four drivers is about 0.4 MB of a 4 MB slot, so porting more OpenMouse families is limited by effort, not space (estimate: 0.7 to 1.0 MB with every family).
 - **OpenMouse engine (0.7.0, no mouse attached):** load at boot 1.2 s; heap 4.34 MB in PSRAM (6.6 MB on a 64-bit PC); task stack 4.3 KB used of 48 KB; internal RAM free 463 KB (was 553 KB); idle for over 5 minutes with no errors. Per family loaded alone (PC, scaled to 32-bit by the measured 0.66): engine baseline about 90 KB, median family about 130 KB, Logitech about 640 KB; bytecode median 18 KB, largest 130 KB.
+
+## Teensy 4.1 (port target): hardware bring-up, 2026-11-03
+
+A Teensy 4.1 is the planned second board for the dongle firmware (PLAN.md §4.0 item 4). Only its hardware has been checked; no dongle firmware runs on it yet. It was checked on the Linux box with two small PlatformIO test programs (platform `teensy`, board `teensy41`, upload `teensy-cli`).
+
+| Item | Result |
+|:---|:---|
+| Board | Teensy 4.1 (`bcdDevice` 0x0280), serial number 21632810, 600 MHz. Enumerates at High Speed (480 Mbit/s) on its main USB port. It shipped running a RawHID program (`16c0:0486`); test programs built with `-D USB_SERIAL` appear as `16c0:0483` on `/dev/ttyACM0` |
+| PSRAM | One 8 MB chip soldered on. The Teensy core detects it (`external_psram_size` = 8). All 8 MB at `0x70000000` passed an address-in-address check, 8 fixed bit patterns and 4 pseudo-random fills with **0 errors**. About 0.5 s to write and read back the whole 8 MB once |
+| USB host port | 5-pin pigtail soldered to the host pads. With a wired **Attack Shark R3** attached: full speed, port enabled, no over-current; three HID interfaces claimed by USBHost_t36 (mouse and keyboard collections); about 10,000 motion reports received with correct deltas |
+| Flashing | `pio run -t upload` reboots the running program into the HalfKay bootloader on its own; no button press needed |
+
+- **Pigtail wiring:** the host pads are, from the 5V pad, **5V, D−, D+, GND, GND**; the standard pigtail colours are red 5V, **white D−, green D+**, black GND. The first attempt followed a diagram that had green on D−. With the data pair swapped, a full-speed mouse's pull-up lands on D−, the port reports a **low-speed** attach (`PORTSC1` line state D− high), enumeration fails and the mouse drops off a few seconds later. Swapping the two wires fixed it; nothing was damaged. Never plug the host pigtail into a PC: both ends are hosts, nothing enumerates and their 5V rails are tied together.
+- **Diagnosing the host port:** `USB2_PORTSC1` gives connect (bit 0), port enable (bit 2), over-current (bit 4), line state (bits 11:10, bit 11 = D+, bit 10 = D−), port power (bit 12) and speed (bits 27:26: 0 full, 1 low, 2 high). It plays the same role as `HPRT` on the P4.
+- **Serial console:** the Teensy only sends USB serial output while the host holds DTR, so read it with `pio device monitor` or a script that keeps the port open, not `stty` followed by `cat`.
+- **Wired R3 identity:** the wired R3 is `3151:4026`, product string "R3 Gaming Mouse", manufacturer string all spaces. The R3's 2.4 GHz receiver is `3151:402d`. The generated catalog names `3151:4026` "A5 V3 Ultra+" (GearHub engine): the engine is right, the model name is not (PLAN.md §4.4).

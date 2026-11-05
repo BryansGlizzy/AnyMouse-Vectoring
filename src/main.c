@@ -182,6 +182,7 @@ static void print_usage(const char *prog) {
     printf("  --list-devices       List detected mice (auto-selection order) and exit\n");
     printf("  --dongle-status      Find the AnyMouse hardware dongle, verify it, print its state and exit\n");
     printf("  --dongle-bypass on|off  Switch the dongle's bypass (all weights 1.0, profile kept) and exit\n");
+    printf("  --dongle-slot load|save N  Load or save the dongle's profile slot N (1-%d) and exit\n", AMV_NUM_SLOTS);
     printf("  --faf-status         Show FpsAimForge (Steam) plugin & bundle install status and exit\n");
     printf("  --install-faf        Install/repair the FpsAimForge launcher, plugin and AnyMouse bundle\n");
     printf("  --uninstall-faf      Restore the original FpsAimForge binary and remove the AnyMouse files\n");
@@ -192,7 +193,8 @@ static void print_usage(const char *prog) {
 
 static int run_cli_action(const char *action, const char *action_arg) {
     char msg[512];
-    if (strcmp(action, "--dongle-status") == 0 || strcmp(action, "--dongle-bypass") == 0) {
+    if (strcmp(action, "--dongle-status") == 0 || strcmp(action, "--dongle-bypass") == 0 ||
+        strcmp(action, "--dongle-slot") == 0) {
         return dongle_cli(action, action_arg);
     }
     if (strcmp(action, "--list-devices") == 0) {
@@ -257,6 +259,12 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--dongle-bypass") == 0) {
             action = argv[i];
             action_arg = i + 1 < argc ? argv[++i] : NULL;
+        } else if (strcmp(argv[i], "--dongle-slot") == 0) {
+            static char slot_arg[64];
+            action = argv[i];
+            snprintf(slot_arg, sizeof(slot_arg), "%s %s", i + 1 < argc ? argv[i + 1] : "", i + 2 < argc ? argv[i + 2] : "");
+            action_arg = slot_arg;
+            i += (i + 2 < argc) ? 2 : (i + 1 < argc ? 1 : 0);
         } else if (strcmp(argv[i], "--preset") == 0 && i + 1 < argc) {
             preset = argv[++i];
         } else if (strcmp(argv[i], "--cpi") == 0 && i + 1 < argc) {
@@ -317,6 +325,21 @@ int main(int argc, char **argv) {
 
     if (startup_cpi > 0) {
         hid_set_mouse_cpi(startup_cpi);
+    }
+
+    /* Automatically repair or update FpsAimForge Steam integration on startup if needed */
+    {
+        faf_install_info_t faf_info;
+        faf_install_detect(&faf_info);
+        if (faf_info.state == FAF_INSTALL_NEEDS_REPAIR ||
+            faf_info.state == FAF_INSTALL_OUTDATED) {
+            char faf_msg[512] = {0};
+            if (faf_install_apply(faf_msg, sizeof(faf_msg))) {
+                printf("[FAF] %s\n", faf_msg);
+            } else {
+                fprintf(stderr, "[FAF] Auto-repair warning: %s\n", faf_msg);
+            }
+        }
     }
 
     signal(SIGINT, sig_handler);

@@ -114,14 +114,40 @@ typedef struct {
     int      tier;                /* AMV_TIER_* (dongle only) */
     bool     can_set_cpi;
     bool     can_set_rate;
+    /* Dongle only. What the mouse itself reports is polling_rate_hz (0 = it did not say); the other
+     * rates are what the USB side observes and are never a substitute for it. */
+    int      nominal_hz;          /* from the endpoint's bInterval and bus speed (a ceiling, not a measurement) */
+    int      measured_hz;         /* highest reports/s seen in the last 10 s (only rises while moving) */
+    int      pc_link_hz;          /* ceiling of the dongle -> PC link (Full-Speed USB: 1000), 0 = unknown */
+    bool     driver_error;        /* a vendor protocol exists for this mouse but it did not answer */
+    bool     motion_sync_known;   /* motion_sync holds a value the mouse reported */
+    int      link;                /* AMV_LINK_* (wired / via a receiver, awake / asleep), -1 = not reported */
+    bool     charging;
+    int      lod_level;           /* 0 = not reported; 1..n lowest first (see lod_levels) */
+    int      lod_levels;
+    bool     can_set_motion_sync;
+    bool     can_set_lod;
 } mouse_hw_status_t;
 
-/* A mouse plugged into the dongle, as the dongle reports it (GET_MOUSE / GET_MOUSE_CAPS) */
+/* A mouse plugged into the dongle, as the dongle reports it (GET_MOUSE / GET_MOUSE_CAPS / ...) */
 typedef struct {
-    amv_mouse_info_t info;
-    amv_mouse_caps_t caps;
-    bool             has_caps;
+    amv_mouse_info_t     info;
+    amv_mouse_caps_t     caps;
+    bool                 has_caps;
+    amv_settings_rep_t   settings;      /* GET_MOUSE_SETTINGS: what the driver could read, with write flags */
+    bool                 has_settings;  /* false: older firmware, or the driver exposes none */
+    amv_mouse_model_t    model;         /* catalog name for this id (firmware 0.6.0+) */
+    bool                 has_model;
 } dongle_mouse_t;
+
+/* Profile slots stored on the dongle (the Studio's "Profiles on the dongle") */
+typedef struct {
+    bool     known;       /* the slot mask has been read from the dongle */
+    uint8_t  count;       /* AMV_NUM_SLOTS */
+    uint8_t  mask;        /* bit n set: slot n holds a saved profile */
+    uint8_t  active;      /* slot the dongle is working from (and auto-saves into) */
+    bool     bypass;      /* all weights act as 1.0; the profile is untouched */
+} dongle_slots_t;
 
 /* Per-octant ballistic submovement calibration statistics */
 typedef struct {
@@ -224,6 +250,8 @@ typedef struct {
     _Atomic uint32_t dongle_weights_rev;
     /* Bumped whenever the list of mice behind the dongle (or their CPI / rate / battery) changes */
     _Atomic uint32_t dongle_mice_rev;
+    /* Bumped whenever the dongle's saved-slot mask, active slot or bypass flag changes */
+    _Atomic uint32_t dongle_slots_rev;
 
     /* Lock-free SPSC ring buffer: Thread 1 (evdev) -> Thread 2 (calibration) */
     tick_event_t     tick_ring[TICK_RING_SIZE];
@@ -283,6 +311,14 @@ int   dongle_get_mice(dongle_mouse_t *out, int max);      /* -1: no link, or fir
 int   dongle_mouse_set(uint8_t index, bool cpi, uint16_t value);
 bool  dongle_fill_hw_status(mouse_hw_status_t *out);      /* first mouse behind the dongle -> hardware panel */
 int   dongle_first_mouse_set(bool cpi, uint16_t value);   /* dongle_mouse_set() on that mouse */
+/* Profile slots on the dongle. The three writers run on the dongle thread and return the AMV_ST_*
+ * status (AMV_ST_EMPTY: loading a slot that was never saved), or -1 when not linked / timed out. */
+bool  dongle_get_slots(dongle_slots_t *out);              /* false when no dongle is linked */
+int   dongle_slot_load(uint8_t slot);                     /* the dongle's weights replace the engine's */
+int   dongle_slot_save(uint8_t slot);                     /* saves the weights now in effect, and makes it active */
+int   dongle_set_bypass(bool on);
+int   dongle_set_mouse_setting(uint8_t index, uint8_t setting, uint16_t value);  /* LOD, Motion Sync (writable ones only) */
+int   dongle_first_mouse_index(void);                     /* index of the mouse the hardware panel shows, or -1 */
 
 /* Persistent user config & invoking-user helpers (src/config.c) */
 bool  config_user_home(char *out, size_t out_sz);

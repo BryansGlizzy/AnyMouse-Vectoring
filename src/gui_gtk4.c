@@ -19,6 +19,11 @@ static const char *DARK_CSS =
     "button:hover { background-color: #2c3348; border-color: #00f0ff; color: #00f0ff; }\n"
     "button.primary-btn { background-color: #00d4ff; color: #0f172a; border: none; font-weight: bold; }\n"
     "button.primary-btn:hover { background-color: #38bdf8; color: #0f172a; }\n"
+    "button.slot-saved { border-color: #4ade80; }\n"
+    "button.slot-active, button.slot-active:checked { border-color: #00f0ff; border-width: 2px; }\n"
+    "button:checked { background-color: #2c3348; color: #00f0ff; }\n"
+    "label.dg-warn { color: #fbbf24; font-size: 12px; }\n"
+    "label.dg-mice { font-family: monospace; font-size: 11px; color: #cbd5e1; }\n"
     ".badge { background-color: #1e2536; border: 1px solid #334155; border-radius: 6px; padding: 3px 8px; font-size: 11px; font-weight: bold; }\n"
     ".badge-cyan { color: #38bdf8; }\n"
     ".badge-green { color: #4ade80; }\n"
@@ -63,10 +68,25 @@ typedef struct {
     uint32_t   last_mice_rev;
     int        tick_count;
 
+    /* Dongle: stored profiles, and the mice behind it */
+    GtkWidget *dg_frame;
+    GtkWidget *dg_slot_btn[AMV_NUM_SLOTS];
+    GtkWidget *btn_dg_load;
+    GtkWidget *btn_dg_save;
+    GtkWidget *chk_dg_bypass;
+    GtkWidget *lbl_dg_status;
+    GtkWidget *lbl_dg_warn;       /* why a mouse behind the dongle shows blanks */
+    GtkWidget *lbl_dg_mice;       /* every device plugged into the dongle */
+    int        dg_sel;            /* slot picked in the panel (0-based); -1 = follow the active slot */
+    bool       dg_busy;           /* a slot / bypass request is running on its worker thread */
+    uint32_t   last_slots_rev;
+    uint32_t   dg_feedback_ticks;
+
     /* FpsAimForge installer widgets */
     GtkWidget *lbl_faf_install;
     GtkWidget *btn_faf_install;
     GtkWidget *btn_faf_remove;
+    int        faf_feedback_ticks;
 
     /* Master & Symmetry controls */
     GtkWidget *master_scale;
@@ -535,6 +555,69 @@ static void update_rate_dropdown(const mouse_hw_status_t *st) {
     g_ui.updating_ui = false;
 }
 
+/* A mouse behind the dongle. Only what the dongle reports is shown as a value; anything the mouse
+ * did not report says so, with the reason, instead of a number that merely looks plausible. */
+static void apply_dongle_mouse(const mouse_hw_status_t *st) {
+    char b[256];
+    snprintf(b, sizeof(b), "🖱️ %s%s%s · %s", st->brand, st->brand[0] ? " " : "", st->model, st->node);
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_mouse_ident), b);
+
+    /* Polling: what the mouse is set to, versus what the PC can receive from the dongle */
+    char tip[512];
+    if (st->polling_rate_hz > 0) {
+        if (st->pc_link_hz > 0 && st->polling_rate_hz > st->pc_link_hz)
+            snprintf(b, sizeof(b), "⚡ %d Hz on the mouse → %d Hz to the PC", st->polling_rate_hz, st->pc_link_hz);
+        else
+            snprintf(b, sizeof(b), "⚡ %d Hz", st->polling_rate_hz);
+    } else if (st->measured_hz > 0) {
+        snprintf(b, sizeof(b), "⚡ ~%d Hz measured · mouse rate not reported", st->measured_hz);
+    } else {
+        snprintf(b, sizeof(b), "⚡ Rate not reported (move the mouse to measure)");
+    }
+    gtk_label_set_text(GTK_LABEL(g_ui.badge_rate), b);
+    snprintf(tip, sizeof(tip),
+             "Set on the mouse: %s\nUSB interval of the mouse's port: %d Hz (a ceiling set by the bus, not a measurement)\n"
+             "Measured at the dongle (highest reports/s in the last 10 s, rises only while moving): %d Hz\n"
+             "Dongle → PC link ceiling: %s",
+             st->polling_rate_hz > 0 ? "reported" : "not reported by the mouse",
+             st->nominal_hz, st->measured_hz,
+             st->pc_link_hz > 0 ? (st->pc_link_hz >= 8000 ? "8000 Hz" : st->pc_link_hz >= 1000 ? "1000 Hz (Full-Speed USB)" : "125 Hz") : "unknown");
+    gtk_widget_set_tooltip_text(g_ui.badge_rate, tip);
+
+    /* Battery */
+    if (st->battery_pct > 0) snprintf(b, sizeof(b), "🔋 %d%%%s", st->battery_pct, st->charging ? " ⚡ charging" : "");
+    else snprintf(b, sizeof(b), "🔋 Battery: not reported");
+    gtk_label_set_text(GTK_LABEL(g_ui.badge_bat), b);
+    gtk_widget_set_tooltip_text(g_ui.badge_bat, st->battery_pct > 0 ? NULL
+        : "The mouse did not report a battery level (a wired mouse has none, or its vendor protocol did not answer).");
+
+    /* Motion Sync */
+    if (st->motion_sync_known) snprintf(b, sizeof(b), "🎯 Motion Sync: %s", st->motion_sync ? "ON" : "OFF");
+    else snprintf(b, sizeof(b), "🎯 Motion Sync: not reported");
+    gtk_label_set_text(GTK_LABEL(g_ui.badge_sync), b);
+    gtk_widget_set_tooltip_text(g_ui.badge_sync, st->motion_sync_known ? NULL
+        : "The mouse did not report Motion Sync. Not reported is not the same as off.");
+
+    /* Link. The dongle protocol has no signal strength (dBm); it reports whether the mouse answers. */
+    static const char *LINK[] = { "wired", "connected", "asleep: move it" };
+    if (st->link >= 0 && st->link < 3) snprintf(b, sizeof(b), "📶 Link: %s", LINK[st->link]);
+    else snprintf(b, sizeof(b), "📶 Link: not reported");
+    gtk_label_set_text(GTK_LABEL(g_ui.badge_rssi), b);
+    gtk_widget_set_tooltip_text(g_ui.badge_rssi,
+        "The dongle reports whether the mouse answers, not a signal strength in dBm.");
+
+    if (st->driver_error) {
+        snprintf(b, sizeof(b),
+                 "⚠️ The dongle has a driver for %s %s, but the mouse did not answer it. Battery, Motion Sync and the real "
+                 "polling rate are unknown. Move the mouse (wireless mice sleep when idle) and press Refresh; the dongle also retries "
+                 "on its own.", st->brand[0] ? st->brand : "this", st->model);
+        gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_warn), b);
+        gtk_widget_set_visible(g_ui.lbl_dg_warn, TRUE);
+    } else {
+        gtk_widget_set_visible(g_ui.lbl_dg_warn, FALSE);
+    }
+}
+
 /* Apply a hardware snapshot produced by the HID worker (GTK thread, outside any widget signal) */
 static void apply_hw_status(const mouse_hw_status_t *in, bool ok) {
     mouse_hw_status_t st = *in;
@@ -554,7 +637,15 @@ static void apply_hw_status(const mouse_hw_status_t *in, bool ok) {
         const char *dash[] = { "⚡ Polling: -- Hz", "🔋 Battery: --%", "🎯 Motion Sync: --", "📶 Signal: -- dBm" };
         GtkWidget *badges[] = { g_ui.badge_rate, g_ui.badge_bat, g_ui.badge_sync, g_ui.badge_rssi };
         for (int i = 0; i < 4; i++) gtk_label_set_text(GTK_LABEL(badges[i]), dash[i]);
+        gtk_widget_set_visible(g_ui.lbl_dg_warn, FALSE);
+        gtk_widget_set_tooltip_text(g_ui.badge_rate, NULL);
+        gtk_widget_set_tooltip_text(g_ui.badge_bat, NULL);
+        gtk_widget_set_tooltip_text(g_ui.badge_sync, NULL);
+        gtk_widget_set_tooltip_text(g_ui.badge_rssi, NULL);
     } else {
+        if (st.via_dongle) {
+            apply_dongle_mouse(&st);
+        } else {
         char ident[256];
         if (st.serial[0] != '\0') {
             snprintf(ident, sizeof(ident), "🖱️ %s %s (%s) · %s", st.brand, st.model, st.serial, st.node);
@@ -572,21 +663,17 @@ static void apply_hw_status(const mouse_hw_status_t *in, bool ok) {
             char b[64];
             snprintf(b, sizeof(b), "🔋 %d%% (%.2fV)", st.battery_pct, st.battery_mv / 1000.0f);
             gtk_label_set_text(GTK_LABEL(g_ui.badge_bat), b);
-        } else if (st.via_dongle) {
-            char b[64];
-            if (st.battery_pct > 0) snprintf(b, sizeof(b), "🔋 %d%%", st.battery_pct);
-            else snprintf(b, sizeof(b), "🔋 Battery: --%%");
-            gtk_label_set_text(GTK_LABEL(g_ui.badge_bat), b);
         }
         char ms_buf[64];
-        if (st.via_dongle) snprintf(ms_buf, sizeof(ms_buf), "🎯 Motion Sync: --");
-        else snprintf(ms_buf, sizeof(ms_buf), "🎯 Motion Sync: %s", st.motion_sync ? "ON" : "OFF");
+        snprintf(ms_buf, sizeof(ms_buf), "🎯 Motion Sync: %s", st.motion_sync ? "ON" : "OFF");
         gtk_label_set_text(GTK_LABEL(g_ui.badge_sync), ms_buf);
 
         if (st.rssi_dbm != 0) {
             char b[64];
             snprintf(b, sizeof(b), "📶 %d dBm", st.rssi_dbm);
             gtk_label_set_text(GTK_LABEL(g_ui.badge_rssi), b);
+        }
+        gtk_widget_set_visible(g_ui.lbl_dg_warn, FALSE);
         }
 
         if (st.dpi > 0) {
@@ -856,6 +943,7 @@ static void refresh_faf_install_widgets(void) {
     snprintf(buf, sizeof(buf), "%s FpsAimForge: %s%s%s", icons[info.state], info.detail,
              info.game_dir[0] ? " · " : "", info.game_dir);
     gtk_label_set_text(GTK_LABEL(g_ui.lbl_faf_install), buf);
+    gtk_widget_set_tooltip_text(g_ui.lbl_faf_install, buf);
     gtk_button_set_label(GTK_BUTTON(g_ui.btn_faf_install), actions[info.state]);
     gtk_widget_set_sensitive(g_ui.btn_faf_install, info.state != FAF_INSTALL_GAME_NOT_FOUND);
     gtk_widget_set_sensitive(g_ui.btn_faf_remove,
@@ -869,7 +957,15 @@ static void on_faf_install_clicked(GtkButton *btn, gpointer user_data) {
     bool ok = remove ? faf_install_remove(msg, sizeof(msg)) : faf_install_apply(msg, sizeof(msg));
     snprintf(status, sizeof(status), "%s %s", ok ? "✅" : "❌", msg);
     gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), status);
+    gtk_widget_set_tooltip_text(g_ui.lbl_profile_status, status);
+
     refresh_faf_install_widgets();
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_faf_install), status);
+    gtk_widget_set_tooltip_text(g_ui.lbl_faf_install, status);
+    if (!remove && ok) {
+        gtk_button_set_label(GTK_BUTTON(g_ui.btn_faf_install), "✓ Reinstalled");
+    }
+    g_ui.faf_feedback_ticks = 30; /* Keep confirmation visible for 3s before restoring normal status */
 }
 
 static void on_set_device_cpi_clicked(GtkButton *btn, gpointer user_data) {
@@ -932,6 +1028,192 @@ static void on_load_profile_clicked(GtkButton *btn, gpointer user_data) {
     gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), msg);
 }
 
+/* ---------- AnyMouse dongle: stored profiles and attached mice ----------
+ * Requests wait for the dongle thread (up to a few seconds), so they run on a short-lived worker
+ * and report back through an idle callback; the GTK thread never blocks on the dongle. */
+
+static const char *IGNORE_REASON[] = { "", "not a mouse", "absolute pointer", "report descriptor unusable",
+                                       "too many mice", "could not be claimed" };
+
+static void refresh_dongle_mice(void) {
+    dongle_mouse_t m[8];
+    int n = dongle_get_mice(m, 8);
+    if (n < 0) {
+        gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_mice), "Plugged into the dongle: not reported by this firmware (needs 0.5.0)");
+        return;
+    }
+    if (n == 0) {
+        gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_mice), "Plugged into the dongle: nothing");
+        return;
+    }
+    static const char *TIER[] = { "?", "known protocol", "generic HID", "boot fallback", "not used" };
+    GString *g = g_string_new("Plugged into the dongle:");
+    for (int i = 0; i < n; i++) {
+        const amv_mouse_info_t *x = &m[i].info;
+        const char *name = (m[i].has_model && m[i].model.model[0]) ? m[i].model.model : x->name;
+        g_string_append_printf(g, "\n • %s [%04x:%04x] %s", name, x->vid, x->pid, x->tier <= 4 ? TIER[x->tier] : "?");
+        if (x->tier == AMV_TIER_IGNORED) {
+            g_string_append_printf(g, " (%s)", x->reason <= 5 ? IGNORE_REASON[x->reason] : "?");
+            continue;
+        }
+        if (x->cpi) g_string_append_printf(g, " · %u CPI%s", x->cpi, x->cpi_source == AMV_CPI_USER ? " (your label)" : "");
+        if (x->device_hz) g_string_append_printf(g, " · set %u Hz", x->device_hz);
+        else g_string_append(g, " · set rate unknown");
+        g_string_append_printf(g, " · USB interval %u Hz · measured %u Hz", x->nominal_hz, x->measured_hz);
+        if (x->battery != 0xFF) g_string_append_printf(g, " · battery %u%%", x->battery);
+        if (m[i].has_caps && m[i].caps.firmware[0]) g_string_append_printf(g, " · fw %s", m[i].caps.firmware);
+        if (x->tier != AMV_TIER_KNOWN && m[i].has_model && m[i].model.state == AMV_MODEL_DRIVER)
+            g_string_append(g, " · driver present, mouse did not answer");
+    }
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_mice), g->str);
+    g_string_free(g, TRUE);
+}
+
+static void refresh_dongle_panel(void) {
+    dongle_slots_t sl;
+    bool linked = dongle_get_slots(&sl);
+    gtk_widget_set_visible(g_ui.dg_frame, linked);
+    if (!linked) return;
+
+    int sel = g_ui.dg_sel >= 0 && g_ui.dg_sel < sl.count ? g_ui.dg_sel : sl.active;
+    g_ui.updating_ui = true;
+    for (int i = 0; i < sl.count && i < AMV_NUM_SLOTS; i++) {
+        bool saved = sl.mask >> i & 1;
+        char lab[48];
+        snprintf(lab, sizeof(lab), "%s Slot %d", saved ? "●" : "○", i + 1);
+        gtk_button_set_label(GTK_BUTTON(g_ui.dg_slot_btn[i]), lab);
+        if (saved) gtk_widget_add_css_class(g_ui.dg_slot_btn[i], "slot-saved");
+        else gtk_widget_remove_css_class(g_ui.dg_slot_btn[i], "slot-saved");
+        if (i == sl.active) gtk_widget_add_css_class(g_ui.dg_slot_btn[i], "slot-active");
+        else gtk_widget_remove_css_class(g_ui.dg_slot_btn[i], "slot-active");
+        gtk_widget_set_tooltip_text(g_ui.dg_slot_btn[i],
+            saved ? (i == sl.active ? "Holds a saved profile; the dongle is working from it"
+                                    : "Holds a saved profile")
+                  : "Empty: nothing has been saved here");
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(g_ui.dg_slot_btn[i]), i == sel);
+    }
+    gtk_check_button_set_active(GTK_CHECK_BUTTON(g_ui.chk_dg_bypass), sl.bypass);
+    g_ui.updating_ui = false;
+
+    bool sel_saved = sl.mask >> sel & 1;
+    gtk_widget_set_sensitive(g_ui.btn_dg_load, !g_ui.dg_busy && sel_saved);
+    gtk_widget_set_sensitive(g_ui.btn_dg_save, !g_ui.dg_busy);
+    gtk_widget_set_sensitive(g_ui.chk_dg_bypass, !g_ui.dg_busy);
+    for (int i = 0; i < AMV_NUM_SLOTS; i++) gtk_widget_set_sensitive(g_ui.dg_slot_btn[i], !g_ui.dg_busy);
+
+    if (g_ui.dg_feedback_ticks == 0 && !g_ui.dg_busy) {
+        char msg[160];
+        snprintf(msg, sizeof(msg), "The dongle is working from slot %d%s. ● = saved on the dongle, ○ = empty.",
+                 sl.active + 1, sl.bypass ? " · BYPASS ON (all directions 1.0)" : "");
+        gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_status), msg);
+    }
+    refresh_dongle_mice();
+}
+
+typedef enum { DG_LOAD, DG_SAVE, DG_BYPASS } dg_kind_t;
+typedef struct { dg_kind_t kind; int arg; int status; } dg_job_t;
+
+static gboolean on_dg_job_done(gpointer data) {
+    dg_job_t *j = data;
+    g_ui.dg_busy = false;
+    char msg[160];
+    if (j->status == AMV_ST_OK) {
+        switch (j->kind) {
+        case DG_LOAD:   snprintf(msg, sizeof(msg), "✅ Loaded slot %d; the radar shows its weights", j->arg + 1); g_ui.dg_sel = -1; break;
+        case DG_SAVE:   snprintf(msg, sizeof(msg), "💾 Saved the weights in effect to slot %d", j->arg + 1); g_ui.dg_sel = -1; break;
+        case DG_BYPASS: snprintf(msg, sizeof(msg), j->arg ? "⏸ Bypass on: all directions 1.0, profile kept" : "▶ Bypass off: your profile is active"); break;
+        }
+    } else if (j->status == AMV_ST_EMPTY) {
+        snprintf(msg, sizeof(msg), "⚠️ Slot %d is empty: nothing was ever saved there", j->arg + 1);
+    } else if (j->status < 0) {
+        snprintf(msg, sizeof(msg), "❌ The dongle did not answer (unplugged, or busy)");
+    } else {
+        snprintf(msg, sizeof(msg), "❌ The dongle refused it (status %d)", j->status);
+    }
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_status), msg);
+    g_ui.dg_feedback_ticks = 30;      /* keep the message for about 3 s */
+    g_free(j);
+    refresh_dongle_panel();
+    sync_ui_from_state();
+    return G_SOURCE_REMOVE;
+}
+
+static gpointer dg_job_thread(gpointer data) {
+    dg_job_t *j = data;
+    switch (j->kind) {
+    case DG_LOAD:   j->status = dongle_slot_load((uint8_t)j->arg); break;
+    case DG_SAVE:   j->status = dongle_slot_save((uint8_t)j->arg); break;
+    case DG_BYPASS: j->status = dongle_set_bypass(j->arg != 0); break;
+    }
+    g_idle_add(on_dg_job_done, j);
+    return NULL;
+}
+
+static void dg_submit(dg_kind_t kind, int arg) {
+    if (g_ui.dg_busy) return;
+    dg_job_t *j = g_new0(dg_job_t, 1);
+    j->kind = kind;
+    j->arg = arg;
+    g_ui.dg_busy = true;
+    g_ui.dg_feedback_ticks = 0;
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_status), "⏳ Talking to the dongle...");
+    refresh_dongle_panel();
+    g_thread_unref(g_thread_new("dongle-io", dg_job_thread, j));
+}
+
+static int dg_selected(void) {
+    dongle_slots_t sl;
+    if (!dongle_get_slots(&sl)) return 0;
+    return g_ui.dg_sel >= 0 && g_ui.dg_sel < sl.count ? g_ui.dg_sel : sl.active;
+}
+
+static void on_dg_slot_toggled(GtkToggleButton *btn, gpointer user_data) {
+    if (g_ui.updating_ui || !gtk_toggle_button_get_active(btn)) return;
+    g_ui.dg_sel = GPOINTER_TO_INT(user_data);
+    refresh_dongle_panel();
+}
+
+static void on_dg_load_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn; (void)user_data;
+    dg_submit(DG_LOAD, dg_selected());
+}
+
+static void on_dg_overwrite_answer(GObject *src, GAsyncResult *res, gpointer data) {
+    GError *err = NULL;
+    int choice = gtk_alert_dialog_choose_finish(GTK_ALERT_DIALOG(src), res, &err);
+    if (err) g_error_free(err);               /* dismissed */
+    else if (choice == 1) dg_submit(DG_SAVE, GPOINTER_TO_INT(data));
+}
+
+static void on_dg_save_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn; (void)user_data;
+    dongle_slots_t sl;
+    if (!dongle_get_slots(&sl)) return;
+    int sel = dg_selected();
+    /* Saving over the slot the dongle already works from is routine (it auto-saves there); any
+     * other filled slot is somebody's stored profile: ask first, as the Studio does. */
+    if ((sl.mask >> sel & 1) && sel != sl.active) {
+        char title[64];
+        snprintf(title, sizeof(title), "Overwrite slot %d?", sel + 1);
+        GtkAlertDialog *dlg = gtk_alert_dialog_new("%s", title);
+        gtk_alert_dialog_set_detail(dlg, "It already holds a saved profile. Saving replaces it with the weights now in effect.");
+        const char *buttons[] = { "Cancel", "Overwrite", NULL };
+        gtk_alert_dialog_set_buttons(dlg, buttons);
+        gtk_alert_dialog_set_cancel_button(dlg, 0);
+        gtk_alert_dialog_set_default_button(dlg, 0);
+        gtk_alert_dialog_choose(dlg, GTK_WINDOW(g_ui.window), NULL, on_dg_overwrite_answer, GINT_TO_POINTER(sel));
+        g_object_unref(dlg);
+        return;
+    }
+    dg_submit(DG_SAVE, sel);
+}
+
+static void on_dg_bypass_toggled(GtkCheckButton *btn, gpointer user_data) {
+    (void)user_data;
+    if (g_ui.updating_ui) return;
+    dg_submit(DG_BYPASS, gtk_check_button_get_active(btn) ? 1 : 0);
+}
+
 /* Periodic 100ms UI Refresh Timer (reads lock-free atomics & telemetry mutex) */
 static gboolean on_ui_tick(gpointer user_data) {
     (void)user_data;
@@ -983,16 +1265,44 @@ static gboolean on_ui_tick(gpointer user_data) {
     /* Follow hotplug / device switches: re-query hardware when the grabbed mouse changes */
     int avid = atomic_load(&g_state.active_vid), apid = atomic_load(&g_state.active_pid);
     uint32_t mrev = atomic_load_explicit(&g_state.dongle_mice_rev, memory_order_relaxed);
+    bool mrev_changed_for_panel = false;
     if (avid != g_ui.last_active_vid || apid != g_ui.last_active_pid || grabbed != g_ui.last_grabbed ||
         mrev != g_ui.last_mice_rev) {
+        mrev_changed_for_panel = mrev != g_ui.last_mice_rev;
         g_ui.last_mice_rev = mrev;
         g_ui.last_active_vid = avid;
         g_ui.last_active_pid = apid;
         g_ui.last_grabbed = grabbed;
         refresh_hardware_widgets();
     }
+    uint32_t srev = atomic_load_explicit(&g_state.dongle_slots_rev, memory_order_relaxed);
+    if (srev != g_ui.last_slots_rev) {
+        g_ui.last_slots_rev = srev;
+        refresh_dongle_panel();
+    } else if (mrev_changed_for_panel) {
+        refresh_dongle_mice();
+    }
+    if (g_ui.dg_feedback_ticks > 0 && --g_ui.dg_feedback_ticks == 0) refresh_dongle_panel();
+    if (g_ui.faf_feedback_ticks > 0) {
+        if (--g_ui.faf_feedback_ticks == 0) {
+            refresh_faf_install_widgets();
+        }
+    }
     if (++g_ui.tick_count % 20 == 0) {
         rescan_devices(false);
+        faf_install_info_t faf_info;
+        if (faf_install_detect(&faf_info) &&
+            (faf_info.state == FAF_INSTALL_NEEDS_REPAIR || faf_info.state == FAF_INSTALL_OUTDATED)) {
+            char msg[512], status[600];
+            if (faf_install_apply(msg, sizeof(msg))) {
+                snprintf(status, sizeof(status), "🔄 Auto-repaired: %s", msg);
+                gtk_label_set_text(GTK_LABEL(g_ui.lbl_profile_status), status);
+                gtk_widget_set_tooltip_text(g_ui.lbl_profile_status, status);
+            }
+            refresh_faf_install_widgets();
+        } else if (g_ui.faf_feedback_ticks == 0) {
+            refresh_faf_install_widgets();
+        }
     }
 
     pthread_mutex_lock(&g_state.telemetry_mutex);
@@ -1151,10 +1461,14 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
 
     g_ui.lbl_mouse_ident = gtk_label_new("🖱️ Detecting Mouse...");
     gtk_widget_set_halign(g_ui.lbl_mouse_ident, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(g_ui.lbl_mouse_ident, TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(g_ui.lbl_mouse_ident), PANGO_ELLIPSIZE_END);
     gtk_box_append(GTK_BOX(hw_vbox), g_ui.lbl_mouse_ident);
 
     g_ui.lbl_rt_status = gtk_label_new("🟢 RT Engine: Initializing...");
     gtk_widget_set_halign(g_ui.lbl_rt_status, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(g_ui.lbl_rt_status, TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(g_ui.lbl_rt_status), PANGO_ELLIPSIZE_END);
     gtk_box_append(GTK_BOX(hw_vbox), g_ui.lbl_rt_status);
 
     GtkWidget *badge_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -1178,6 +1492,16 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_add_css_class(g_ui.badge_rssi, "badge-amber");
     gtk_box_append(GTK_BOX(badge_hbox), g_ui.badge_rssi);
     gtk_box_append(GTK_BOX(hw_vbox), badge_hbox);
+
+    /* Shown only when a mouse behind the dongle has a driver but did not answer it */
+    g_ui.lbl_dg_warn = gtk_label_new("");
+    gtk_widget_add_css_class(g_ui.lbl_dg_warn, "dg-warn");
+    gtk_widget_set_halign(g_ui.lbl_dg_warn, GTK_ALIGN_START);
+    gtk_label_set_wrap(GTK_LABEL(g_ui.lbl_dg_warn), TRUE);
+    gtk_label_set_xalign(GTK_LABEL(g_ui.lbl_dg_warn), 0.0f);
+    gtk_label_set_max_width_chars(GTK_LABEL(g_ui.lbl_dg_warn), 90);
+    gtk_widget_set_visible(g_ui.lbl_dg_warn, FALSE);
+    gtk_box_append(GTK_BOX(hw_vbox), g_ui.lbl_dg_warn);
 
     GtkWidget *cpi_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     gtk_box_append(GTK_BOX(cpi_hbox), gtk_label_new("Locked Sensor CPI:"));
@@ -1204,6 +1528,55 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     g_signal_connect(btn_refresh, "clicked", G_CALLBACK(on_refresh_hw_clicked), NULL);
     gtk_box_append(GTK_BOX(cpi_hbox), btn_refresh);
     gtk_box_append(GTK_BOX(hw_vbox), cpi_hbox);
+
+    /* 1b. AnyMouse dongle: profiles stored on the device (shown while a dongle is linked) */
+    g_ui.dg_frame = gtk_frame_new("AnyMouse Dongle · Profiles Stored on the Device");
+    GtkWidget *dg_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_frame_set_child(GTK_FRAME(g_ui.dg_frame), dg_vbox);
+    g_ui.dg_sel = -1;
+
+    GtkWidget *dg_slots = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    for (int i = 0; i < AMV_NUM_SLOTS; i++) {
+        g_ui.dg_slot_btn[i] = gtk_toggle_button_new_with_label("○ Slot");
+        if (i > 0) gtk_toggle_button_set_group(GTK_TOGGLE_BUTTON(g_ui.dg_slot_btn[i]), GTK_TOGGLE_BUTTON(g_ui.dg_slot_btn[0]));
+        gtk_widget_set_hexpand(g_ui.dg_slot_btn[i], TRUE);
+        g_signal_connect(g_ui.dg_slot_btn[i], "toggled", G_CALLBACK(on_dg_slot_toggled), GINT_TO_POINTER(i));
+        gtk_box_append(GTK_BOX(dg_slots), g_ui.dg_slot_btn[i]);
+    }
+    gtk_box_append(GTK_BOX(dg_vbox), dg_slots);
+
+    GtkWidget *dg_actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    g_ui.btn_dg_load = gtk_button_new_with_label("📂 Load slot");
+    gtk_widget_set_tooltip_text(g_ui.btn_dg_load, "Make the selected slot's saved weights the ones in effect (on the dongle and in the radar)");
+    g_signal_connect(g_ui.btn_dg_load, "clicked", G_CALLBACK(on_dg_load_clicked), NULL);
+    gtk_box_append(GTK_BOX(dg_actions), g_ui.btn_dg_load);
+    g_ui.btn_dg_save = gtk_button_new_with_label("💾 Save current to slot");
+    gtk_widget_set_tooltip_text(g_ui.btn_dg_save, "Store the weights now in effect in the selected slot and make it the active one");
+    g_signal_connect(g_ui.btn_dg_save, "clicked", G_CALLBACK(on_dg_save_clicked), NULL);
+    gtk_box_append(GTK_BOX(dg_actions), g_ui.btn_dg_save);
+    g_ui.chk_dg_bypass = gtk_check_button_new_with_label("Bypass (all directions 1.0)");
+    gtk_widget_set_tooltip_text(g_ui.chk_dg_bypass, "Disables the vectoring without touching the saved profile. Not saved: it resets when the dongle powers up.");
+    g_signal_connect(g_ui.chk_dg_bypass, "toggled", G_CALLBACK(on_dg_bypass_toggled), NULL);
+    gtk_box_append(GTK_BOX(dg_actions), g_ui.chk_dg_bypass);
+    gtk_box_append(GTK_BOX(dg_vbox), dg_actions);
+
+    g_ui.lbl_dg_status = gtk_label_new("");
+    gtk_widget_set_halign(g_ui.lbl_dg_status, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(g_ui.lbl_dg_status, TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(g_ui.lbl_dg_status), PANGO_ELLIPSIZE_END);
+    gtk_box_append(GTK_BOX(dg_vbox), g_ui.lbl_dg_status);
+
+    g_ui.lbl_dg_mice = gtk_label_new("");
+    gtk_widget_add_css_class(g_ui.lbl_dg_mice, "dg-mice");
+    gtk_widget_set_halign(g_ui.lbl_dg_mice, GTK_ALIGN_START);
+    gtk_label_set_xalign(GTK_LABEL(g_ui.lbl_dg_mice), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(g_ui.lbl_dg_mice), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(g_ui.lbl_dg_mice), 100);
+    gtk_label_set_selectable(GTK_LABEL(g_ui.lbl_dg_mice), TRUE);
+    gtk_box_append(GTK_BOX(dg_vbox), g_ui.lbl_dg_mice);
+
+    gtk_widget_set_visible(g_ui.dg_frame, FALSE);        /* until a dongle links */
+    gtk_box_append(GTK_BOX(left_vbox), g_ui.dg_frame);
 
     /* 2. Interactive Polar Radar Chart Frame */
     GtkWidget *radar_frame = gtk_frame_new("Polar Anisotropic Sensitivity Map (Drag Handles · Yellow=P₁, Green=Target T)");
@@ -1396,6 +1769,9 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(bot_hbox), btn_load);
 
     g_ui.lbl_profile_status = gtk_label_new("⚡ Direct Shared-Memory Atomic Engine");
+    gtk_widget_set_halign(g_ui.lbl_profile_status, GTK_ALIGN_START);
+    gtk_widget_set_hexpand(g_ui.lbl_profile_status, TRUE);
+    gtk_label_set_ellipsize(GTK_LABEL(g_ui.lbl_profile_status), PANGO_ELLIPSIZE_END);
     gtk_widget_add_css_class(g_ui.lbl_profile_status, "badge-green");
     gtk_box_append(GTK_BOX(bot_hbox), g_ui.lbl_profile_status);
     gtk_box_append(GTK_BOX(right_vbox), bot_hbox);

@@ -47,13 +47,23 @@ typedef struct {
     uint16_t cpi, hz;       /* the Razer behind the fake dongle */
     uint16_t user_cpi;      /* label for the generic mouse */
     int mouse_sets;
+    uint8_t active;         /* active profile slot */
+    uint8_t slot_mask;      /* slots holding a saved profile */
+    float slot_w[AMV_NUM_SLOTS][8];
+    int saves, loads;
+    bool ulx_silent;        /* mouse 0 is a Finalmouse whose driver did not get an answer (generic tier, 8 kHz interval) */
 } fake_t;
 
 /* Two things behind the fake dongle: a verified Razer (known protocol) and a keyboard (ignored) */
 static void fake_mouse_info(const fake_t *f, uint8_t i, amv_mouse_info_t *o) {
     memset(o, 0, sizeof *o);
     o->index = i; o->count = 2; o->battery = 0xFF; o->speed = 1;
-    if (i == 0) {
+    if (i == 0 && f->ulx_silent) {
+        o->tier = AMV_TIER_GENERIC; o->flags = AMV_MF_WHEEL; o->speed = 2;
+        o->vid = 0x361D; o->pid = 0x0100; o->nominal_hz = 8000; o->measured_hz = 7850; o->device_hz = 0; o->cpi = 0;
+        o->cpi_source = AMV_CPI_NONE; o->num_buttons = 5; o->x_bits = 16; o->driver = AMV_DRV_NONE; o->uid = 1;
+        snprintf(o->name, sizeof o->name, "UltralightX dongle");
+    } else if (i == 0) {
         o->tier = AMV_TIER_KNOWN; o->flags = AMV_MF_WHEEL | AMV_MF_VERIFIED | AMV_MF_CAN_SET_CPI | AMV_MF_CAN_SET_RATE;
         o->vid = 0x1532; o->pid = 0x0086; o->nominal_hz = 1000; o->measured_hz = 733; o->device_hz = f->hz; o->cpi = f->cpi;
         o->cpi_source = AMV_CPI_DEVICE; o->battery = 100; o->num_buttons = 5; o->x_bits = 16; o->driver = AMV_DRV_RAZER; o->uid = 1;
@@ -74,7 +84,7 @@ static void fake_state(fake_t *f, amv_state_payload_t *p) {
     p->gen = f->gen;
     memcpy(p->w, f->w, sizeof(p->w));
     p->bypass = f->bypass;
-    p->active_slot = 0;
+    p->active_slot = f->active;
 }
 
 /* Another client changed the dongle: announce it as the firmware does */
@@ -160,6 +170,62 @@ static void *fake_main(void *arg) {
             fake_state(f, &st);
             fake_send(f, h->cmd, h->seq, AMV_ST_OK, ver, &st, sizeof(st));
             break;
+        case AMV_CMD_GET_SLOTS:
+            fake_send(f, h->cmd, h->seq, AMV_ST_OK, ver, &f->slot_mask, 1);
+            break;
+        case AMV_CMD_SAVE_PROFILE:
+        case AMV_CMD_LOAD_PROFILE: {
+            uint8_t slot = pl[0];
+            if (slot >= AMV_NUM_SLOTS) { fake_state(f, &st); fake_send(f, h->cmd, h->seq, AMV_ST_BAD_SLOT, ver, &st, sizeof st); break; }
+            if (h->cmd == AMV_CMD_SAVE_PROFILE) {
+                memcpy(f->slot_w[slot], f->w, sizeof f->w);
+                f->slot_mask |= (uint8_t)(1u << slot);
+                f->active = slot;
+                f->saves++;
+            } else if (!(f->slot_mask >> slot & 1)) {
+                fake_state(f, &st);
+                fake_send(f, h->cmd, h->seq, AMV_ST_EMPTY, ver, &st, sizeof st);
+                break;
+            } else {
+                memcpy(f->w, f->slot_w[slot], sizeof f->w);
+                f->gen++;
+                f->active = slot;
+                f->loads++;
+                amv_event_payload_t ev;
+                fake_state(f, &ev.st);
+                ev.source = AMV_SRC_LOAD;
+                fake_send(f, AMV_CMD_EVENT_STATE, 0, AMV_ST_OK, ver, &ev, sizeof ev);   /* the firmware announces first */
+            }
+            fake_state(f, &st);
+            fake_send(f, h->cmd, h->seq, AMV_ST_OK, ver, &st, sizeof st);
+            break;
+        }
+        case AMV_CMD_GET_MOUSE_SETTINGS: {
+            if (pl[0] > 1) { fake_send(f, h->cmd, h->seq, AMV_ST_NO_MOUSE, ver, NULL, 0); break; }
+            amv_settings_rep_t r = { .index = pl[0] };
+            if (pl[0] != 0 || f->ulx_silent) {      /* tiers 2 and 3 only expose the CPI label */
+                r.count = 1;
+                r.s[0] = (amv_setting_t){ AMV_SET_CPI, AMV_SETF_READABLE | AMV_SETF_WRITABLE, 0 };
+            } else {
+                r.link = AMV_LINK_WIRED;
+                r.count = 5;
+                r.s[0] = (amv_setting_t){ AMV_SET_CPI, AMV_SETF_READABLE | AMV_SETF_WRITABLE, f->cpi };
+                r.s[1] = (amv_setting_t){ AMV_SET_POLLING, AMV_SETF_READABLE | AMV_SETF_WRITABLE, f->hz };
+                r.s[2] = (amv_setting_t){ AMV_SET_MOTION_SYNC, AMV_SETF_READABLE, 1 };
+                r.s[3] = (amv_setting_t){ AMV_SET_BATTERY, AMV_SETF_READABLE, 100 };
+                r.s[4] = (amv_setting_t){ AMV_SET_LINK, AMV_SETF_READABLE, AMV_LINK_CONNECTED };
+            }
+            fake_send(f, h->cmd, h->seq, AMV_ST_OK, ver, &r, (uint8_t)(4 + 4 * r.count));
+            break;
+        }
+        case AMV_CMD_GET_MOUSE_MODEL: {
+            if (pl[0] != 0) { fake_send(f, h->cmd, h->seq, AMV_ST_UNSUPPORTED, ver, NULL, 0); break; }
+            amv_mouse_model_t r = { .index = 0, .state = AMV_MODEL_DRIVER };
+            if (f->ulx_silent) { snprintf(r.brand, sizeof r.brand, "Finalmouse"); snprintf(r.model, sizeof r.model, "UltralightX"); }
+            else { snprintf(r.brand, sizeof r.brand, "Razer"); snprintf(r.model, sizeof r.model, "Basilisk Ultimate"); }
+            fake_send(f, h->cmd, h->seq, AMV_ST_OK, ver, &r, sizeof r);
+            break;
+        }
         case AMV_CMD_GET_MOUSE: {
             amv_mouse_info_t m;
             if (pl[0] > 1) { uint8_t r[2] = { pl[0], 2 }; fake_send(f, h->cmd, h->seq, AMV_ST_NO_MOUSE, ver, r, 2); break; }
@@ -212,6 +278,10 @@ static int fake_start(fake_t *f, fake_mode_t mode) {
     f->cpi = 1600;
     f->hz = 1000;
     for (int i = 0; i < 8; i++) f->w[i] = 1.0f + 0.1f * (float)i;
+    /* slot 1 holds a profile that differs from the weights in effect; slots 0, 2 and 3 are empty */
+    f->slot_mask = 1u << 1;
+    for (int i = 0; i < 8; i++) f->slot_w[1][i] = 2.0f - 0.1f * (float)i;
+    f->active = 0;
     pthread_create(&f->tid, NULL, fake_main, f);
     fcntl(sv[0], F_SETFL, O_NONBLOCK);
     return sv[0];
@@ -407,7 +477,7 @@ static void test_mice(void) {
     CHECK(write_through(&l, 0, false, 777) == AMV_ST_BAD_VALUE && f.hz == 500, "a rate the mouse does not accept comes back as BAD_VALUE, nothing changed");
     CHECK(write_through(&l, 0, true, 50) == AMV_ST_BAD_VALUE && f.cpi == 3200, "a CPI out of range comes back as BAD_VALUE");
     CHECK(write_through(&l, 1, true, 800) == AMV_ST_UNSUPPORTED, "writing to an ignored device is refused");
-    CHECK(first_mouse_index() == 0, "the desktop panel targets the first used mouse (skipping ignored devices)");
+    CHECK(dongle_first_mouse_index() == 0, "the desktop panel targets the first used mouse (skipping ignored devices)");
 
     /* Old firmware: GET_MOUSE answers BAD_CMD and the app reports 'not available' */
     fake_t g;
@@ -420,6 +490,171 @@ static void test_mice(void) {
     CHECK(dongle_get_mice(m, MAX_MICE) == -1 && !dongle_fill_hw_status(&hw), "no link: no mice, hardware panel falls back to direct hidraw");
     CHECK(dongle_mouse_set(0, true, 800) == -1, "a write with no link fails at once");
     fake_stop(&f, l.fd);
+}
+
+
+typedef struct { int (*fn)(int); int arg; int out; } call_args_t;
+
+static void *call_thread(void *arg) {
+    call_args_t *c = arg;
+    c->out = c->fn(c->arg);
+    return NULL;
+}
+
+/* Run a dongle_* request from another thread and execute it here, the way the dongle thread does */
+static int run_through(link_t *l, int (*fn)(int), int arg) {
+    call_args_t c = { fn, arg, 99 };
+    pthread_t t;
+    pthread_create(&t, NULL, call_thread, &c);
+    for (int i = 0; i < 400; i++) {
+        pthread_mutex_lock(&s_job_mtx);
+        bool pending = s_job.pending && !s_job.done;
+        pthread_mutex_unlock(&s_job_mtx);
+        if (pending) break;
+        usleep(5000);
+    }
+    run_job(l);
+    pthread_join(t, NULL);
+    return c.out;
+}
+
+static int w_load(int slot)  { return dongle_slot_load((uint8_t)slot); }
+static int w_save(int slot)  { return dongle_slot_save((uint8_t)slot); }
+static int w_bypass(int on)  { return dongle_set_bypass(on != 0); }
+
+static void test_slots(void) {
+    printf("profile slots on the dongle\n");
+    fake_t f;
+    link_t l = { .fd = fake_start(&f, FAKE_GOOD), .sync = true };
+    dongle_status_t st = { 0 };
+    handshake(&l, &st);
+    st.link = DONGLE_LINKED;
+    publish(&st, "fake");
+    forget_slots();
+    float w[8];
+    for (int i = 0; i < 8; i++) w[i] = 1.0f + 0.1f * (float)i;
+    set_local(w);
+    CHECK(fetch_state(&l, true) == 1, "linked and in sync");
+
+    dongle_slots_t sl;
+    CHECK(!dongle_get_slots(&sl), "slot mask unknown until it has been read");
+    uint32_t rev = atomic_load(&g_state.dongle_slots_rev);
+    CHECK(fetch_slots(&l) == 0 && dongle_get_slots(&sl) && sl.count == AMV_NUM_SLOTS && sl.mask == 0x02 && sl.active == 0,
+          "mask read: only slot 2 holds a profile, slot 1 active");
+    CHECK(atomic_load(&g_state.dongle_slots_rev) != rev, "GUI woken by the new mask");
+    rev = atomic_load(&g_state.dongle_slots_rev);
+    CHECK(fetch_slots(&l) == 0 && atomic_load(&g_state.dongle_slots_rev) == rev, "an unchanged mask does not wake the GUI");
+
+    /* Load the stored profile: the dongle's weights replace the engine's, nothing is pushed back */
+    int sets0 = f.sets;
+    CHECK(run_through(&l, w_load, 1) == AMV_ST_OK && f.loads == 1, "loading slot 2 reached the dongle");
+    get_local(w);
+    CHECK(w[0] == 2.0f && w[7] == 2.0f - 0.7f, "the engine now runs the loaded weights");
+    CHECK(dongle_get_slots(&sl) && sl.active == 1, "active slot follows the load");
+    CHECK(sync_step(&l) == 0 && f.sets == sets0, "the loaded weights are not echoed back to the dongle");
+    CHECK(atomic_load(&g_state.dongle_slots_rev) != rev, "GUI woken by the new active slot");
+
+    /* Loading an empty slot changes nothing */
+    float before[8];
+    get_local(before);
+    CHECK(run_through(&l, w_load, 3) == AMV_ST_EMPTY && f.loads == 1, "an empty slot is reported as EMPTY");
+    get_local(w);
+    CHECK(memcmp(before, w, sizeof w) == 0 && dongle_get_slots(&sl) && sl.active == 1, "weights and active slot untouched");
+    CHECK(run_through(&l, w_load, 9) == AMV_ST_BAD_SLOT, "a slot beyond the table is refused");
+
+    /* Save: an unsent local edit must reach the dongle first, so the slot holds what the user sees */
+    w[3] = 1.55f;
+    set_local(w);
+    sets0 = f.sets;
+    CHECK(run_through(&l, w_save, 0) == AMV_ST_OK && f.saves == 1, "saving to slot 1 reached the dongle");
+    CHECK(f.sets == sets0 + 1 && f.slot_w[0][3] == 1.55f, "the pending edit was sent before the save: the slot holds it");
+    CHECK(dongle_get_slots(&sl) && sl.mask == 0x03 && sl.active == 0, "mask now shows slots 1 and 2, slot 1 active");
+    CHECK(f.w[3] == 1.55f, "saving did not touch the weights in effect");
+
+    CHECK(run_through(&l, w_bypass, 1) == AMV_ST_OK && f.bypass == 1 && dongle_get_slots(&sl) && sl.bypass, "bypass on, shown in the slot view");
+    CHECK(run_through(&l, w_bypass, 0) == AMV_ST_OK && f.bypass == 0 && dongle_get_slots(&sl) && !sl.bypass, "bypass off");
+
+    /* A one-shot CLI process holds default weights: saving must never push them */
+    link_t cli = { .fd = l.fd, .sync = false };
+    memcpy(cli.synced, f.w, sizeof f.w);
+    start_seq(&cli);
+    float defaults[8] = { 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f, 0.25f };
+    set_local(defaults);
+    sets0 = f.sets;
+    int status = -1;
+    CHECK(run_state_cmd(&cli, AMV_CMD_SAVE_PROFILE, 2, &status) == 0 && status == AMV_ST_OK, "CLI save to slot 3 accepted");
+    CHECK(f.sets == sets0 && f.slot_w[2][3] == 1.55f, "the CLI's own default weights never reached the dongle");
+
+    /* Unplug clears the view */
+    publish(&(dongle_status_t){ 0 }, NULL);
+    forget_slots();
+    CHECK(!dongle_get_slots(&sl), "no link: no slot view");
+    CHECK(dongle_slot_load(0) == -1 && dongle_slot_save(0) == -1 && dongle_set_bypass(true) == -1, "requests with no link fail at once");
+    fake_stop(&f, l.fd);
+}
+
+static void test_mouse_details(void) {
+    printf("mouse details: settings, catalog name, honest polling rate\n");
+    fake_t f;
+    link_t l = { .fd = fake_start(&f, FAKE_GOOD), .sync = true };
+    dongle_status_t st = { 0 };
+    handshake(&l, &st);
+    st.link = DONGLE_LINKED;
+    publish(&st, "fake");
+
+    CHECK(fetch_mice(&l) == 0, "list fetched");
+    dongle_mouse_t m[MAX_MICE];
+    int n = dongle_get_mice(m, MAX_MICE);
+    CHECK(n == 2 && m[0].has_settings && m[0].settings.count == 5 && m[0].has_model, "known mouse comes with settings and its catalog name");
+    CHECK(!m[1].has_settings && !m[1].has_model, "the ignored keyboard is not asked");
+    mouse_hw_status_t hw;
+    CHECK(dongle_fill_hw_status(&hw) && hw.motion_sync_known && hw.motion_sync && !hw.can_set_motion_sync, "Motion Sync read from the settings (read-only here)");
+    CHECK(hw.battery_pct == 100 && hw.link == AMV_LINK_CONNECTED && !hw.driver_error, "battery and link state read; no driver error");
+    CHECK(!strcmp(hw.brand, "Razer") && !strcmp(hw.model, "Basilisk Ultimate"), "catalog name used for the display");
+    CHECK(hw.polling_rate_hz == 1000 && hw.nominal_hz == 1000 && hw.measured_hz == 733, "rate set on the mouse, USB interval and measured rate kept apart");
+
+    /* The real-world case: a Finalmouse whose driver got no answer. Nothing may be invented. */
+    fake_stop(&f, l.fd);
+    fake_t g;
+    link_t l2 = { .fd = fake_start(&g, FAKE_GOOD), .sync = true };
+    g.ulx_silent = true;
+    CHECK(fetch_mice(&l2) == 0, "list fetched from a dongle holding a silent Finalmouse");
+    CHECK(dongle_get_mice(m, MAX_MICE) == 2 && m[0].info.tier == AMV_TIER_GENERIC, "it is a generic-tier entry");
+    CHECK(dongle_fill_hw_status(&hw), "hardware panel still gets it");
+    CHECK(hw.polling_rate_hz == 0, "polling rate is NOT the 8000 Hz USB interval: unknown (0)");
+    CHECK(hw.nominal_hz == 8000 && hw.measured_hz == 7850, "the interval and the measured rate are available separately");
+    CHECK(!hw.motion_sync_known && hw.link == -1 && hw.battery_pct == 0, "Motion Sync, link and battery are unknown, not zero or off");
+    CHECK(hw.driver_error, "flagged: the dongle has a Finalmouse driver and the mouse did not answer");
+    CHECK(!strcmp(hw.brand, "Finalmouse") && !strcmp(hw.model, "UltralightX"), "named from the catalog, not 'UltralightX dongle'");
+    fake_stop(&g, l2.fd);
+    publish(&(dongle_status_t){ 0 }, NULL);
+}
+
+static void test_pc_link_speed(void) {
+    printf("PC link ceiling from the bus speed\n");
+    char root[] = "/tmp/amv_usbspeed_XXXXXX";
+    if (!mkdtemp(root)) { perror("mkdtemp"); exit(2); }
+    char dir[PATH_MAX];
+    const char *old = s_usb_devices;
+    s_usb_devices = root;
+    static const struct { const char *dev, *speed; int hz; } cases[] = {
+        { "5-2", "12\n", 1000 }, { "5-3", "480\n", 8000 }, { "5-4", "1.5\n", 125 }, { "5-5", "5000\n", 8000 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        snprintf(dir, sizeof dir, "%s/%s", root, cases[i].dev);
+        mkdir(dir, 0755);
+        strncat(dir, "/speed", sizeof dir - strlen(dir) - 1);
+        FILE *fp = fopen(dir, "w");
+        if (fp) { fputs(cases[i].speed, fp); fclose(fp); }
+        char parent[64];
+        snprintf(parent, sizeof parent, "usb5/%s", cases[i].dev);
+        CHECK(pc_link_hz_of(parent) == cases[i].hz, "bus speed of device %s -> ceiling %d reports/s", cases[i].dev, cases[i].hz);
+    }
+    CHECK(pc_link_hz_of("usb5/9-9") == 0 && pc_link_hz_of("") == 0, "unknown device or empty parent: 0 (unknown)");
+    s_usb_devices = old;
+    char cmd[PATH_MAX + 16];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", root);
+    if (system(cmd) != 0) { /* best effort */ }
 }
 
 static void mkdirs(const char *path) {
@@ -506,6 +741,9 @@ int main(void) {
     test_handshake();
     test_sync();
     test_mice();
+    test_slots();
+    test_mouse_details();
+    test_pc_link_speed();
     test_guard();
     printf(s_fail ? "\n%d check(s) FAILED\n" : "\nAll checks passed\n", s_fail);
     return s_fail ? 1 : 0;

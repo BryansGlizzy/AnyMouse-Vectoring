@@ -25,6 +25,7 @@
 #include <Arduino.h>
 #include <USBHost_t36.h>
 #include "amv_octant.h"
+#include "amv_vendor_usb.h"
 
 // ---------------------------------------------------------------------------------------------------------
 // shared state (written in the host interrupt, read by the main loop)
@@ -437,6 +438,8 @@ void loop() {
     pump_tx();
     host.Task();
     pump_tx();
+    uint8_t vendor_frame[64];
+    if (amv_vendor_recv(vendor_frame)) amv_vendor_send(vendor_frame);
     poll_console();
     uint32_t now = millis();
     if (now - last_stats_ms >= 1000) {

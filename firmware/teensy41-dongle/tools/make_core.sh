@@ -108,6 +108,7 @@ s = c.read_text()
 old = "if (systick_millis_count - wait_begin_at > timeout) return 0;"
 assert s.count(old) == 1, "RawHID send timeout check not found"
 s = s.replace(old, "if (!timeout || systick_millis_count - wait_begin_at > timeout) return 0;", 1)
+s += "\nint usb_rawhid_tx_idle(void) {\n#ifdef RAWHID_INTERFACE\n    for (int i = 0; i < TX_NUM; ++i) if (usb_transfer_status(tx_transfer + i) & 0x80) return 0;\n#endif\n    return 1;\n}\n"
 c.write_text(s)
 print("patched teensy4 core")
 PY

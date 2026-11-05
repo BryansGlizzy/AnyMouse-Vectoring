@@ -26,6 +26,8 @@
 #include <USBHost_t36.h>
 #include "amv_octant.h"
 #include "amv_vendor_usb.h"
+#include "amv_store_teensy.h"
+extern "C" int usb_rawhid_tx_idle(void);
 
 // ---------------------------------------------------------------------------------------------------------
 // shared state (written in the host interrupt, read by the main loop)
@@ -299,6 +301,30 @@ static void pump_tx() {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// protocol platform: all callbacks run on the loop thread.
+static uint32_t vendor_loop_max;
+static void apply_state(const float w[8], bool bypass) {
+    __disable_irq();
+    if (memcmp(g_w, w, sizeof g_w) || g_bypass != bypass) g_state = {};
+    memcpy(g_w, w, sizeof g_w);
+    g_bypass = bypass;
+    __enable_irq();
+}
+static void unit_id(uint8_t mac[6]) {
+    uint32_t hi = HW_OCOTP_MAC1, lo = HW_OCOTP_MAC0;
+    mac[0] = hi >> 8; mac[1] = hi;
+    mac[2] = lo >> 24; mac[3] = lo >> 16; mac[4] = lo >> 8; mac[5] = lo;
+}
+static void protocol_stats(uint8_t *p, uint8_t *len) {
+    // The wire layout is protocol counters, with no host/tx equivalents.
+    amv_stats_payload_t stats = {};
+    memcpy(p, &stats, sizeof stats); *len = sizeof stats;
+}
+static void console_request(uint8_t cmd, const void *payload, uint8_t len) {
+    uint8_t in[64] = {AMV_MAGIC0, AMV_MAGIC1, AMV_PROTO_VERSION, cmd, 0, 0, len, 0}, out[64];
+    memcpy(in + 8, payload, len);
+    amv_proto_handle(in, out, AMV_SRC_DEVICE);
+}
 // console
 // ---------------------------------------------------------------------------------------------------------
 static bool g_periodic = true;
@@ -332,6 +358,8 @@ static void print_stats(uint32_t window_ms) {
     if (h.parse_n) Serial.printf("  report->accumulated us avg/max %.2f/%.2f", (double)h.parse_sum / h.parse_n * us_per_cyc, h.parse_max * us_per_cyc);
     if (h.scale_calls) Serial.printf("  scale %lu cyc avg / %lu max (%.2f/%.2f us)", (unsigned long)(h.scale_sum / h.scale_calls),
                                      (unsigned long)h.scale_max, (double)h.scale_sum / h.scale_calls * us_per_cyc, h.scale_max * us_per_cyc);
+    Serial.printf("  vendor-loop max %.2f us", vendor_loop_max * us_per_cyc);
+    vendor_loop_max = 0;
     Serial.printf("  %s%s\n", g_bypass ? "[bypass] " : "", selftest_until_ms ? "[selftest]" : "");
 }
 
@@ -347,6 +375,8 @@ static void handle_line(char *line) {
         case 'h': case '?': print_help(); break;
         case 'p': g_periodic = !g_periodic; Serial.printf("stats %s\n", g_periodic ? "on" : "off"); break;
         case 'i': {
+            amv_state_payload_t state; amv_proto_snapshot(&state);
+            Serial.printf("firmware 0.1.0 gen=%lu active=%u slots=0x%02X\n", (unsigned long)state.gen, state.active_slot, amv_store_teensy_ops()->valid_mask());
             Serial.printf("host port: %s", bridge.online ? "mouse claimed" : "no mouse claimed");
             if (bridge.online) Serial.printf(" (%04X:%04X)", bridge.vid, bridge.pid);
             Serial.printf("\nPORTSC1=%08lX  speed=%s  F_CPU=%lu MHz  pc link: %s\n", (unsigned long)USB2_PORTSC1,
@@ -370,14 +400,15 @@ static void handle_line(char *line) {
             Serial.printf("ITC now %d\n", v);
             break;
         }
-        case 'b': g_bypass = atoi(arg) != 0; Serial.printf("bypass %s\n", g_bypass ? "on" : "off"); break;
+        case 'b': { uint8_t b = atoi(arg) != 0; console_request(AMV_CMD_SET_BYPASS, &b, 1); } Serial.printf("bypass %s\n", g_bypass ? "on" : "off"); break;
         case 'w': {
             float v[8]; int n = 0; char *tok = strtok(arg, " ");
             while (tok && n < 8) { v[n++] = atof(tok); tok = strtok(nullptr, " "); }
             if (n == 1) for (int i = 1; i < 8; i++) v[i] = v[0];
             else if (n != 8) { Serial.println("usage: w a   or   w e ne n nw w sw s se"); break; }
             for (int i = 0; i < 8; i++) if (!(v[i] >= 0.01f && v[i] <= 5.0f)) { Serial.println("weights must be 0.01..5.0"); return; }
-            __disable_irq(); for (int i = 0; i < 8; i++) g_w[i] = v[i]; __enable_irq();
+            amv_set_weights_req_t req; req.base_gen = AMV_GEN_ANY; memcpy(req.w, v, sizeof v);
+            console_request(AMV_CMD_SET_WEIGHTS, &req, sizeof req);
             Serial.println("weights set");
             break;
         }
@@ -421,6 +452,17 @@ void setup() {
     memset(&hs, 0, sizeof(hs));
     memset(&ts, 0, sizeof(ts));
 
+    amv_plat_t plat = {};
+    plat.apply = apply_state; plat.unit_id = unit_id;
+    plat.uptime_ms = []() -> uint32_t { return millis(); };
+    plat.reboot = []() { SCB_AIRCR = 0x05FA0004; while (true) {} };
+    plat.mouse_count = []() -> uint8_t { return bridge.online ? 1 : 0; };
+    plat.get_stats = protocol_stats; plat.store = amv_store_teensy_ops();
+    amv_proto_init(&plat);
+    uint8_t slot; amv_profile_t profile;
+    if (plat.store->load_boot(&slot, &profile))
+        amv_proto_restore(slot, &profile, amv_store_boot_bypass());
+
     hid1.setRXBuffers(rxbuf[0][0], rxbuf[0][1], 255, rxbuf[0][2], rxbuf[0][3]);
     hid2.setRXBuffers(rxbuf[1][0], rxbuf[1][1], 255, rxbuf[1][2], rxbuf[1][3]);
     hid3.setRXBuffers(rxbuf[2][0], rxbuf[2][1], 255, rxbuf[2][2], rxbuf[2][3]);
@@ -435,17 +477,50 @@ void setup() {
 }
 
 void loop() {
+    uint32_t loop_start = cyc();
+    bool vendor_work = false;
     pump_tx();
     host.Task();
     pump_tx();
+    static uint8_t reply[64];
+    static bool reply_pending;
     uint8_t vendor_frame[64];
-    if (amv_vendor_recv(vendor_frame)) amv_vendor_send(vendor_frame);
+    if (!reply_pending && !amv_proto_reboot_pending() && amv_vendor_recv(vendor_frame)) {
+        vendor_work = true;
+        reply_pending = amv_proto_handle(vendor_frame, reply) != 0;
+    }
+    if (reply_pending) {
+        vendor_work = true;
+        if (amv_vendor_send(reply)) reply_pending = false;
+    }
+    if (!reply_pending && amv_proto_reboot_pending() && usb_rawhid_tx_idle())
+        amv_proto_run_deferred();
+    if (!reply_pending && amv_proto_take_event(vendor_frame)) {
+        vendor_work = true;
+        amv_vendor_send(vendor_frame); // events may drop under backpressure
+    }
     poll_console();
     uint32_t now = millis();
+    static uint32_t saved_gen = 1, dirty_since;
+    static bool dirty;
+    amv_state_payload_t state; amv_proto_snapshot(&state);
+    if (state.gen != saved_gen) {
+        saved_gen = state.gen; dirty_since = now; dirty = true;
+    }
+    if (dirty && now - dirty_since >= 2000) {
+        amv_profile_t p; memcpy(p.w, state.w, sizeof p.w);
+        if (amv_store_teensy_ops()->save_boot(state.active_slot, &p, state.bypass)) dirty = false;
+        else dirty_since = now; // bound retry frequency on backend failure
+    }
     if (now - last_stats_ms >= 1000) {
         uint32_t window = now - last_stats_ms;
         last_stats_ms = now;
         if (g_periodic && Serial.dtr()) print_stats(window);
         else { __disable_irq(); memset(&hs, 0, sizeof(hs)); memset(&ts, 0, sizeof(ts)); __enable_irq(); }
     }
+    if (vendor_work) {
+        uint32_t elapsed = cyc() - loop_start;
+        if (elapsed > vendor_loop_max) vendor_loop_max = elapsed;
+    }
+
 }

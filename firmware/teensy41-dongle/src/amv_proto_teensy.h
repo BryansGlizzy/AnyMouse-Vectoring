@@ -3,9 +3,11 @@
 #include <stddef.h>
 #include <stdint.h>
 // The shared C wire header uses the C spelling of static_assert.
+#pragma push_macro("_Static_assert")
+#undef _Static_assert
 #define _Static_assert static_assert
 #include "../../../common/amv_dongle_proto.h"
-#undef _Static_assert
+#pragma pop_macro("_Static_assert")
 #define AMV_TEENSY_FW_MAJOR 0
 #define AMV_TEENSY_FW_MINOR 1
 #define AMV_TEENSY_FW_PATCH 0
@@ -32,7 +34,10 @@ typedef struct {
 } amv_plat_t;
 // Single loop-thread API; input/output buffers may alias. Platform is copied.
 void amv_proto_init(const amv_plat_t *plat);
-size_t amv_proto_handle(const uint8_t in[64], uint8_t out[64]);
+size_t amv_proto_handle(const uint8_t in[64], uint8_t out[64], uint8_t source = AMV_SRC_HOST);
+// Loop-thread access; restore initializes boot state without bumping gen or events.
+void amv_proto_snapshot(amv_state_payload_t *out);
+void amv_proto_restore(uint8_t slot, const amv_profile_t *p, bool bypass);
 bool amv_proto_take_event(uint8_t out[64]);
 void amv_proto_notify_state(uint8_t source);
 // Call only after the REBOOT reply has been transmitted.

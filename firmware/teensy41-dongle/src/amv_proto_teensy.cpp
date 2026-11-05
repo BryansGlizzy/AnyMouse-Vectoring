@@ -55,7 +55,7 @@ void amv_proto_run_deferred() {
 uint8_t __attribute__((weak)) amv_proto_mouse_get_info(const amv_mouse_ops_t *, uint8_t index, amv_mouse_info_t *p) {
     *p={}; p->index=index; return AMV_ST_NO_MOUSE;
 }
-size_t amv_proto_handle(const uint8_t *input, uint8_t *out) {
+size_t amv_proto_handle(const uint8_t *input, uint8_t *out, uint8_t source) {
     uint8_t in[64]; memcpy(in,input,64);
     const uint8_t cmd=in[3], seq=in[4], len=in[6];
     const uint8_t *p=in+8;
@@ -85,12 +85,12 @@ size_t amv_proto_handle(const uint8_t *input, uint8_t *out) {
         uint32_t gen; float w[8]; memcpy(&gen,p,4); memcpy(w,p+4,32);
         if (!valid(w)) st(AMV_ST_BAD_VALUE);
         else if (gen!=AMV_GEN_ANY && gen!=state.gen) st(AMV_ST_STALE);
-        else { memcpy(state.w,w,32); changed(AMV_SRC_HOST); st(AMV_ST_OK); }
+        else { memcpy(state.w,w,32); changed(source); st(AMV_ST_OK); }
         break;
     }
     case AMV_CMD_SET_BYPASS:
         if (len!=1) reply(AMV_ST_BAD_LEN);
-        else { state.bypass=!!p[0]; changed(AMV_SRC_HOST); st(AMV_ST_OK); } break;
+        else { state.bypass=!!p[0]; changed(source); st(AMV_ST_OK); } break;
     case AMV_CMD_GET_STATS: {
         uint8_t data[56]={}, n=sizeof(amv_stats_payload_t);
         if (plat.get_stats) plat.get_stats(data,&n);
@@ -122,13 +122,13 @@ size_t amv_proto_handle(const uint8_t *input, uint8_t *out) {
         if (cmd==AMV_CMD_FACTORY_RESET) {
             if (!s->factory_reset()) { st(AMV_ST_STORE_ERR); break; }
             for (unsigned i=0;i<8;++i) state.w[i]=1;
-            state.bypass=0; state.active_slot=0; changed(AMV_SRC_HOST); st(AMV_ST_OK); break;
+            state.bypass=0; state.active_slot=0; changed(source); st(AMV_ST_OK); break;
         }
         if (p[0]>=AMV_NUM_SLOTS) { st(AMV_ST_BAD_SLOT); break; }
         amv_profile_t profile; memcpy(profile.w,state.w,32);
         if (cmd==AMV_CMD_SAVE_PROFILE) {
             if (!s->save(p[0],&profile)) st(AMV_ST_STORE_ERR);
-            else { if (state.active_slot!=p[0]) { state.active_slot=p[0]; changed(AMV_SRC_HOST); } st(AMV_ST_OK); }
+            else { if (state.active_slot!=p[0]) { state.active_slot=p[0]; changed(source); } st(AMV_ST_OK); }
         } else {
             if (!(s->valid_mask() & (1u<<p[0]))) st(AMV_ST_EMPTY);
             else if (!s->load(p[0],&profile) || !valid(profile.w)) st(AMV_ST_STORE_ERR);
@@ -140,4 +140,12 @@ size_t amv_proto_handle(const uint8_t *input, uint8_t *out) {
     default: reply(AMV_ST_BAD_CMD); break;
     }
     return 64;
+}
+
+void amv_proto_snapshot(amv_state_payload_t *out) { *out = state; }
+void amv_proto_restore(uint8_t slot, const amv_profile_t *p, bool bypass) {
+    if (slot >= AMV_NUM_SLOTS || !valid(p->w)) return;
+    state.active_slot = slot; state.bypass = bypass;
+    memcpy(state.w, p->w, sizeof state.w);
+    if (plat.apply) plat.apply(p->w, bypass);
 }

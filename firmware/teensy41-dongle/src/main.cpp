@@ -26,6 +26,8 @@
 #include <USBHost_t36.h>
 #include "amv_octant.h"
 #include "amv_vendor_usb.h"
+#include "amv_store_teensy.h"
+extern "C" int usb_rawhid_tx_idle(void);
 
 // ---------------------------------------------------------------------------------------------------------
 // shared state (written in the host interrupt, read by the main loop)
@@ -81,7 +83,26 @@ static inline uint32_t cyc() { return ARM_DWT_CYCCNT; }
 // ---------------------------------------------------------------------------------------------------------
 USBHost host;
 USBHub hub1(host);
-USBHIDParser hid1(host), hid2(host), hid3(host);
+// Retain endpoint metadata while the interface descriptors are available.
+class MouseParser : public USBHIDParser {
+public:
+    MouseParser(USBHost &h) : USBHIDParser(h) {}
+    uint16_t nominal=0;
+    uint8_t speed=0;
+protected:
+    bool claim(Device_t *d, int type, const uint8_t *p, uint32_t n) override {
+        if (!USBHIDParser::claim(d,type,p,n)) return false;
+        speed=d->speed; nominal=0;
+        for (uint32_t i=0; i+2<=n && p[i]>=2 && i+p[i]<=n; i+=p[i]) {
+            if (p[i+1]==5 && p[i]>=7 && (p[i+2]&0x80)) {
+                unsigned interval=p[i+6];
+                if (interval) nominal=speed==2 ? (interval<=16 ? 8000u/(1u<<(interval-1)) : 0) : 1000u/interval;
+            }
+        }
+        return true;
+    }
+};
+MouseParser hid1(host), hid2(host), hid3(host);
 
 // More than the default two receive buffers, so an 8 kHz stream survives a late interrupt.
 DMAMEM static uint8_t rxbuf[3][4][256] __attribute__((aligned(32)));
@@ -91,10 +112,48 @@ public:
     USBHIDParser *parser = nullptr;
     uint16_t vid = 0, pid = 0;
     volatile bool online = false;
+    amv_mouse_info_t info={};
+    uint8_t descriptor[928];
+    uint16_t descriptor_len=0;
+    volatile uint32_t reports=0;
+    uint16_t next_uid=0;
+
 
     hidclaim_t claim_collection(USBHIDParser *driver, Device_t *dev, uint32_t topusage) override {
         if (topusage != 0x10002) return CLAIM_NO;              // Generic Desktop / Mouse only
         if (mydevice != nullptr && dev != mydevice) return CLAIM_NO;
+        if (claimed) return CLAIM_NO; // exactly one collection
+        info={}; info.tier=AMV_TIER_GENERIC; info.battery=0xFF;
+        info.vid=dev->idVendor; info.pid=dev->idProduct;
+        info.uid=++next_uid; info.iface=driver->interfaceNumber();
+        info.speed=dev->speed;
+        info.nominal_hz=static_cast<MouseParser *>(driver)->nominal;
+        if (dev->strbuf) strncpy(info.name, (const char *)&dev->strbuf->buffer[dev->strbuf->iStrings[strbuf_t::STR_ID_PROD]], sizeof info.name-1);
+        descriptor_len=driver->getHIDReportDescriptorSize();
+        if (descriptor_len>sizeof descriptor) descriptor_len=sizeof descriptor;
+        memcpy(descriptor,driver->getHIDReportDescriptor(),descriptor_len);
+        // Inspect short HID items for the layout facts known before reports arrive.
+        uint32_t page=0, size=0, usage=0;
+        for (unsigned i=0;i<descriptor_len;) {
+            uint8_t tag=descriptor[i++];
+            if (tag==0xFE) { if(i+2>descriptor_len) break; unsigned n=descriptor[i]; i+=2+n; continue; }
+            unsigned n=tag&3; if(n==3) n=4;
+            if(i+n>descriptor_len) break;
+            uint32_t v=0; for(unsigned j=0;j<n;++j) v|=uint32_t(descriptor[i++])<<(8*j);
+            switch(tag&0xFC) {
+            case 0x04: page=v; break;
+            case 0x08: usage=v; break;
+            case 0x74: size=v; break;
+            case 0x84: info.flags|=AMV_MF_REPORT_IDS; break;
+            case 0x28: if(page==9) info.num_buttons=v>255?255:v; break;
+            case 0x80:
+                if(page==1 && usage==0x30) info.x_bits=size;
+                if(page==1 && usage==0x38) info.flags|=AMV_MF_WHEEL;
+                if(page==12 && usage==0x238) info.flags|=AMV_MF_PAN;
+                break;
+            }
+        }
+        reports=0;
         mydevice = dev;
         parser = driver;
         vid = dev->idVendor;
@@ -128,6 +187,7 @@ public:
         }
         last_rx_cyc = now;
         hs.rx++;
+        reports++;
         const uint8_t *p = (const uint8_t *)t->buffer;
         if (vid == 0x361D && t->length >= 4 && p[0] == 5) {   // Finalmouse vendor reply
             hs.vendor++;
@@ -299,6 +359,30 @@ static void pump_tx() {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+// protocol platform: all callbacks run on the loop thread.
+static uint32_t vendor_loop_max;
+static void apply_state(const float w[8], bool bypass) {
+    __disable_irq();
+    if (memcmp(g_w, w, sizeof g_w) || g_bypass != bypass) g_state = {};
+    memcpy(g_w, w, sizeof g_w);
+    g_bypass = bypass;
+    __enable_irq();
+}
+static void unit_id(uint8_t mac[6]) {
+    uint32_t hi = HW_OCOTP_MAC1, lo = HW_OCOTP_MAC0;
+    mac[0] = hi >> 8; mac[1] = hi;
+    mac[2] = lo >> 24; mac[3] = lo >> 16; mac[4] = lo >> 8; mac[5] = lo;
+}
+static void protocol_stats(uint8_t *p, uint8_t *len) {
+    // The wire layout is protocol counters, with no host/tx equivalents.
+    amv_stats_payload_t stats = {};
+    memcpy(p, &stats, sizeof stats); *len = sizeof stats;
+}
+static void console_request(uint8_t cmd, const void *payload, uint8_t len) {
+    uint8_t in[64] = {AMV_MAGIC0, AMV_MAGIC1, AMV_PROTO_VERSION, cmd, 0, 0, len, 0}, out[64];
+    memcpy(in + 8, payload, len);
+    amv_proto_handle(in, out, AMV_SRC_DEVICE);
+}
 // console
 // ---------------------------------------------------------------------------------------------------------
 static bool g_periodic = true;
@@ -332,6 +416,8 @@ static void print_stats(uint32_t window_ms) {
     if (h.parse_n) Serial.printf("  report->accumulated us avg/max %.2f/%.2f", (double)h.parse_sum / h.parse_n * us_per_cyc, h.parse_max * us_per_cyc);
     if (h.scale_calls) Serial.printf("  scale %lu cyc avg / %lu max (%.2f/%.2f us)", (unsigned long)(h.scale_sum / h.scale_calls),
                                      (unsigned long)h.scale_max, (double)h.scale_sum / h.scale_calls * us_per_cyc, h.scale_max * us_per_cyc);
+    Serial.printf("  vendor-loop max %.2f us", vendor_loop_max * us_per_cyc);
+    vendor_loop_max = 0;
     Serial.printf("  %s%s\n", g_bypass ? "[bypass] " : "", selftest_until_ms ? "[selftest]" : "");
 }
 
@@ -347,6 +433,8 @@ static void handle_line(char *line) {
         case 'h': case '?': print_help(); break;
         case 'p': g_periodic = !g_periodic; Serial.printf("stats %s\n", g_periodic ? "on" : "off"); break;
         case 'i': {
+            amv_state_payload_t state; amv_proto_snapshot(&state);
+            Serial.printf("firmware 0.1.0 gen=%lu active=%u slots=0x%02X\n", (unsigned long)state.gen, state.active_slot, amv_store_teensy_ops()->valid_mask());
             Serial.printf("host port: %s", bridge.online ? "mouse claimed" : "no mouse claimed");
             if (bridge.online) Serial.printf(" (%04X:%04X)", bridge.vid, bridge.pid);
             Serial.printf("\nPORTSC1=%08lX  speed=%s  F_CPU=%lu MHz  pc link: %s\n", (unsigned long)USB2_PORTSC1,
@@ -370,14 +458,15 @@ static void handle_line(char *line) {
             Serial.printf("ITC now %d\n", v);
             break;
         }
-        case 'b': g_bypass = atoi(arg) != 0; Serial.printf("bypass %s\n", g_bypass ? "on" : "off"); break;
+        case 'b': { uint8_t b = atoi(arg) != 0; console_request(AMV_CMD_SET_BYPASS, &b, 1); } Serial.printf("bypass %s\n", g_bypass ? "on" : "off"); break;
         case 'w': {
             float v[8]; int n = 0; char *tok = strtok(arg, " ");
             while (tok && n < 8) { v[n++] = atof(tok); tok = strtok(nullptr, " "); }
             if (n == 1) for (int i = 1; i < 8; i++) v[i] = v[0];
             else if (n != 8) { Serial.println("usage: w a   or   w e ne n nw w sw s se"); break; }
             for (int i = 0; i < 8; i++) if (!(v[i] >= 0.01f && v[i] <= 5.0f)) { Serial.println("weights must be 0.01..5.0"); return; }
-            __disable_irq(); for (int i = 0; i < 8; i++) g_w[i] = v[i]; __enable_irq();
+            amv_set_weights_req_t req; req.base_gen = AMV_GEN_ANY; memcpy(req.w, v, sizeof v);
+            console_request(AMV_CMD_SET_WEIGHTS, &req, sizeof req);
             Serial.println("weights set");
             break;
         }
@@ -414,12 +503,85 @@ static void poll_console() {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+static amv_mouse_info_t mouse_entries[4];
+static uint8_t mouse_entries_count;
+static const amv_mouse_ops_t mouse_ops = {
+    []() -> uint8_t { return mouse_entries_count; },
+    [](uint8_t i, amv_mouse_info_t *out) -> bool {
+        if(i>=mouse_entries_count) return false;
+        *out=mouse_entries[i]; return true;
+    },
+    [](uint8_t i, uint16_t *n) -> const uint8_t * {
+        if(i<mouse_entries_count && mouse_entries[i].tier!=AMV_TIER_IGNORED) {
+            *n=bridge.descriptor_len; return bridge.descriptor;
+        }
+        *n=0; return nullptr;
+    }
+};
+// Called after host.Task(), never by the USB interrupt. Snapshot and publish changes.
+static void update_mouse_entries() {
+    static uint32_t sample_ms, sample_reports;
+    static uint16_t rates[10];
+    static unsigned rate_slot;
+    static uint16_t measured_uid;
+    uint32_t now=millis();
+    if(measured_uid!=bridge.info.uid) {
+        measured_uid=bridge.info.uid; memset(rates,0,sizeof rates);
+        sample_ms=now; sample_reports=bridge.reports;
+    }
+    if(now-sample_ms>=1000) {
+        uint32_t reports=bridge.reports;
+        rates[rate_slot++%10]=min(uint32_t(65535),uint32_t((reports-sample_reports)*1000u/(now-sample_ms)));
+        sample_ms=now; sample_reports=reports;
+    }
+    amv_mouse_info_t next[4]={}; uint8_t n=0;
+    if(bridge.online) {
+        next[n]=bridge.info;
+        for(auto rate: rates) if(rate>next[n].measured_hz) next[n].measured_hz=rate;
+        ++n;
+    }
+    MouseParser *parsers[]={&hid1,&hid2,&hid3};
+    for(unsigned j=0;j<3;++j) {
+        auto *p=parsers[j];
+        if(!*p || (bridge.online && bridge.parser==p)) continue;
+        auto &entry=next[n++]; entry.tier=AMV_TIER_IGNORED; entry.reason=AMV_IGN_CLAIM;
+        entry.vid=p->idVendor(); entry.pid=p->idProduct(); entry.battery=0xFF;
+        entry.uid=0x8000+j; entry.iface=p->interfaceNumber(); entry.speed=p->speed;
+        entry.nominal_hz=p->nominal;
+        if(p->product()) strncpy(entry.name,(const char *)p->product(),sizeof entry.name-1);
+    }
+    uint16_t removed[4], attached[4]; unsigned nr=0, na=0;
+    for(unsigned i=0;i<mouse_entries_count;++i) {
+        bool found=false; for(unsigned j=0;j<n;++j) if(mouse_entries[i].uid==next[j].uid) found=true;
+        if(!found) removed[nr++]=mouse_entries[i].uid;
+    }
+    for(unsigned i=0;i<n;++i) {
+        bool found=false; for(unsigned j=0;j<mouse_entries_count;++j) if(next[i].uid==mouse_entries[j].uid) found=true;
+        if(!found) attached[na++]=next[i].uid;
+    }
+    memcpy(mouse_entries,next,sizeof next); mouse_entries_count=n;
+    for(unsigned i=0;i<nr;++i) amv_proto_notify_mouse(AMV_MEV_REMOVED,removed[i]);
+    for(unsigned i=0;i<na;++i) amv_proto_notify_mouse(AMV_MEV_ATTACHED,attached[i]);
+}
+
 void setup() {
     ARM_DEMCR |= ARM_DEMCR_TRCENA;
     ARM_DWT_CTRL |= ARM_DWT_CTRL_CYCCNTENA;
     for (int i = 0; i < 7; i++) hist_edge_cyc[i] = HIST_EDGE_US[i] * CYC_PER_US;
     memset(&hs, 0, sizeof(hs));
     memset(&ts, 0, sizeof(ts));
+
+    amv_plat_t plat = {};
+    plat.apply = apply_state; plat.unit_id = unit_id;
+    plat.uptime_ms = []() -> uint32_t { return millis(); };
+    plat.reboot = []() { SCB_AIRCR = 0x05FA0004; while (true) {} };
+    plat.mouse_count = []() -> uint8_t { return mouse_entries_count; };
+    plat.mouse = &mouse_ops;
+    plat.get_stats = protocol_stats; plat.store = amv_store_teensy_ops();
+    amv_proto_init(&plat);
+    uint8_t slot; amv_profile_t profile;
+    if (plat.store->load_boot(&slot, &profile))
+        amv_proto_restore(slot, &profile, amv_store_boot_bypass());
 
     hid1.setRXBuffers(rxbuf[0][0], rxbuf[0][1], 255, rxbuf[0][2], rxbuf[0][3]);
     hid2.setRXBuffers(rxbuf[1][0], rxbuf[1][1], 255, rxbuf[1][2], rxbuf[1][3]);
@@ -435,17 +597,51 @@ void setup() {
 }
 
 void loop() {
+    uint32_t loop_start = cyc();
+    bool vendor_work = false;
     pump_tx();
     host.Task();
+    update_mouse_entries();
     pump_tx();
+    static uint8_t reply[64];
+    static bool reply_pending;
     uint8_t vendor_frame[64];
-    if (amv_vendor_recv(vendor_frame)) amv_vendor_send(vendor_frame);
+    if (!reply_pending && !amv_proto_reboot_pending() && amv_vendor_recv(vendor_frame)) {
+        vendor_work = true;
+        reply_pending = amv_proto_handle(vendor_frame, reply) != 0;
+    }
+    if (reply_pending) {
+        vendor_work = true;
+        if (amv_vendor_send(reply)) reply_pending = false;
+    }
+    if (!reply_pending && amv_proto_reboot_pending() && usb_rawhid_tx_idle())
+        amv_proto_run_deferred();
+    if (!reply_pending && amv_proto_take_event(vendor_frame)) {
+        vendor_work = true;
+        amv_vendor_send(vendor_frame); // events may drop under backpressure
+    }
     poll_console();
     uint32_t now = millis();
+    static uint32_t saved_gen = 1, dirty_since;
+    static bool dirty;
+    amv_state_payload_t state; amv_proto_snapshot(&state);
+    if (state.gen != saved_gen) {
+        saved_gen = state.gen; dirty_since = now; dirty = true;
+    }
+    if (dirty && now - dirty_since >= 2000) {
+        amv_profile_t p; memcpy(p.w, state.w, sizeof p.w);
+        if (amv_store_teensy_ops()->save_boot(state.active_slot, &p, state.bypass)) dirty = false;
+        else dirty_since = now; // bound retry frequency on backend failure
+    }
     if (now - last_stats_ms >= 1000) {
         uint32_t window = now - last_stats_ms;
         last_stats_ms = now;
         if (g_periodic && Serial.dtr()) print_stats(window);
         else { __disable_irq(); memset(&hs, 0, sizeof(hs)); memset(&ts, 0, sizeof(ts)); __enable_irq(); }
     }
+    if (vendor_work) {
+        uint32_t elapsed = cyc() - loop_start;
+        if (elapsed > vendor_loop_max) vendor_loop_max = elapsed;
+    }
+
 }

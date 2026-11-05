@@ -134,10 +134,13 @@ typedef struct {
     amv_mouse_info_t     info;
     amv_mouse_caps_t     caps;
     bool                 has_caps;
+    bool                 caps_unsupported;     /* GET_MOUSE_CAPS answered BAD_CMD */
     amv_settings_rep_t   settings;      /* GET_MOUSE_SETTINGS: what the driver could read, with write flags */
     bool                 has_settings;  /* false: older firmware, or the driver exposes none */
+    bool                 settings_unsupported; /* GET_MOUSE_SETTINGS answered BAD_CMD */
     amv_mouse_model_t    model;         /* catalog name for this id (firmware 0.6.0+) */
     bool                 has_model;
+    bool                 model_unsupported;    /* GET_MOUSE_MODEL answered BAD_CMD */
 } dongle_mouse_t;
 
 /* Profile slots stored on the dongle (the Studio's "Profiles on the dongle") */

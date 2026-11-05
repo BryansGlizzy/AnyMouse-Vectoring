@@ -34,7 +34,10 @@ python3 -m http.server 8765 --directory web      # from the repo root
 ## Linux
 The browser needs permission to open the dongle's `/dev/hidraw*` node:
 ```bash
-echo 'SUBSYSTEM=="hidraw", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4d56", TAG+="uaccess"' | sudo tee /etc/udev/rules.d/71-anymouse-dongle.rules
+sudo tee /etc/udev/rules.d/71-anymouse-dongle.rules >/dev/null <<'EOF'
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="4d56", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="16c0", ATTRS{idProduct}=="0489", TAG+="uaccess"
+EOF
 sudo udevadm control --reload-rules && sudo udevadm trigger --action=add --subsystem-match=hidraw
 ```
 `./anymouse --install-udev` installs an equivalent rule keyed on the `AnyMouse` manufacturer string, which keeps working if the dongle's USB ID changes.
@@ -57,7 +60,7 @@ Flatpak and Snap browsers cannot see hidraw devices; use a native package. On Wi
 
 ## Tests
 ```bash
-cd web && node --test tests/*.test.mjs        # 23 tests, no dependencies
+cd web && node --test tests/*.test.mjs        # 24 tests, no dependencies
 ```
 They check that `proto.js` is current, that the client's requests are byte-identical to the ones recorded from the real firmware, that the demo device answers like the real firmware (replayed from the recording), and the client's behaviour (stale and invalid writes, events, timeouts, profile import). To re-record against a connected dongle: `python3 -I firmware/esp32p4-dongle/tools/capture_fixtures.py` (needs `pip install hidapi`).
 

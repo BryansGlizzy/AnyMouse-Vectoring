@@ -443,10 +443,11 @@ static bool same_mice(const dongle_mouse_t *a, int na, const dongle_mouse_t *b, 
     for (int i = 0; i < na; i++) {
         amv_mouse_info_t x = a[i].info, y = b[i].info;
         x.measured_hz = y.measured_hz = 0;      /* changes all the time; not worth a GUI refresh */
-        if (memcmp(&x, &y, sizeof x) != 0 || a[i].has_caps != b[i].has_caps) return false;
-        if (a[i].has_settings != b[i].has_settings ||
+        if (memcmp(&x, &y, sizeof x) != 0 || a[i].has_caps != b[i].has_caps ||
+            a[i].caps_unsupported != b[i].caps_unsupported) return false;
+        if (a[i].has_settings != b[i].has_settings || a[i].settings_unsupported != b[i].settings_unsupported ||
             (a[i].has_settings && memcmp(&a[i].settings, &b[i].settings, sizeof a[i].settings) != 0)) return false;
-        if (a[i].has_model != b[i].has_model ||
+        if (a[i].has_model != b[i].has_model || a[i].model_unsupported != b[i].model_unsupported ||
             (a[i].has_model && memcmp(&a[i].model, &b[i].model, sizeof a[i].model) != 0)) return false;
     }
     return true;
@@ -480,6 +481,7 @@ static int fetch_mice(link_t *l) {
             r = request(l, AMV_CMD_GET_MOUSE_CAPS, &i, 1, REQUEST_TIMEOUT_MS, rep, NULL);
             if (r < 0) return -1;
             h = (const amv_hdr_t *)rep;
+            if (r == 1 && h->status == AMV_ST_BAD_CMD) m[n].caps_unsupported = true;
             if (r == 1 && h->status == AMV_ST_OK && h->len >= sizeof(amv_mouse_caps_t)) {
                 memcpy(&m[n].caps, rep + AMV_HEADER_SIZE, sizeof m[n].caps);
                 m[n].caps.firmware[sizeof m[n].caps.firmware - 1] = '\0';
@@ -492,6 +494,7 @@ static int fetch_mice(link_t *l) {
             r = request(l, AMV_CMD_GET_MOUSE_SETTINGS, &i, 1, REQUEST_TIMEOUT_MS, rep, NULL);
             if (r < 0) return -1;
             h = (const amv_hdr_t *)rep;
+            if (r == 1 && h->status == AMV_ST_BAD_CMD) m[n].settings_unsupported = true;
             if (r == 1 && h->status == AMV_ST_OK && h->len >= 4 && h->len <= sizeof(amv_settings_rep_t)) {
                 memcpy(&m[n].settings, rep + AMV_HEADER_SIZE, h->len);
                 if (m[n].settings.count <= AMV_SETTINGS_MAX && h->len >= 4U + 4U * m[n].settings.count)
@@ -502,6 +505,7 @@ static int fetch_mice(link_t *l) {
             r = request(l, AMV_CMD_GET_MOUSE_MODEL, &i, 1, REQUEST_TIMEOUT_MS, rep, NULL);
             if (r < 0) return -1;
             h = (const amv_hdr_t *)rep;
+            if (r == 1 && h->status == AMV_ST_BAD_CMD) m[n].model_unsupported = true;
             if (r == 1 && h->status == AMV_ST_OK && h->len >= sizeof(amv_mouse_model_t)) {
                 memcpy(&m[n].model, rep + AMV_HEADER_SIZE, sizeof m[n].model);
                 m[n].model.brand[sizeof m[n].model.brand - 1] = '\0';
@@ -1046,6 +1050,8 @@ int dongle_cli(const char *action, const char *arg) {
                 }
                 printf("\n");
                 if (x->tier != AMV_TIER_IGNORED) {
+                    if (mice[k].caps_unsupported || mice[k].settings_unsupported || mice[k].model_unsupported)
+                        printf("      Details   : extended mouse information not supported by this dongle\n");
                     if (mice[k].has_model && mice[k].model.model[0])
                         printf("      Catalog   : %s %s%s\n", mice[k].model.brand, mice[k].model.model,
                                mice[k].model.state == AMV_MODEL_DRIVER ? "" : " (no driver)");

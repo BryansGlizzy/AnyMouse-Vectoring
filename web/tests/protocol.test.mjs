@@ -187,6 +187,35 @@ test('listMice() on firmware without mouse commands returns null', async () => {
   assert.equal(await c.listMice(), null);
 });
 
+test('Teensy-like mock: optional commands are unsupported without breaking the link', async () => {
+  const mock = new MockHid({}, { profile: 'teensy' });
+  const c = new DongleClient(mock, { timeoutMs: 300 });
+  await c.open();
+  assert.equal(mock.productName, 'AnyMouse Vectoring Dongle (Teensy 4.1)');
+  assert.equal((await c.hello()).fw, '0.1.0');
+  const info = await c.getInfo();
+  assert.equal(info.fw, '0.1.0'); assert.equal(info.chipRev, 0);
+  assert.equal((await c.listMice()).length, 1);
+  assert.equal(await c.getMouseCaps(0), null);
+  assert.equal(await c.getMouseDescriptor(0), null);
+  assert.equal(await c.getMouseModel(0), null);
+  assert.equal(await c.getMouseSettings(0), null);
+  assert.equal(await c.getMouseOptions(0, P.SET.CPI), null);
+  assert.equal((await c.setMouseCpi(0, 3200)).status, P.ST.BAD_CMD);
+  assert.equal((await c.setMousePolling(0, 500)).status, P.ST.BAD_CMD);
+  assert.equal((await c.setMouseSetting(0, P.SET.CPI, 3200)).status, P.ST.BAD_CMD);
+  const self = await c.request(P.CMD.TEST_SELF_CHANGE, new Uint8Array(7));
+  assert.equal(self.status, P.ST.BAD_CMD); assert.equal(self.cmd, P.CMD.TEST_SELF_CHANGE);
+  for (const cmd of [P.CMD.GET_MOUSE_CAPS, P.CMD.GET_MOUSE_DESC, P.CMD.GET_MOUSE_MODEL, P.CMD.GET_MOUSE_SETTINGS,
+    P.CMD.GET_MOUSE_OPTIONS, P.CMD.SET_MOUSE_CPI, P.CMD.SET_MOUSE_POLLING, P.CMD.SET_MOUSE_SETTING, P.CMD.TEST_SELF_CHANGE]) {
+    assert.ok(c.isUnsupported(cmd), `command 0x${cmd.toString(16)} remembered as unsupported`);
+  }
+  assert.equal((await c.getState()).gen, 1);
+  assert.equal((await c.testScale(100, 0, true)).dx, 100);
+  assert.equal(mock.opened, true);
+  await c.close();
+});
+
 // ---------- client behavior over the demo device ----------
 async function connected(init, opts) {
   const mock = new MockHid(init, opts);

@@ -83,7 +83,26 @@ static inline uint32_t cyc() { return ARM_DWT_CYCCNT; }
 // ---------------------------------------------------------------------------------------------------------
 USBHost host;
 USBHub hub1(host);
-USBHIDParser hid1(host), hid2(host), hid3(host);
+// Retain endpoint metadata while the interface descriptors are available.
+class MouseParser : public USBHIDParser {
+public:
+    MouseParser(USBHost &h) : USBHIDParser(h) {}
+    uint16_t nominal=0;
+    uint8_t speed=0;
+protected:
+    bool claim(Device_t *d, int type, const uint8_t *p, uint32_t n) override {
+        if (!USBHIDParser::claim(d,type,p,n)) return false;
+        speed=d->speed; nominal=0;
+        for (uint32_t i=0; i+2<=n && p[i]>=2 && i+p[i]<=n; i+=p[i]) {
+            if (p[i+1]==5 && p[i]>=7 && (p[i+2]&0x80)) {
+                unsigned interval=p[i+6];
+                if (interval) nominal=speed==2 ? (interval<=16 ? 8000u/(1u<<(interval-1)) : 0) : 1000u/interval;
+            }
+        }
+        return true;
+    }
+};
+MouseParser hid1(host), hid2(host), hid3(host);
 
 // More than the default two receive buffers, so an 8 kHz stream survives a late interrupt.
 DMAMEM static uint8_t rxbuf[3][4][256] __attribute__((aligned(32)));
@@ -93,10 +112,48 @@ public:
     USBHIDParser *parser = nullptr;
     uint16_t vid = 0, pid = 0;
     volatile bool online = false;
+    amv_mouse_info_t info={};
+    uint8_t descriptor[928];
+    uint16_t descriptor_len=0;
+    volatile uint32_t reports=0;
+    uint16_t next_uid=0;
+
 
     hidclaim_t claim_collection(USBHIDParser *driver, Device_t *dev, uint32_t topusage) override {
         if (topusage != 0x10002) return CLAIM_NO;              // Generic Desktop / Mouse only
         if (mydevice != nullptr && dev != mydevice) return CLAIM_NO;
+        if (claimed) return CLAIM_NO; // exactly one collection
+        info={}; info.tier=AMV_TIER_GENERIC; info.battery=0xFF;
+        info.vid=dev->idVendor; info.pid=dev->idProduct;
+        info.uid=++next_uid; info.iface=driver->interfaceNumber();
+        info.speed=dev->speed;
+        info.nominal_hz=static_cast<MouseParser *>(driver)->nominal;
+        if (dev->strbuf) strncpy(info.name, (const char *)&dev->strbuf->buffer[dev->strbuf->iStrings[strbuf_t::STR_ID_PROD]], sizeof info.name-1);
+        descriptor_len=driver->getHIDReportDescriptorSize();
+        if (descriptor_len>sizeof descriptor) descriptor_len=sizeof descriptor;
+        memcpy(descriptor,driver->getHIDReportDescriptor(),descriptor_len);
+        // Inspect short HID items for the layout facts known before reports arrive.
+        uint32_t page=0, size=0, usage=0;
+        for (unsigned i=0;i<descriptor_len;) {
+            uint8_t tag=descriptor[i++];
+            if (tag==0xFE) { if(i+2>descriptor_len) break; unsigned n=descriptor[i]; i+=2+n; continue; }
+            unsigned n=tag&3; if(n==3) n=4;
+            if(i+n>descriptor_len) break;
+            uint32_t v=0; for(unsigned j=0;j<n;++j) v|=uint32_t(descriptor[i++])<<(8*j);
+            switch(tag&0xFC) {
+            case 0x04: page=v; break;
+            case 0x08: usage=v; break;
+            case 0x74: size=v; break;
+            case 0x84: info.flags|=AMV_MF_REPORT_IDS; break;
+            case 0x28: if(page==9) info.num_buttons=v>255?255:v; break;
+            case 0x80:
+                if(page==1 && usage==0x30) info.x_bits=size;
+                if(page==1 && usage==0x38) info.flags|=AMV_MF_WHEEL;
+                if(page==12 && usage==0x238) info.flags|=AMV_MF_PAN;
+                break;
+            }
+        }
+        reports=0;
         mydevice = dev;
         parser = driver;
         vid = dev->idVendor;
@@ -130,6 +187,7 @@ public:
         }
         last_rx_cyc = now;
         hs.rx++;
+        reports++;
         const uint8_t *p = (const uint8_t *)t->buffer;
         if (vid == 0x361D && t->length >= 4 && p[0] == 5) {   // Finalmouse vendor reply
             hs.vendor++;
@@ -445,6 +503,67 @@ static void poll_console() {
 }
 
 // ---------------------------------------------------------------------------------------------------------
+static amv_mouse_info_t mouse_entries[4];
+static uint8_t mouse_entries_count;
+static const amv_mouse_ops_t mouse_ops = {
+    []() -> uint8_t { return mouse_entries_count; },
+    [](uint8_t i, amv_mouse_info_t *out) -> bool {
+        if(i>=mouse_entries_count) return false;
+        *out=mouse_entries[i]; return true;
+    },
+    [](uint8_t i, uint16_t *n) -> const uint8_t * {
+        if(i<mouse_entries_count && mouse_entries[i].tier!=AMV_TIER_IGNORED) {
+            *n=bridge.descriptor_len; return bridge.descriptor;
+        }
+        *n=0; return nullptr;
+    }
+};
+// Called after host.Task(), never by the USB interrupt. Snapshot and publish changes.
+static void update_mouse_entries() {
+    static uint32_t sample_ms, sample_reports;
+    static uint16_t rates[10];
+    static unsigned rate_slot;
+    static uint16_t measured_uid;
+    uint32_t now=millis();
+    if(measured_uid!=bridge.info.uid) {
+        measured_uid=bridge.info.uid; memset(rates,0,sizeof rates);
+        sample_ms=now; sample_reports=bridge.reports;
+    }
+    if(now-sample_ms>=1000) {
+        uint32_t reports=bridge.reports;
+        rates[rate_slot++%10]=min(uint32_t(65535),uint32_t((reports-sample_reports)*1000u/(now-sample_ms)));
+        sample_ms=now; sample_reports=reports;
+    }
+    amv_mouse_info_t next[4]={}; uint8_t n=0;
+    if(bridge.online) {
+        next[n]=bridge.info;
+        for(auto rate: rates) if(rate>next[n].measured_hz) next[n].measured_hz=rate;
+        ++n;
+    }
+    MouseParser *parsers[]={&hid1,&hid2,&hid3};
+    for(unsigned j=0;j<3;++j) {
+        auto *p=parsers[j];
+        if(!*p || (bridge.online && bridge.parser==p)) continue;
+        auto &entry=next[n++]; entry.tier=AMV_TIER_IGNORED; entry.reason=AMV_IGN_CLAIM;
+        entry.vid=p->idVendor(); entry.pid=p->idProduct(); entry.battery=0xFF;
+        entry.uid=0x8000+j; entry.iface=p->interfaceNumber(); entry.speed=p->speed;
+        entry.nominal_hz=p->nominal;
+        if(p->product()) strncpy(entry.name,(const char *)p->product(),sizeof entry.name-1);
+    }
+    uint16_t removed[4], attached[4]; unsigned nr=0, na=0;
+    for(unsigned i=0;i<mouse_entries_count;++i) {
+        bool found=false; for(unsigned j=0;j<n;++j) if(mouse_entries[i].uid==next[j].uid) found=true;
+        if(!found) removed[nr++]=mouse_entries[i].uid;
+    }
+    for(unsigned i=0;i<n;++i) {
+        bool found=false; for(unsigned j=0;j<mouse_entries_count;++j) if(next[i].uid==mouse_entries[j].uid) found=true;
+        if(!found) attached[na++]=next[i].uid;
+    }
+    memcpy(mouse_entries,next,sizeof next); mouse_entries_count=n;
+    for(unsigned i=0;i<nr;++i) amv_proto_notify_mouse(AMV_MEV_REMOVED,removed[i]);
+    for(unsigned i=0;i<na;++i) amv_proto_notify_mouse(AMV_MEV_ATTACHED,attached[i]);
+}
+
 void setup() {
     ARM_DEMCR |= ARM_DEMCR_TRCENA;
     ARM_DWT_CTRL |= ARM_DWT_CTRL_CYCCNTENA;
@@ -456,7 +575,8 @@ void setup() {
     plat.apply = apply_state; plat.unit_id = unit_id;
     plat.uptime_ms = []() -> uint32_t { return millis(); };
     plat.reboot = []() { SCB_AIRCR = 0x05FA0004; while (true) {} };
-    plat.mouse_count = []() -> uint8_t { return bridge.online ? 1 : 0; };
+    plat.mouse_count = []() -> uint8_t { return mouse_entries_count; };
+    plat.mouse = &mouse_ops;
     plat.get_stats = protocol_stats; plat.store = amv_store_teensy_ops();
     amv_proto_init(&plat);
     uint8_t slot; amv_profile_t profile;
@@ -481,6 +601,7 @@ void loop() {
     bool vendor_work = false;
     pump_tx();
     host.Task();
+    update_mouse_entries();
     pump_tx();
     static uint8_t reply[64];
     static bool reply_pending;

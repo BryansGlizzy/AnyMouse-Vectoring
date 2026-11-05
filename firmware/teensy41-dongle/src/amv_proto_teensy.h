@@ -21,7 +21,13 @@ typedef struct {
     bool (*load_boot)(uint8_t *active_slot, amv_profile_t *p);
     bool (*save_boot)(uint8_t active_slot, const amv_profile_t *p, bool bypass);
 } amv_store_ops_t;
-typedef struct amv_mouse_ops amv_mouse_ops_t;
+// Loop-thread snapshots. Descriptor storage remains valid until the next host task.
+typedef struct amv_mouse_ops {
+    uint8_t (*count)(void);
+    bool (*info)(uint8_t index, amv_mouse_info_t *out);
+    const uint8_t *(*descriptor)(uint8_t index, uint16_t *length);
+} amv_mouse_ops_t;
+void amv_proto_notify_mouse(uint8_t change, uint16_t uid);
 typedef struct {
     void (*apply)(const float w[8], bool bypass);
     uint32_t (*uptime_ms)(void);

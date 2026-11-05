@@ -292,7 +292,13 @@ static void host_isr_wrap() {
 }
 
 static volatile bool g_print_replies = false;
+static volatile uint16_t fm_values[4];
+static volatile uint8_t fm_seen;
 void Bridge::on_finalmouse_reply(const uint8_t *p, uint32_t len) {
+    if (len<4) return;
+    if (len>=6 && p[3]>=2 && ((p[2]>=3 && p[2]<=5) || p[2]==17)) {
+        unsigned i=p[2]==17?3:p[2]-3; fm_values[i]=p[4]|(p[5]<<8); fm_seen|=1u<<i;
+    }
     if (!g_print_replies) return;
     uint8_t cmd = p[2], plen = p[3];
     if (plen > len - 4) plen = (uint8_t)(len - 4);
@@ -471,18 +477,20 @@ static void handle_line(char *line) {
             break;
         }
         case 'q': {
-            if (bridge.vid != 0x361D) { Serial.println("no Finalmouse attached"); break; }
+            if (bridge.vid != 0x361D || bridge.pid != 0x0100) { Serial.println("no Finalmouse attached"); break; }
             g_print_replies = true;
-            Serial.println(bridge.send_finalmouse(96, nullptr, 0) ? "asked (wake-all); replies follow" : "send failed");
+            uint8_t index=0; console_request(AMV_CMD_GET_MOUSE_SETTINGS, &index, 1);
+            Serial.println("query queued; replies follow");
             break;
         }
         case 'r': {
             int hz = atoi(arg);
-            if (bridge.vid != 0x361D) { Serial.println("no Finalmouse attached"); break; }
+            if (bridge.vid != 0x361D || bridge.pid != 0x0100) { Serial.println("no Finalmouse attached"); break; }
             if (hz != 500 && hz != 1000 && hz != 2000 && hz != 4000 && hz != 8000) { Serial.println("rate must be 500, 1000, 2000, 4000 or 8000"); break; }
             uint8_t pl[2] = {(uint8_t)(hz & 0xFF), (uint8_t)(hz >> 8)};
             g_print_replies = true;
-            Serial.printf(bridge.send_finalmouse(17, pl, 2) ? "polling rate %d Hz sent\n" : "send failed (%d)\n", hz);
+            amv_setting_set_req_t req={0,AMV_SET_POLLING,uint16_t(pl[0]|(pl[1]<<8))};
+            console_request(AMV_CMD_SET_MOUSE_SETTING, &req, sizeof req);
             break;
         }
         default: Serial.println("unknown command; h for help");
@@ -516,6 +524,10 @@ static const amv_mouse_ops_t mouse_ops = {
             *n=bridge.descriptor_len; return bridge.descriptor;
         }
         *n=0; return nullptr;
+    },
+    [](uint8_t cmd, const uint8_t *p, uint8_t n) -> bool {
+        __disable_irq(); fm_seen=0; __enable_irq();
+        return bridge.send_finalmouse(cmd,p,n);
     }
 };
 // Called after host.Task(), never by the USB interrupt. Snapshot and publish changes.
@@ -606,6 +618,13 @@ void loop() {
     static uint8_t reply[64];
     static bool reply_pending;
     uint8_t vendor_frame[64];
+    uint16_t values[4];
+    __disable_irq();
+    uint8_t seen=fm_seen; fm_seen=0;
+    for (unsigned i=0;i<4;++i) values[i]=fm_values[i];
+    __enable_irq();
+    for (unsigned i=0;i<4;++i) if (seen & (1u<<i)) amv_proto_finalmouse_reply(i==3?17:i+3,values[i]);
+    if (!reply_pending) reply_pending=amv_proto_poll_mouse(reply);
     if (!reply_pending && !amv_proto_reboot_pending() && amv_vendor_recv(vendor_frame)) {
         vendor_work = true;
         reply_pending = amv_proto_handle(vendor_frame, reply) != 0;

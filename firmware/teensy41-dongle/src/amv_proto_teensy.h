@@ -26,6 +26,7 @@ typedef struct amv_mouse_ops {
     uint8_t (*count)(void);
     bool (*info)(uint8_t index, amv_mouse_info_t *out);
     const uint8_t *(*descriptor)(uint8_t index, uint16_t *length);
+    bool (*send_finalmouse)(uint8_t cmd, const uint8_t *payload, uint8_t len);
 } amv_mouse_ops_t;
 void amv_proto_notify_mouse(uint8_t change, uint16_t uid);
 typedef struct {
@@ -53,3 +54,7 @@ void amv_proto_run_deferred();
 uint8_t amv_proto_mouse_get_info(const amv_mouse_ops_t *, uint8_t index,
                                 amv_mouse_info_t *out);
 #endif
+
+// Loop-only: feed ISR mailbox replies, then poll; deferred frames must be retried by transport.
+void amv_proto_finalmouse_reply(uint8_t cmd, uint16_t value);
+bool amv_proto_poll_mouse(uint8_t out[64]);

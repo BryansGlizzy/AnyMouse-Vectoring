@@ -16,7 +16,7 @@ The dongle is a USB man-in-the-middle that runs the 8-octant vectoring in hardwa
 | M4 Web Studio | Built; used in Chrome on macOS | §2.3 |
 | M5 hardening and DFU | **Closed on 2026-10-27. Not implemented**: no DFU, rollback self-test, watchdog, brown-out or soak run. Flash over the UART USB-C | None. The 4 MB OTA slots stay so DFU can be added later |
 | M6 stretch goals | Open | §7 |
-| Teensy 4.1 port | **Bridge running 2026-11-04, 8 kHz both sides** ([`../teensy41-dongle/`](../teensy41-dongle/README.md): ULX dongle in, vectored, 8 kHz out; PC saw 8000 frames/s in the self-test). Still missing: vendor channel and Studio, flash profiles, OpenMouse per-family loading, 16-bit output | §4.0 item 4 |
+| Teensy 4.1 port | **Bridge running 2026-11-04, 8 kHz both sides; vendor channel & profile store built (0.1.0), hardware verification pending** ([`../teensy41-dongle/`](../teensy41-dongle/README.md): 0xFF4D vendor HID, Studio & ./anymouse support, 4 EEPROM slots + boot restore, Finalmouse polling-rate setting; hardware checklist in README). Open: 16-bit output, button-edge merging, multiple mice, OpenMouse per-family loading | §4.0 item 4 |
 | Section 10, full OpenMouse coverage | **Direction changed 2026-10-27:** OpenMouse's own drivers run on the dongle in QuickJS-ng (firmware 0.7.0, flashed, loads at boot); real-mouse test pending | §4.0 |
 
 ---

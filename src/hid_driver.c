@@ -68,7 +68,7 @@ static void build_fm_report(uint8_t cmd, const uint8_t *payload, size_t payload_
 
 /* Walk a HID report descriptor and report whether it declares an application
  * collection with the given usage page / usage (selects the vendor config interface). */
-static bool descriptor_has_collection(const char *hidraw_name, uint16_t want_page, uint16_t want_usage) {
+bool hid_descriptor_has_collection(const char *hidraw_name, uint16_t want_page, uint16_t want_usage) {
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "/sys/class/hidraw/%s/device/report_descriptor", hidraw_name);
     FILE *f = fopen(path, "rb");
@@ -183,8 +183,8 @@ static bool find_mouse_hidraw_node(mouse_hw_status_t *out_info) {
 
         /* Rank: vendor config collection beats any other interface; Finalmouse preferred when ungrabbed */
         bool cfg_iface = (vid == FINALMOUSE_VID)
-                       ? descriptor_has_collection(ent->d_name, 0xFF00, 0x0001)
-                       : descriptor_has_collection(ent->d_name, 0xFFFF, 0x0002);
+                       ? hid_descriptor_has_collection(ent->d_name, 0xFF00, 0x0001)
+                       : hid_descriptor_has_collection(ent->d_name, 0xFFFF, 0x0002);
         if (vid == GEARHUB_VID && !cfg_iface) continue; /* Shark motion/keyboard endpoints can't be configured */
         int rank = (cfg_iface ? 4 : 1) + (vid == FINALMOUSE_VID ? 2 : 0);
         if (rank <= best_rank) continue;
@@ -316,6 +316,14 @@ static bool gh_write_polling_rate(const char *node, int hz) {
 }
 
 bool hid_query_active_mouse(mouse_hw_status_t *out_status) {
+    /* Behind the AnyMouse dongle the PC cannot reach the mouse: the dongle reports it instead */
+    if (dongle_fill_hw_status(out_status)) {
+        if (out_status->dpi > 0) atomic_store(&g_state.hardware_cpi, out_status->dpi);
+        pthread_mutex_lock(&g_state.telemetry_mutex);
+        g_state.hw_status = *out_status;
+        pthread_mutex_unlock(&g_state.telemetry_mutex);
+        return true;
+    }
     mouse_hw_status_t info;
     if (!find_mouse_hidraw_node(&info)) {
         memset(out_status, 0, sizeof(*out_status));
@@ -418,6 +426,13 @@ bool hid_query_active_mouse(mouse_hw_status_t *out_status) {
 }
 
 bool hid_set_mouse_cpi(int cpi) {
+    mouse_hw_status_t d;
+    if (dongle_fill_hw_status(&d)) {
+        /* Known mice: written to the mouse; others: remembered on the dongle as a label */
+        if (cpi < 50 || cpi > 64000 || dongle_first_mouse_set(true, (uint16_t)cpi) != AMV_ST_OK) return false;
+        atomic_store(&g_state.hardware_cpi, cpi);
+        return true;
+    }
     if (cpi < 50 || cpi > 26000) return false;
     mouse_hw_status_t info;
     if (!find_mouse_hidraw_node(&info) || info.vid != FINALMOUSE_VID) return false;
@@ -454,6 +469,10 @@ bool hid_set_mouse_motion_sync(bool enabled) {
 }
 
 bool hid_set_mouse_polling_rate(int hz) {
+    mouse_hw_status_t d;
+    if (dongle_fill_hw_status(&d)) {
+        return d.can_set_rate && hz > 0 && hz < 65536 && dongle_first_mouse_set(false, (uint16_t)hz) == AMV_ST_OK;
+    }
     mouse_hw_status_t info;
     if (!find_mouse_hidraw_node(&info)) return false;
 

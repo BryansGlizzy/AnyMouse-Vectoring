@@ -10,10 +10,10 @@ FAF_PLUGIN   = libanymouse_faf.so
 FAF_LAUNCHER = faf_launcher
 
 SRCS   = src/main.c src/evdev_rt.c src/hid_driver.c src/calibration.c src/gui_gtk4.c \
-         src/devices.c src/config.c src/steam_install.c
-HDRS   = src/core.h src/kovaaks_offsets.h src/faf_telemetry.h
+         src/devices.c src/config.c src/steam_install.c src/dongle.c
+HDRS   = src/core.h src/kovaaks_offsets.h src/faf_telemetry.h common/amv_dongle_proto.h
 
-.PHONY: all install-faf uninstall-faf faf-status install-udev list-devices clean run run-headless probe-hw help
+.PHONY: all test-dongle install-faf uninstall-faf faf-status install-udev list-devices clean run run-headless probe-hw help
 
 all: $(TARGET) $(FAF_PLUGIN) $(FAF_LAUNCHER) install-faf
 
@@ -27,6 +27,12 @@ $(FAF_PLUGIN): src/faf_plugin.c src/faf_telemetry.h
 
 $(FAF_LAUNCHER): src/faf_launcher.c
 	$(CC) -O2 -Wall -Wextra src/faf_launcher.c -o $@
+
+# Dongle link + guard tests against a fake dongle and a fake sysfs tree (Linux only; no GTK needed).
+# On a Mac: docker run --rm -v "$$PWD":/src:ro -w /src gcc:14 make test-dongle
+test-dongle:
+	$(CC) -O3 -ffast-math -Wall -Wextra -pthread -Isrc tests/test_dongle_link.c -o /tmp/amv_test_dongle -lm
+	/tmp/amv_test_dongle
 
 # Locates FpsAimForge in any Steam library and installs/repairs the launcher, plugin and bundle
 install-faf: $(TARGET) $(FAF_PLUGIN) $(FAF_LAUNCHER) faf/AnyMouse.bundle.json
@@ -67,4 +73,5 @@ help:
 	@echo "  make faf-status   - Show FpsAimForge integration status"
 	@echo "  make install-udev - Install udev rules so AnyMouse runs without sudo"
 	@echo "  make probe-hw     - Query live OpenMouse HID telemetry (CPI, Hz, Battery, Motion Sync, RSSI)"
+	@echo "  make test-dongle  - Run the dongle link + guard tests against a fake dongle (Linux)"
 	@echo "  make clean        - Remove compiled binaries"

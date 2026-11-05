@@ -1,0 +1,3 @@
+QuickJS-ng 0.17.0 (tag v0.17.0, commit 6d46d07), engine sources only, unmodified.
+Upstream: https://github.com/quickjs-ng/quickjs (MIT, see LICENSE).
+The host qjsc that builds the bytecode must be the same version (tools/openmouse/gen_js_bundle.sh checks it).

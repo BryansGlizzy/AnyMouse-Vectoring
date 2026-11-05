@@ -9,6 +9,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#include "../common/amv_dongle_proto.h"
+
 #define PI 3.14159265358979323846f
 #define TWO_PI (2.0f * PI)
 #define INV_OCTANT_STEP (4.0f / PI)
@@ -58,8 +60,34 @@ typedef struct {
     uint16_t vid;
     uint16_t pid;
     bool     hw_supported;      /* Known vendor protocol (CPI / polling control) */
+    bool     is_dongle;         /* Output of an AnyMouse dongle (already vectored): never auto-grabbed */
     int      score;             /* Auto-selection rank, highest wins */
 } mouse_device_t;
+
+/* AnyMouse hardware dongle link state (src/dongle.c) */
+typedef enum {
+    DONGLE_NONE = 0,         /* no AnyMouse vendor interface present */
+    DONGLE_NO_ACCESS,        /* interface present, but its hidraw node cannot be opened */
+    DONGLE_NOT_RESPONDING,   /* opened, no handshake reply yet (retried) */
+    DONGLE_INCOMPATIBLE,     /* AnyMouse framing at another protocol version: guarded, not synced */
+    DONGLE_LINKED            /* handshake passed; weights kept in sync */
+} dongle_link_t;
+
+typedef struct {
+    dongle_link_t link;
+    bool     legacy;            /* firmware predates HELLO (recognised by GET_INFO) */
+    bool     vectoring;         /* the dongle's mouse output is already vectored */
+    char     node[64];          /* /dev/hidrawN */
+    uint8_t  proto_ver;
+    uint8_t  fw[3];
+    uint8_t  mac[6];
+    uint16_t caps;              /* AMV_CAP_* */
+    uint32_t gen;
+    bool     bypass;
+    uint8_t  active_slot;
+    float    weights[8];
+    char     detail[160];
+} dongle_status_t;
 
 /* Hardware telemetry decoded directly over /dev/hidrawX (OpenMouse protocol) */
 typedef struct {
@@ -81,7 +109,48 @@ typedef struct {
     char     mouse_fw[32];
     char     dongle_fw[32];
     int      supported_rates[8];  /* Polling rates the device accepts, 0-terminated */
+    /* Set when the mouse sits behind the AnyMouse dongle and is reached through it */
+    bool     via_dongle;
+    int      tier;                /* AMV_TIER_* (dongle only) */
+    bool     can_set_cpi;
+    bool     can_set_rate;
+    /* Dongle only. What the mouse itself reports is polling_rate_hz (0 = it did not say); the other
+     * rates are what the USB side observes and are never a substitute for it. */
+    int      nominal_hz;          /* from the endpoint's bInterval and bus speed (a ceiling, not a measurement) */
+    int      measured_hz;         /* highest reports/s seen in the last 10 s (only rises while moving) */
+    int      pc_link_hz;          /* ceiling of the dongle -> PC link (Full-Speed USB: 1000), 0 = unknown */
+    bool     driver_error;        /* a vendor protocol exists for this mouse but it did not answer */
+    bool     motion_sync_known;   /* motion_sync holds a value the mouse reported */
+    int      link;                /* AMV_LINK_* (wired / via a receiver, awake / asleep), -1 = not reported */
+    bool     charging;
+    int      lod_level;           /* 0 = not reported; 1..n lowest first (see lod_levels) */
+    int      lod_levels;
+    bool     can_set_motion_sync;
+    bool     can_set_lod;
 } mouse_hw_status_t;
+
+/* A mouse plugged into the dongle, as the dongle reports it (GET_MOUSE / GET_MOUSE_CAPS / ...) */
+typedef struct {
+    amv_mouse_info_t     info;
+    amv_mouse_caps_t     caps;
+    bool                 has_caps;
+    bool                 caps_unsupported;     /* GET_MOUSE_CAPS answered BAD_CMD */
+    amv_settings_rep_t   settings;      /* GET_MOUSE_SETTINGS: what the driver could read, with write flags */
+    bool                 has_settings;  /* false: older firmware, or the driver exposes none */
+    bool                 settings_unsupported; /* GET_MOUSE_SETTINGS answered BAD_CMD */
+    amv_mouse_model_t    model;         /* catalog name for this id (firmware 0.6.0+) */
+    bool                 has_model;
+    bool                 model_unsupported;    /* GET_MOUSE_MODEL answered BAD_CMD */
+} dongle_mouse_t;
+
+/* Profile slots stored on the dongle (the Studio's "Profiles on the dongle") */
+typedef struct {
+    bool     known;       /* the slot mask has been read from the dongle */
+    uint8_t  count;       /* AMV_NUM_SLOTS */
+    uint8_t  mask;        /* bit n set: slot n holds a saved profile */
+    uint8_t  active;      /* slot the dongle is working from (and auto-saves into) */
+    bool     bypass;      /* all weights act as 1.0; the profile is untouched */
+} dongle_slots_t;
 
 /* Per-octant ballistic submovement calibration statistics */
 typedef struct {
@@ -180,6 +249,13 @@ typedef struct {
     _Atomic int      active_vid;          /* 0 when no device is grabbed */
     _Atomic int      active_pid;
 
+    /* Bumped whenever the dongle link writes octant_weights (the GUI re-syncs its widgets) */
+    _Atomic uint32_t dongle_weights_rev;
+    /* Bumped whenever the list of mice behind the dongle (or their CPI / rate / battery) changes */
+    _Atomic uint32_t dongle_mice_rev;
+    /* Bumped whenever the dongle's saved-slot mask, active slot or bypass flag changes */
+    _Atomic uint32_t dongle_slots_rev;
+
     /* Lock-free SPSC ring buffer: Thread 1 (evdev) -> Thread 2 (calibration) */
     tick_event_t     tick_ring[TICK_RING_SIZE];
     _Atomic uint32_t ring_head;
@@ -223,6 +299,29 @@ const char *devices_preferred_path(const mouse_device_t *d);
 int   devices_identify_by_motion(mouse_device_t *out, int timeout_ms);
 void  devices_request_switch(const char *path);
 void  devices_get_request(char *out, size_t out_sz);
+void  devices_request_reselect(void);
+void  devices_usb_parent_of(const char *sysfs_real, char *out, size_t out_sz);
+
+/* AnyMouse hardware dongle: discovery by protocol handshake, guard, weight sync (src/dongle.c) */
+void *dongle_thread(void *arg);
+bool  dongle_guards_usb_device(const char *usb_parent);  /* mice on this USB device must not be grabbed */
+bool  dongle_guard_active(void);                         /* any dongle (or unverified candidate) present */
+bool  dongle_get_status(dongle_status_t *out);           /* true when linked */
+int   dongle_cli(const char *action, const char *arg);   /* --dongle-status, --dongle-bypass on|off */
+int   dongle_get_mice(dongle_mouse_t *out, int max);      /* -1: no link, or firmware without mouse info */
+/* Write a mouse setting through the dongle (runs on the dongle thread). Returns the AMV_ST_* status,
+ * or -1 when not linked / timed out. */
+int   dongle_mouse_set(uint8_t index, bool cpi, uint16_t value);
+bool  dongle_fill_hw_status(mouse_hw_status_t *out);      /* first mouse behind the dongle -> hardware panel */
+int   dongle_first_mouse_set(bool cpi, uint16_t value);   /* dongle_mouse_set() on that mouse */
+/* Profile slots on the dongle. The three writers run on the dongle thread and return the AMV_ST_*
+ * status (AMV_ST_EMPTY: loading a slot that was never saved), or -1 when not linked / timed out. */
+bool  dongle_get_slots(dongle_slots_t *out);              /* false when no dongle is linked */
+int   dongle_slot_load(uint8_t slot);                     /* the dongle's weights replace the engine's */
+int   dongle_slot_save(uint8_t slot);                     /* saves the weights now in effect, and makes it active */
+int   dongle_set_bypass(bool on);
+int   dongle_set_mouse_setting(uint8_t index, uint8_t setting, uint16_t value);  /* LOD, Motion Sync (writable ones only) */
+int   dongle_first_mouse_index(void);                     /* index of the mouse the hardware panel shows, or -1 */
 
 /* Persistent user config & invoking-user helpers (src/config.c) */
 bool  config_user_home(char *out, size_t out_sz);
@@ -238,6 +337,7 @@ bool  hid_query_active_mouse(mouse_hw_status_t *out_status);
 bool  hid_set_mouse_cpi(int cpi);
 bool  hid_set_mouse_motion_sync(bool enabled);
 bool  hid_set_mouse_polling_rate(int hz);
+bool  hid_descriptor_has_collection(const char *hidraw_name, uint16_t want_page, uint16_t want_usage);
 
 /* FpsAimForge Steam detection & plugin/bundle installer (src/steam_install.c) */
 typedef enum {

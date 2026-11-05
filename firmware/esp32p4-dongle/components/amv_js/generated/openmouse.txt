@@ -1,0 +1,2 @@
+OpenMouse 326f292, QuickJS-ng 0.17.0
+js 1174096 bytes, bytecode 1179496 bytes

@@ -1,0 +1,11 @@
+menu "AnyMouse mouse drivers"
+
+config AMV_OPENMOUSE_JS
+    bool "Run OpenMouse's own drivers in QuickJS (components/amv_js)"
+    default y
+    help
+        Every mouse OpenMouse supports is driven by OpenMouse's unchanged TypeScript drivers in
+        the QuickJS engine (needs PSRAM). Off: the four C ports (Razer, Finalmouse, GearHub,
+        Logitech) are used instead.
+
+endmenu

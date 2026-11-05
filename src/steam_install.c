@@ -90,6 +90,22 @@ static off_t file_size(const char *p) {
     return stat(p, &st) == 0 ? st.st_size : -1;
 }
 
+static bool has_elf_magic(const char *p) {
+    int fd = open(p, O_RDONLY);
+    if (fd < 0) return false;
+    unsigned char hdr[4] = {0};
+    ssize_t n = read(fd, hdr, sizeof(hdr));
+    close(fd);
+    return n == 4 && hdr[0] == 0x7f && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F';
+}
+
+/* Rename src -> dst, unlinking dst first on retry if fuseblk/NTFS rejects atomic overwrite */
+static bool replace_file_atomic(const char *src, const char *dst) {
+    if (rename(src, dst) == 0) return true;
+    unlink(dst);
+    return rename(src, dst) == 0;
+}
+
 /* Copy src -> dst atomically (temp file + rename) so a running game never maps a half-written file */
 static bool install_file(const char *src, const char *dst, mode_t mode) {
     size_t len = 0;
@@ -98,14 +114,16 @@ static bool install_file(const char *src, const char *dst, mode_t mode) {
 
     char tmp[PATH_MAX + 16];
     snprintf(tmp, sizeof(tmp), "%s.anymouse-tmp", dst);
+    unlink(tmp);
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, mode);
     bool ok = fd >= 0 && write(fd, data, len) == (ssize_t)len;
     if (fd >= 0) {
+        (void)fsync(fd);
         if (fchmod(fd, mode) != 0) ok = false;
         if (close(fd) != 0) ok = false;
     }
     free(data);
-    if (ok && rename(tmp, dst) != 0) ok = false;
+    if (ok && !replace_file_atomic(tmp, dst)) ok = false;
     if (!ok) {
         unlink(tmp);
         return false;
@@ -283,6 +301,8 @@ bool faf_install_apply(char *msg, size_t msg_sz) {
         return false;
     }
 
+    faf_install_state_t prev_state = info.state;
+
     char exe[PATH_MAX + 32], bin[PATH_MAX + 32], plugin[PATH_MAX + 32], bundle[PATH_MAX + 32];
     snprintf(exe, sizeof(exe), "%s/" FAF_EXE_NAME, info.game_dir);
     snprintf(bin, sizeof(bin), "%s/" FAF_EXE_NAME ".bin", info.game_dir);
@@ -292,17 +312,17 @@ bool faf_install_apply(char *msg, size_t msg_sz) {
     /* Move the real game binary aside (also replaces a stale .bin after a Steam update) */
     if (path_exists(exe) && !is_anymouse_launcher(exe)) {
         /* Refuse to overwrite the real game with anything that doesn't look like it */
-        if (file_size(exe) < (1 << 20)) {
-            snprintf(msg, msg_sz, "%s is unexpectedly small; not touching it (verify game files in Steam)", exe);
+        if (file_size(exe) < (1 << 20) || !has_elf_magic(exe)) {
+            snprintf(msg, msg_sz, "%s is unexpectedly small or not a valid ELF; verify game files in Steam", exe);
             return false;
         }
-        if (rename(exe, bin) != 0) {
+        if (!replace_file_atomic(exe, bin)) {
             snprintf(msg, msg_sz, "Could not move %s aside: %s", exe, strerror(errno));
             return false;
         }
     }
-    if (!path_exists(bin)) {
-        snprintf(msg, msg_sz, "FpsAimForge.bin missing; verify game files in Steam, then install again");
+    if (!path_exists(bin) || !has_elf_magic(bin)) {
+        snprintf(msg, msg_sz, "FpsAimForge.bin missing or invalid; verify game files in Steam, then install again");
         return false;
     }
     if (!install_file(src_plugin, plugin, 0755) || !install_file(src_launcher, exe, 0755)) {
@@ -313,7 +333,13 @@ bool faf_install_apply(char *msg, size_t msg_sz) {
         snprintf(msg, msg_sz, "Failed writing bundle to %s: %s", info.bundle_dir, strerror(errno));
         return false;
     }
-    snprintf(msg, msg_sz, "Installed into %s (bundle: %s)", info.game_dir, bundle);
+
+    const char *verb = "Installed";
+    if (prev_state == FAF_INSTALL_NEEDS_REPAIR)      verb = "Repaired";
+    else if (prev_state == FAF_INSTALL_OUTDATED)     verb = "Updated";
+    else if (prev_state == FAF_INSTALL_OK)           verb = "Reinstalled";
+
+    snprintf(msg, msg_sz, "%s FpsAimForge launcher, plugin & bundle (%s)", verb, info.game_dir);
     return true;
 }
 
@@ -330,7 +356,7 @@ bool faf_install_remove(char *msg, size_t msg_sz) {
     snprintf(bundle, sizeof(bundle), "%s/" FAF_BUNDLE_NAME, info.bundle_dir);
 
     if (is_anymouse_launcher(exe)) {
-        if (!path_exists(bin) || rename(bin, exe) != 0) {
+        if (!path_exists(bin) || !replace_file_atomic(bin, exe)) {
             snprintf(msg, msg_sz, "Could not restore original binary (verify game files in Steam)");
             return false;
         }
@@ -358,7 +384,7 @@ static bool write_text(const char *path, const char *text) {
 
 /*
  * Grants the logged-in seat user (uaccess) access to mice, the two supported
- * vendor config interfaces and /dev/uinput, so the engine can run without sudo
+ * vendor config interfaces, the AnyMouse dongle and /dev/uinput, so the engine can run without sudo
  * (it then uses the normal scheduler instead of SCHED_FIFO).
  */
 bool udev_install_rules(char *msg, size_t msg_sz) {
@@ -373,7 +399,10 @@ bool udev_install_rules(char *msg, size_t msg_sz) {
         "SUBSYSTEM==\"input\", KERNEL==\"event*\", ENV{ID_INPUT_MOUSE}==\"1\", TAG+=\"uaccess\"\n"
         "# Vendor configuration interfaces (CPI / polling rate)\n"
         "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"361d\", TAG+=\"uaccess\"\n"
-        "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"3151\", TAG+=\"uaccess\"\n";
+        "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"3151\", TAG+=\"uaccess\"\n"
+        "# AnyMouse dongle control channel (also used by AnyMouse Studio in the browser).\n"
+        "# Access only: the app identifies the dongle by its protocol handshake, not by this match.\n"
+        "SUBSYSTEM==\"hidraw\", ATTRS{manufacturer}==\"AnyMouse\", TAG+=\"uaccess\"\n";
 
     if (!write_text("/etc/udev/rules.d/70-anymouse.rules", RULES)) {
         snprintf(msg, msg_sz, "Failed writing /etc/udev/rules.d/70-anymouse.rules: %s", strerror(errno));

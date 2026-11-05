@@ -823,6 +823,7 @@ void *calibration_thread(void *arg) {
 
     uint64_t last_proc_scan_ns = 0;
     uint64_t last_ue4_poll_ns  = 0;
+    uint64_t last_faf_check_ns = 0;
     pid_t    kovaaks_pid = -1;
     uint64_t kovaaks_base = UE4_DEFAULT_IMAGE_BASE;
     kovaaks_session_state_t session_state = KOVAAKS_STATE_OFFLINE;
@@ -839,6 +840,21 @@ void *calibration_thread(void *arg) {
             faf_shm = open_faf_shm();
         }
         bool faf_active = poll_faf_telemetry(faf_shm, &prev_faf_rounds);
+
+        /* Periodically check (every 3s while FAF is offline) if a Steam update overwrote the
+         * FpsAimForge launcher or if our local plugin/launcher build is newer, and auto-repair. */
+        if (!faf_active && (now_ns - last_faf_check_ns > 3000000000ULL)) {
+            last_faf_check_ns = now_ns;
+            faf_install_info_t faf_info;
+            faf_install_detect(&faf_info);
+            if (faf_info.state == FAF_INSTALL_NEEDS_REPAIR ||
+                faf_info.state == FAF_INSTALL_OUTDATED) {
+                char faf_msg[512] = {0};
+                if (faf_install_apply(faf_msg, sizeof(faf_msg))) {
+                    printf("[FAF] Auto-repaired after update: %s\n", faf_msg);
+                }
+            }
+        }
 
         /* 2. Sunset Fallback: Poll KovaaK's only if FAF is offline and ANYMOUSE_ENABLE_KOVAAKS=1 */
         if (!faf_active && kovaaks_enabled) {

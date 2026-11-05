@@ -20,6 +20,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <link.h>
+#include <elf.h>
 
 #include "faf_telemetry.h"
 
@@ -30,33 +31,38 @@
 #define RAD2DEG (180.0f / (float)M_PI)
 
 /* ============================================================================
- * FpsAimForge v0.7.0 Binary Offsets (Verified via ELF Symbol Table & Disasm)
- * ============================================================================ */
+ * FpsAimForge Binary Offsets (Fallback Defaults + Dynamic ELF Symbol Resolver)
+ * ============================================================================
+ * Defaults match the current Steam FpsAimForge build (BuildID 5a56389f0c87...).
+ * At startup, resolve_faf_symbols_and_offsets() also parses /proc/self/exe's
+ * ELF .symtab/.strtab and scans vtables/instructions so future Steam updates
+ * continue working automatically without recompiling the plugin.
+ */
 
 /* Stopwatch::GetElapsedMicros() const */
-#define FAF_FN_STOPWATCH_GET_ELAPSED_MICROS 0x118f46ULL
+#define FAF_FN_STOPWATCH_GET_ELAPSED_MICROS 0x11c320ULL
 
-/* Expected original vtable slot targets (for safety verification) */
-#define FAF_FN_ON_TICK_START    0x1ad6aeULL
-#define FAF_FN_ON_DETACH        0x1a9c3eULL
-#define FAF_FN_UPDATE_STATE     0x1a78e6ULL
-#define FAF_FN_ON_SCENARIO_DONE 0x1a60aaULL
+/* Expected original vtable slot targets (fallback RVAs) */
+#define FAF_FN_ON_TICK_START    0x1b1c6cULL
+#define FAF_FN_ON_DETACH        0x1ae072ULL
+#define FAF_FN_UPDATE_STATE     0x1abd1aULL
+#define FAF_FN_ON_SCENARIO_DONE 0x1aa4deULL
 
 /* Vtable addresses in .data.rel.ro for BaseScenario and all 12 Scenario types */
-static const uint64_t kScenarioVtables[] = {
-    0xaa5728ULL, /* aim::BaseScenario */
-    0xaa1600ULL, /* aim::AngleStrafeScenario */
-    0xaa1760ULL, /* aim::BarrelScenario */
-    0xaa1850ULL, /* aim::BounceScenario */
-    0xaa1928ULL, /* aim::CenteringScenario */
-    0xaa19d8ULL, /* aim::CircleScenario */
-    0xaa1ae8ULL, /* aim::LinearScenario */
-    0xaa1b98ULL, /* aim::SineScenario */
-    0xaa1c48ULL, /* aim::StaticScenario */
-    0xaa1d28ULL, /* aim::StrafeScenario */
-    0xaa1dd8ULL, /* aim::WallArcScenario */
-    0xaa1ee8ULL, /* aim::WallWanderScenario */
-    0xaa1fb0ULL, /* aim::WaypointScenario */
+static const uint64_t kFallbackScenarioVtables[] = {
+    0xaab750ULL, /* aim::BaseScenario */
+    0xaa7600ULL, /* aim::AngleStrafeScenario */
+    0xaa7760ULL, /* aim::BarrelScenario */
+    0xaa7850ULL, /* aim::BounceScenario */
+    0xaa7928ULL, /* aim::CenteringScenario */
+    0xaa79d8ULL, /* aim::CircleScenario */
+    0xaa7ae8ULL, /* aim::LinearScenario */
+    0xaa7b98ULL, /* aim::SineScenario */
+    0xaa7c48ULL, /* aim::StaticScenario */
+    0xaa7d28ULL, /* aim::StrafeScenario */
+    0xaa7dd8ULL, /* aim::WallArcScenario */
+    0xaa7ee8ULL, /* aim::WallWanderScenario */
+    0xaa7fb0ULL, /* aim::WaypointScenario */
 };
 
 /* Vtable slot indices (from start of vtable symbol, where +0x10 is vptr[0]) */
@@ -82,10 +88,13 @@ static const uint64_t kScenarioVtables[] = {
 #define OFF_HAS_LAST_REMOVED     0x268 /* bool */
 #define OFF_RUN_STATE            0x43c /* int32_t ScenarioRunState */
 #define OFF_EFFECTIVE_CM_PER_360 0x4e0 /* float */
-#define OFF_RADIANS_PER_DOT      0x4f4 /* float */
-#define OFF_STATS_NUM_HITS       0xa60 /* double */
-#define OFF_STATS_NUM_SHOTS      0xa68 /* double */
-#define OFF_STATS_NUM_KILLS      0xa70 /* double */
+
+/* Tail offsets that can shift if protobuf members (Settings / ScenarioDef) grow;
+ * initialized to current build defaults and auto-verified from machine code at init. */
+static size_t g_off_radians_per_dot = 0x500; /* float (was 0x4f4 in v0.7.0) */
+static size_t g_off_stats_num_hits  = 0xa98; /* double (was 0xa60 in v0.7.0) */
+static size_t g_off_stats_num_shots = 0xaa0; /* double (was 0xa68 in v0.7.0) */
+static size_t g_off_stats_num_kills = 0xaa8; /* double (was 0xa70 in v0.7.0) */
 
 /* Field offsets inside aim::Target (sizeof == 0xd0) */
 #define TARGET_STRIDE            0x0d0
@@ -368,16 +377,16 @@ static void sync_scenario_metadata(void *self, int32_t state) {
 
     g_shm->duration_seconds = (float)(*(const int32_t *)((const char *)self + OFF_DEF_DURATION_SEC));
     g_shm->cm_per_360       = *(const float *)((const char *)self + OFF_EFFECTIVE_CM_PER_360);
-    g_shm->radians_per_dot  = *(const float *)((const char *)self + OFF_RADIANS_PER_DOT);
+    g_shm->radians_per_dot  = *(const float *)((const char *)self + g_off_radians_per_dot);
 
     if (orig_GetElapsedMicros) {
         int64_t us = orig_GetElapsedMicros((const char *)self + OFF_RUN_STOPWATCH);
         g_shm->elapsed_seconds = (float)us / 1e6f;
     }
 
-    g_shm->num_hits  = *(const double *)((const char *)self + OFF_STATS_NUM_HITS);
-    g_shm->num_shots = *(const double *)((const char *)self + OFF_STATS_NUM_SHOTS);
-    g_shm->num_kills = *(const double *)((const char *)self + OFF_STATS_NUM_KILLS);
+    g_shm->num_hits  = *(const double *)((const char *)self + g_off_stats_num_hits);
+    g_shm->num_shots = *(const double *)((const char *)self + g_off_stats_num_shots);
+    g_shm->num_kills = *(const double *)((const char *)self + g_off_stats_num_kills);
 
     atomic_store_explicit(&g_shm->run_state, state, memory_order_release);
     atomic_store_explicit(&g_shm->heartbeat_ns, monotonic_ns(), memory_order_release);
@@ -423,9 +432,9 @@ static void hook_UpdateState(void *self, void *update_data) {
     /* Record 1000 Hz camera trajectory */
     record_traj_sample(now_us, cam_yaw, cam_pitch, false);
 
-    double prev_shots = *(const double *)((const char *)self + OFF_STATS_NUM_SHOTS);
-    double prev_hits  = *(const double *)((const char *)self + OFF_STATS_NUM_HITS);
-    double prev_kills = *(const double *)((const char *)self + OFF_STATS_NUM_KILLS);
+    double prev_shots = *(const double *)((const char *)self + g_off_stats_num_shots);
+    double prev_hits  = *(const double *)((const char *)self + g_off_stats_num_hits);
+    double prev_kills = *(const double *)((const char *)self + g_off_stats_num_kills);
 
     /* Snapshot visible targets before UpdateState processes clicks/kills */
     faf_target_info_t pre_targets[FAF_MAX_ACTIVE_TARGETS];
@@ -457,9 +466,9 @@ static void hook_UpdateState(void *self, void *update_data) {
     /* Execute FpsAimForge's actual UpdateState */
     orig_UpdateState(self, update_data);
 
-    double new_shots = *(const double *)((const char *)self + OFF_STATS_NUM_SHOTS);
-    double new_hits  = *(const double *)((const char *)self + OFF_STATS_NUM_HITS);
-    double new_kills = *(const double *)((const char *)self + OFF_STATS_NUM_KILLS);
+    double new_shots = *(const double *)((const char *)self + g_off_stats_num_shots);
+    double new_hits  = *(const double *)((const char *)self + g_off_stats_num_hits);
+    double new_kills = *(const double *)((const char *)self + g_off_stats_num_kills);
 
     bool killed = (new_kills > prev_kills);
     bool shot   = (new_shots > prev_shots);
@@ -551,17 +560,175 @@ static void hook_OnDetach(void *self) {
 }
 
 /* ============================================================================
- * Plugin Constructor & Destructor
+ * Dynamic ELF Symbol, Vtable & Struct-Offset Resolver + Plugin Lifecycle
  * ============================================================================ */
+
+#define MAX_DISCOVERED_VTABLES 64
+
+static uintptr_t g_relro_start = 0;
+static uintptr_t g_relro_end   = 0;
 
 static int find_pie_base_cb(struct dl_phdr_info *info, size_t size, void *data) {
     (void)size;
     (void)data;
     if (info->dlpi_name && info->dlpi_name[0] == '\0') {
         g_pie_base = (uintptr_t)info->dlpi_addr;
+        for (int i = 0; i < info->dlpi_phnum; i++) {
+            if (info->dlpi_phdr[i].p_type == PT_GNU_RELRO) {
+                g_relro_start = g_pie_base + info->dlpi_phdr[i].p_vaddr;
+                g_relro_end   = g_relro_start + info->dlpi_phdr[i].p_memsz;
+            }
+        }
         return 1;
     }
     return 0;
+}
+
+static void add_unique_vtable(uint64_t *list, size_t *count, uint64_t rva) {
+    if (!rva || *count >= MAX_DISCOVERED_VTABLES) return;
+    for (size_t i = 0; i < *count; i++) {
+        if (list[i] == rva) return;
+    }
+    list[(*count)++] = rva;
+}
+
+static bool ends_with(const char *str, const char *suffix) {
+    size_t slen = strlen(str);
+    size_t suflen = strlen(suffix);
+    return slen >= suflen && strcmp(str + slen - suflen, suffix) == 0;
+}
+
+/* Parse /proc/self/exe's ELF .symtab/.strtab so Steam updates that shift code/data
+ * addresses continue working without recompiling libanymouse_faf.so. */
+static void resolve_faf_symbols_from_elf(uint64_t *rva_get_elapsed,
+                                         uint64_t *rva_tick_start,
+                                         uint64_t *rva_detach,
+                                         uint64_t *rva_update_state,
+                                         uint64_t *rva_scenario_done,
+                                         uint64_t *rva_refresh_state,
+                                         uint64_t *rva_cm_to_rad,
+                                         uint64_t *vt_rvas,
+                                         size_t   *vt_count) {
+    int fd = open("/proc/self/exe", O_RDONLY);
+    if (fd < 0) return;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < (off_t)sizeof(Elf64_Ehdr)) {
+        close(fd);
+        return;
+    }
+    size_t file_sz = (size_t)st.st_size;
+    const uint8_t *map = (const uint8_t *)mmap(NULL, file_sz, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (map == MAP_FAILED) return;
+
+    const Elf64_Ehdr *eh = (const Elf64_Ehdr *)map;
+    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0 ||
+        eh->e_ident[EI_CLASS] != ELFCLASS64 ||
+        eh->e_shentsize != sizeof(Elf64_Shdr) ||
+        eh->e_shoff == 0 ||
+        eh->e_shoff + (size_t)eh->e_shnum * sizeof(Elf64_Shdr) > file_sz) {
+        munmap((void *)map, file_sz);
+        return;
+    }
+
+    const Elf64_Shdr *shdrs = (const Elf64_Shdr *)(map + eh->e_shoff);
+    for (uint16_t s = 0; s < eh->e_shnum; s++) {
+        if (shdrs[s].sh_type != SHT_SYMTAB && shdrs[s].sh_type != SHT_DYNSYM) continue;
+        if (shdrs[s].sh_link >= eh->e_shnum) continue;
+
+        const Elf64_Shdr *str_sh = &shdrs[shdrs[s].sh_link];
+        if (shdrs[s].sh_offset + shdrs[s].sh_size > file_sz ||
+            str_sh->sh_offset + str_sh->sh_size > file_sz ||
+            shdrs[s].sh_entsize != sizeof(Elf64_Sym)) {
+            continue;
+        }
+
+        const Elf64_Sym *syms = (const Elf64_Sym *)(map + shdrs[s].sh_offset);
+        size_t nsyms = shdrs[s].sh_size / sizeof(Elf64_Sym);
+        const char *strtab = (const char *)(map + str_sh->sh_offset);
+        size_t strtab_sz = str_sh->sh_size;
+
+        for (size_t i = 0; i < nsyms; i++) {
+            uint32_t name_off = syms[i].st_name;
+            if (name_off == 0 || name_off >= strtab_sz || syms[i].st_value == 0) continue;
+            const char *name = strtab + name_off;
+
+            if (strcmp(name, "_ZNK3aim9Stopwatch16GetElapsedMicrosEv") == 0) {
+                *rva_get_elapsed = syms[i].st_value;
+            } else if (strcmp(name, "_ZN3aim8Scenario11OnTickStartEv") == 0) {
+                *rva_tick_start = syms[i].st_value;
+            } else if (strcmp(name, "_ZN3aim8Scenario8OnDetachEv") == 0) {
+                *rva_detach = syms[i].st_value;
+            } else if (strcmp(name, "_ZN3aim12BaseScenario11UpdateStateEPNS_15UpdateStateDataE") == 0) {
+                *rva_update_state = syms[i].st_value;
+            } else if (strcmp(name, "_ZN3aim12BaseScenario14OnScenarioDoneEv") == 0) {
+                *rva_scenario_done = syms[i].st_value;
+            } else if (strcmp(name, "_ZN3aim8Scenario12RefreshStateEv") == 0) {
+                *rva_refresh_state = syms[i].st_value;
+            } else if (strcmp(name, "_ZN3aim23CmPer360ToRadiansPerDotEff") == 0) {
+                *rva_cm_to_rad = syms[i].st_value;
+            } else if (strncmp(name, "_ZTVN3aim", 9) == 0 && ends_with(name, "ScenarioE")) {
+                add_unique_vtable(vt_rvas, vt_count, syms[i].st_value);
+            }
+        }
+    }
+
+    munmap((void *)map, file_sz);
+}
+
+/* Auto-detect tail struct offsets inside aim::Scenario / aim::BaseScenario from machine code */
+static void auto_detect_struct_offsets(uintptr_t fn_scenario_done,
+                                       uintptr_t fn_refresh_state,
+                                       uintptr_t fn_cm_to_rad) {
+    /* 1. In BaseScenario::OnScenarioDone(), look for:
+     *    f2 0f 58 8b <disp32>   addsd <disp32>(%rbx), %xmm1
+     *    f2 0f 11 8b <disp32>   movsd %xmm1, <disp32>(%rbx)
+     * where <disp32> is OFF_STATS_NUM_HITS (and +8 is num_shots, +16 is num_kills). */
+    if (fn_scenario_done) {
+        const uint8_t *code = (const uint8_t *)fn_scenario_done;
+        for (size_t i = 0; i + 16 <= 192; i++) {
+            if (code[i] == 0xf2 && code[i + 1] == 0x0f && code[i + 2] == 0x58 && code[i + 3] == 0x8b &&
+                code[i + 8] == 0xf2 && code[i + 9] == 0x0f && code[i + 10] == 0x11 && code[i + 11] == 0x8b) {
+                uint32_t disp1 = 0, disp2 = 0;
+                memcpy(&disp1, &code[i + 4], sizeof(disp1));
+                memcpy(&disp2, &code[i + 12], sizeof(disp2));
+                if (disp1 == disp2 && disp1 >= 0x600 && disp1 <= 0x2000) {
+                    g_off_stats_num_hits  = (size_t)disp1;
+                    g_off_stats_num_shots = (size_t)disp1 + 8;
+                    g_off_stats_num_kills = (size_t)disp1 + 16;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* 2. In Scenario::RefreshState(), look for `call CmPer360ToRadiansPerDot` (e8 <rel32>)
+     *    followed within 24 bytes by `movss %xmm0, <disp32>(%rbx)` (f3 0f 11 83 <disp32>). */
+    if (fn_refresh_state && fn_cm_to_rad) {
+        const uint8_t *code = (const uint8_t *)fn_refresh_state;
+        for (size_t i = 0; i + 32 <= 768; i++) {
+            if (code[i] == 0xe8) {
+                int32_t rel = 0;
+                memcpy(&rel, &code[i + 1], sizeof(rel));
+                uintptr_t target = (uintptr_t)(code + i + 5) + (intptr_t)rel;
+                if (target == fn_cm_to_rad) {
+                    for (size_t j = i + 5; j + 8 <= i + 29; j++) {
+                        if (code[j] == 0xf3 && code[j + 1] == 0x0f &&
+                            code[j + 2] == 0x11 && code[j + 3] == 0x83) {
+                            uint32_t disp = 0;
+                            memcpy(&disp, &code[j + 4], sizeof(disp));
+                            if (disp >= 0x300 && disp <= 0x900) {
+                                g_off_radians_per_dot = (size_t)disp;
+                            }
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
 }
 
 __attribute__((constructor))
@@ -577,11 +744,79 @@ static void faf_plugin_init(void) {
         return;
     }
 
-    /* Verify binary vtable signature before patching */
-    uintptr_t *base_vtable = (uintptr_t *)(g_pie_base + kScenarioVtables[0]);
-    if (base_vtable[VSLOT_ON_TICK_START] != (g_pie_base + FAF_FN_ON_TICK_START) ||
-        base_vtable[VSLOT_UPDATE_STATE]  != (g_pie_base + FAF_FN_UPDATE_STATE)) {
-        fprintf(stderr, "[AnyMouse-FAF] Warning: FpsAimForge binary vtable mismatch, plugin disabled.\n");
+    uint64_t rva_get_elapsed   = FAF_FN_STOPWATCH_GET_ELAPSED_MICROS;
+    uint64_t rva_tick_start    = FAF_FN_ON_TICK_START;
+    uint64_t rva_detach        = FAF_FN_ON_DETACH;
+    uint64_t rva_update_state  = FAF_FN_UPDATE_STATE;
+    uint64_t rva_scenario_done = FAF_FN_ON_SCENARIO_DONE;
+    uint64_t rva_refresh_state = 0;
+    uint64_t rva_cm_to_rad     = 0;
+
+    uint64_t vt_rvas[MAX_DISCOVERED_VTABLES];
+    size_t   vt_count = 0;
+
+    resolve_faf_symbols_from_elf(&rva_get_elapsed, &rva_tick_start, &rva_detach,
+                                 &rva_update_state, &rva_scenario_done,
+                                 &rva_refresh_state, &rva_cm_to_rad,
+                                 vt_rvas, &vt_count);
+
+    for (size_t i = 0; i < sizeof(kFallbackScenarioVtables) / sizeof(kFallbackScenarioVtables[0]); i++) {
+        add_unique_vtable(vt_rvas, &vt_count, kFallbackScenarioVtables[i]);
+    }
+
+    uintptr_t fn_tick_start    = g_pie_base + rva_tick_start;
+    uintptr_t fn_detach        = g_pie_base + rva_detach;
+    uintptr_t fn_update_state  = g_pie_base + rva_update_state;
+    uintptr_t fn_scenario_done = g_pie_base + rva_scenario_done;
+
+    /* Also scan PT_GNU_RELRO for any additional concrete Scenario vtables matching the 4-method signature */
+    if (g_relro_start && g_relro_end > g_relro_start + 13 * sizeof(uintptr_t)) {
+        for (uintptr_t p = g_relro_start; p + 13 * sizeof(uintptr_t) <= g_relro_end; p += sizeof(uintptr_t)) {
+            const uintptr_t *vt = (const uintptr_t *)p;
+            if (vt[VSLOT_ON_TICK_START]    == fn_tick_start &&
+                vt[VSLOT_ON_DETACH]        == fn_detach &&
+                vt[VSLOT_UPDATE_STATE]     == fn_update_state &&
+                vt[VSLOT_ON_SCENARIO_DONE] == fn_scenario_done) {
+                add_unique_vtable(vt_rvas, &vt_count, (uint64_t)(p - g_pie_base));
+            }
+        }
+    }
+
+    auto_detect_struct_offsets(fn_scenario_done,
+                               rva_refresh_state ? (g_pie_base + rva_refresh_state) : 0,
+                               rva_cm_to_rad ? (g_pie_base + rva_cm_to_rad) : 0);
+
+    orig_OnTickStart      = (fn_void_self_t)fn_tick_start;
+    orig_OnDetach         = (fn_void_self_t)fn_detach;
+    orig_UpdateState      = (fn_update_state_t)fn_update_state;
+    orig_OnScenarioDone   = (fn_void_self_t)fn_scenario_done;
+    orig_GetElapsedMicros = (fn_stopwatch_micros_t)(g_pie_base + rva_get_elapsed);
+
+    /* Patch all verified Scenario vtables in .data.rel.ro */
+    long page_size = sysconf(_SC_PAGESIZE);
+    size_t hooked_vtables = 0;
+    for (size_t i = 0; i < vt_count; i++) {
+        uintptr_t *vt = (uintptr_t *)(g_pie_base + vt_rvas[i]);
+        if ((uintptr_t)vt < g_pie_base) continue;
+        if (vt[VSLOT_ON_TICK_START]    != fn_tick_start ||
+            vt[VSLOT_ON_DETACH]        != fn_detach ||
+            vt[VSLOT_UPDATE_STATE]     != fn_update_state ||
+            vt[VSLOT_ON_SCENARIO_DONE] != fn_scenario_done) {
+            continue;
+        }
+        uintptr_t page_start = ((uintptr_t)vt) & ~((uintptr_t)page_size - 1);
+        if (mprotect((void *)page_start, (size_t)page_size * 2, PROT_READ | PROT_WRITE) == 0) {
+            vt[VSLOT_ON_TICK_START]    = (uintptr_t)hook_OnTickStart;
+            vt[VSLOT_ON_DETACH]        = (uintptr_t)hook_OnDetach;
+            vt[VSLOT_UPDATE_STATE]     = (uintptr_t)hook_UpdateState;
+            vt[VSLOT_ON_SCENARIO_DONE] = (uintptr_t)hook_OnScenarioDone;
+            mprotect((void *)page_start, (size_t)page_size * 2, PROT_READ);
+            hooked_vtables++;
+        }
+    }
+
+    if (hooked_vtables == 0) {
+        fprintf(stderr, "[AnyMouse-FAF] Warning: No matching FpsAimForge Scenario vtables found, plugin disabled.\n");
         return;
     }
 
@@ -624,28 +859,8 @@ static void faf_plugin_init(void) {
     atomic_store_explicit(&g_shm->run_state, FAF_STATE_MENU, memory_order_release);
     atomic_store_explicit(&g_shm->heartbeat_ns, monotonic_ns(), memory_order_release);
 
-    orig_OnTickStart      = (fn_void_self_t)(g_pie_base + FAF_FN_ON_TICK_START);
-    orig_OnDetach         = (fn_void_self_t)(g_pie_base + FAF_FN_ON_DETACH);
-    orig_UpdateState      = (fn_update_state_t)(g_pie_base + FAF_FN_UPDATE_STATE);
-    orig_OnScenarioDone   = (fn_void_self_t)(g_pie_base + FAF_FN_ON_SCENARIO_DONE);
-    orig_GetElapsedMicros = (fn_stopwatch_micros_t)(g_pie_base + FAF_FN_STOPWATCH_GET_ELAPSED_MICROS);
-
-    /* Patch all 13 Scenario vtables in .data.rel.ro */
-    long page_size = sysconf(_SC_PAGESIZE);
-    for (size_t i = 0; i < sizeof(kScenarioVtables) / sizeof(kScenarioVtables[0]); i++) {
-        uintptr_t *vt = (uintptr_t *)(g_pie_base + kScenarioVtables[i]);
-        uintptr_t page_start = ((uintptr_t)vt) & ~((uintptr_t)page_size - 1);
-        if (mprotect((void *)page_start, (size_t)page_size * 2, PROT_READ | PROT_WRITE) == 0) {
-            vt[VSLOT_ON_TICK_START]    = (uintptr_t)hook_OnTickStart;
-            vt[VSLOT_ON_DETACH]        = (uintptr_t)hook_OnDetach;
-            vt[VSLOT_UPDATE_STATE]     = (uintptr_t)hook_UpdateState;
-            vt[VSLOT_ON_SCENARIO_DONE] = (uintptr_t)hook_OnScenarioDone;
-            mprotect((void *)page_start, (size_t)page_size * 2, PROT_READ);
-        }
-    }
-
-    fprintf(stderr, "[AnyMouse-FAF] Native Telemetry Plugin active (PID %d -> %s)\n",
-            (int)getpid(), ANYMOUSE_FAF_SHM_NAME);
+    fprintf(stderr, "[AnyMouse-FAF] Native Telemetry Plugin active (PID %d -> %s, %zu vtables hooked, stats@0x%zx, rad@0x%zx)\n",
+            (int)getpid(), ANYMOUSE_FAF_SHM_NAME, hooked_vtables, g_off_stats_num_hits, g_off_radians_per_dot);
 }
 
 __attribute__((destructor))

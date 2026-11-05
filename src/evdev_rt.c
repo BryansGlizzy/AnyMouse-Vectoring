@@ -185,19 +185,30 @@ static void set_rt_error(const char *msg) {
     if (changed && msg[0]) fprintf(stderr, "[WARN] %s\n", msg); /* Retries repeat every second */
 }
 
-/* Decide which device to hold: the user's explicit choice, otherwise the best-ranked mouse */
-static bool resolve_target_device(char *path, size_t path_sz, mouse_device_t *dev) {
+/* Decide which device to hold: the user's explicit choice, otherwise the best-ranked mouse.
+ * Returns false with *why set when nothing should be grabbed for a reason other than absence. */
+static bool resolve_target_device(char *path, size_t path_sz, mouse_device_t *dev, char *why, size_t why_sz) {
     char req[256];
     devices_get_request(req, sizeof(req));
     memset(dev, 0, sizeof(*dev));
+    why[0] = '\0';
     if (req[0]) {
         snprintf(path, path_sz, "%s", req);
         if (!devices_lookup(req, dev)) {
             snprintf(dev->name, sizeof(dev->name), "%s", req);
+        } else if (dev->is_dongle) {
+            snprintf(why, why_sz, "%.60s is the AnyMouse dongle's output, already vectored in hardware; not grabbing it",
+                     dev->name);
+            return false;
         }
         return access(req, F_OK) == 0;
     }
-    if (!devices_pick_auto(dev)) return false;
+    if (!devices_pick_auto(dev)) {
+        if (dongle_guard_active()) {
+            snprintf(why, why_sz, "AnyMouse dongle is vectoring in hardware; software engine idle");
+        }
+        return false;
+    }
     snprintf(path, path_sz, "%s", devices_preferred_path(dev));
     return true;
 }
@@ -307,14 +318,15 @@ void *evdev_rt_thread(void *arg) {
             next_attempt_ms = 0;
         }
         if (evfd < 0 && monotonic_ms() >= next_attempt_ms) {
-            char path[256];
+            char path[256], why[160];
             mouse_device_t dev;
-            if (!resolve_target_device(path, sizeof(path), &dev)) {
+            if (!resolve_target_device(path, sizeof(path), &dev, why, sizeof(why))) {
                 char err[160];
                 char req[256];
                 devices_get_request(req, sizeof(req));
-                if (req[0]) snprintf(err, sizeof(err), "Waiting for %s to be connected...", req);
-                else        snprintf(err, sizeof(err), "No mouse detected; waiting for one to be plugged in...");
+                if (why[0])      snprintf(err, sizeof(err), "%s", why);
+                else if (req[0]) snprintf(err, sizeof(err), "Waiting for %.120s to be connected...", req);
+                else             snprintf(err, sizeof(err), "No mouse detected; waiting for one to be plugged in...");
                 set_rt_error(err);
             } else if (acquire_device(path, &dev, &evfd, &ufd)) {
                 acc_dx = acc_dy = 0;

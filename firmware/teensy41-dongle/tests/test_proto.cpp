@@ -9,7 +9,8 @@ static unsigned applies, reboots;
 static void apply(const float *,bool) { ++applies; }
 static void reboot() { ++reboots; }
 static void id(uint8_t *p) { for(int i=0;i<6;++i) p[i]=i; }
-static uint32_t uptime() { return 123; }
+static uint32_t now_ms=123;
+static uint32_t uptime() { return now_ms; }
 static uint8_t mice() { return 2; }
 static void stats(uint8_t *p,uint8_t *n) { amv_stats_payload_t s={}; s.sets_ok=42; memcpy(p,&s,sizeof s); *n=sizeof s; }
 static amv_profile_t saved[4]; static uint8_t mask;
@@ -27,15 +28,17 @@ static void request(uint8_t cmd,const void *p=nullptr,uint8_t len=0,uint8_t stat
 }
 template<class T> static T payload() { T p; memcpy(&p,out+8,sizeof p); return p; }
 static void event(uint8_t source) { assert(amv_proto_take_event(ev)); assert(ev[3]==AMV_CMD_EVENT_STATE && ev[4]==0 && ev[6]==39 && ev[46]==source); }
-static uint8_t fake_count=1;
+static uint8_t fake_count=1, sent_cmd;
+static uint16_t fake_vid=0x361d, sent_value;
 static uint8_t desc[53];
 static const amv_mouse_ops_t mouse_ops={
     []() -> uint8_t { return fake_count; },
     [](uint8_t i, amv_mouse_info_t *p) -> bool {
         if(i>=fake_count) return false;
-        *p={}; p->vid=0x361d; p->pid=0x0100; p->tier=AMV_TIER_GENERIC; return true;
+        *p={}; p->vid=fake_vid; p->pid=0x0100; p->tier=AMV_TIER_GENERIC; return true;
     },
-    [](uint8_t, uint16_t *n) -> const uint8_t * { *n=sizeof desc; return desc; }
+    [](uint8_t, uint16_t *n) -> const uint8_t * { *n=sizeof desc; return desc; },
+    [](uint8_t cmd,const uint8_t *p,uint8_t n) -> bool { sent_cmd=cmd; sent_value=n==2 ? p[0]|(p[1]<<8):0; return true; }
 };
 static_assert(sizeof(amv_mouse_desc_req_t)==4,"descriptor request size");
 static void test_mouse() {
@@ -65,8 +68,43 @@ static void test_mouse() {
     assert(!amv_proto_take_event(ev));
     request(AMV_CMD_GET_MOUSE,&index,1,AMV_ST_NO_MOUSE); assert(out[8]==0 && out[9]==0);
 }
+static void test_settings() {
+    fake_count=1;
+    amv_plat_t p={}; p.mouse=&mouse_ops; p.uptime_ms=uptime; amv_proto_init(&p);
+    amv_options_req_t opt={0,AMV_SET_POLLING};
+    request(AMV_CMD_GET_MOUSE_OPTIONS,&opt,sizeof opt);
+    auto options=payload<amv_options_rep_t>();
+    assert(out[6]==16 && options.n==5 && options.kind==AMV_OPT_LIST && options.unit==AMV_UNIT_HZ);
+    unsigned i=0; for(auto hz:{500,1000,2000,4000,8000}) assert(options.values[i++]==hz);
+    auto start=[](uint8_t cmd,const void *p,uint8_t n) {
+        uint8_t in[64]={AMV_MAGIC0,AMV_MAGIC1,1,cmd,33,0,n,0}; memcpy(in+8,p,n);
+        assert(amv_proto_handle(in,out)==0);
+    };
+    auto finish=[]() {
+        amv_proto_finalmouse_reply(3,1600); amv_proto_finalmouse_reply(4,2000); amv_proto_finalmouse_reply(5,3800);
+        assert(amv_proto_poll_mouse(out) && out[5]==AMV_ST_OK && out[4]==33);
+    };
+    uint8_t index=0; start(AMV_CMD_GET_MOUSE_SETTINGS,&index,1); assert(sent_cmd==96);
+    request(AMV_CMD_GET_MOUSE_SETTINGS,&index,1,AMV_ST_BUSY);
+    assert(!amv_proto_poll_mouse(out)); finish();
+    auto settings=payload<amv_settings_rep_t>();
+    assert(settings.count==3 && settings.s[0].value==2000 && settings.s[1].value==1600 && settings.s[1].flags==AMV_SETF_READABLE && settings.s[2].value==50);
+    amv_setting_set_req_t set={0,AMV_SET_POLLING,4000};
+    start(AMV_CMD_SET_MOUSE_SETTING,&set,sizeof set); assert(sent_cmd==17 && sent_value==4000);
+    amv_proto_finalmouse_reply(17,4000); assert(!amv_proto_poll_mouse(out) && sent_cmd==96);
+    finish(); assert(payload<amv_settings_rep_t>().s[0].value==2000);
+    start(AMV_CMD_SET_MOUSE_POLLING,&set,sizeof set);
+    amv_proto_finalmouse_reply(17,4000); assert(!amv_proto_poll_mouse(out)); finish();
+    assert(payload<amv_mouse_info_t>().device_hz==2000);
+    start(AMV_CMD_GET_MOUSE_SETTINGS,&index,1); now_ms+=1000;
+    assert(amv_proto_poll_mouse(out) && out[5]==AMV_ST_DEVICE_ERR);
+    set.value=750; request(AMV_CMD_SET_MOUSE_SETTING,&set,sizeof set,AMV_ST_BAD_VALUE);
+    fake_vid=1; request(AMV_CMD_GET_MOUSE_SETTINGS,&index,1,AMV_ST_UNSUPPORTED);
+    request(AMV_CMD_GET_MOUSE_OPTIONS,&opt,sizeof opt,AMV_ST_UNSUPPORTED); fake_vid=0x361d;
+}
 int main() {
     test_mouse();
+    test_settings(); now_ms=123;
     amv_plat_t p={apply,uptime,id,reboot,mice,stats,nullptr,nullptr}; amv_proto_init(&p);
     uint8_t nonce[8]={1,2,3,4,5,6,7,8}; request(AMV_CMD_HELLO,nonce,8);
     auto h=payload<amv_hello_rep_t>(); assert(h.ident==AMV_HELLO_IDENT && h.caps==3 && !memcmp(h.nonce,nonce,8) && h.mac[5]==5);

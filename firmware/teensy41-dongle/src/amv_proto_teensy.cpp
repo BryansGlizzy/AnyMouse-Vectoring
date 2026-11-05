@@ -18,6 +18,39 @@ static void frame(uint8_t *out, uint8_t cmd, uint8_t seq, uint8_t status,
     memcpy(out, &h, sizeof h);
     if (len) memcpy(out + 8, p, len);
 }
+static const uint16_t rates[] = {500,1000,2000,4000,8000};
+static struct { bool active, failed, writing, ack; uint8_t cmd, seq, index, seen; uint32_t start; uint16_t cpi, rate, battery; } job;
+void amv_proto_finalmouse_reply(uint8_t cmd, uint16_t value) {
+    if (!job.active) return;
+    if (job.writing) { if (cmd==17) job.ack=true; return; }
+    if (cmd==3) { job.cpi=value; job.seen|=1; }
+    if (cmd==4) { job.rate=value; job.seen|=2; }
+    if (cmd==5) { int pct=(int(value)-3400)*100/800; job.battery=pct<0?0:pct>100?100:pct; job.seen|=4; }
+}
+bool amv_proto_poll_mouse(uint8_t *out) {
+    if (!job.active) return false;
+    uint32_t now=plat.uptime_ms ? plat.uptime_ms() : 0;
+    // Some dongles do not acknowledge writes. Retry the read after the OUT
+    // transfer has had time to complete; never spin waiting for that endpoint.
+    if (job.writing && (job.ack || uint32_t(now-job.start)>=10)) {
+        if (plat.mouse->send_finalmouse(96,nullptr,0)) { job.writing=false; job.seen=0; }
+    }
+    amv_mouse_info_t info={};
+    bool gone=amv_proto_mouse_get_info(plat.mouse,job.index,&info)!=AMV_ST_OK || info.vid!=0x361d || info.pid!=0x0100;
+    if (!job.failed && !gone && job.seen!=7 && uint32_t(now-job.start)<1000) return false;
+    uint8_t status=job.failed || gone || job.seen!=7 ? AMV_ST_DEVICE_ERR : AMV_ST_OK;
+    if (job.cmd==AMV_CMD_SET_MOUSE_POLLING) {
+        info.device_hz=job.rate;
+        frame(out,job.cmd,job.seq,status,&info,sizeof info);
+    } else {
+        amv_settings_rep_t r={}; r.index=job.index; r.count=3; r.link=AMV_LINK_CONNECTED;
+        r.s[0]={AMV_SET_POLLING,AMV_SETF_READABLE|AMV_SETF_WRITABLE,job.rate};
+        r.s[1]={AMV_SET_CPI,AMV_SETF_READABLE,job.cpi};
+        r.s[2]={AMV_SET_BATTERY,AMV_SETF_READABLE,job.battery};
+        frame(out,job.cmd,job.seq,status,status==AMV_ST_OK?&r:nullptr,status==AMV_ST_OK?16:0);
+    }
+    job.active=false; return true;
+}
 static bool valid(const float *w) {
     for (unsigned i=0; i<8; ++i)
         if (!std::isfinite(w[i]) || w[i] < float(AMV_WEIGHT_MIN) || w[i] > float(AMV_WEIGHT_MAX)) return false;
@@ -43,7 +76,7 @@ void amv_proto_init(const amv_plat_t *p) {
     plat = p ? *p : amv_plat_t{};
     state = {}; state.gen=1;
     for (unsigned i=0;i<8;++i) state.w[i]=1;
-    rem={}; head=count=0; reboot_pending=false;
+    job={}; rem={}; head=count=0; reboot_pending=false;
     float w[8]; memcpy(w,state.w,sizeof w);
     if (plat.apply) plat.apply(w,false);
 }
@@ -153,6 +186,34 @@ size_t amv_proto_handle(const uint8_t *input, uint8_t *out, uint8_t source) {
             strncpy(r.model,entry->model,sizeof r.model-1);
         }
         reply(AMV_ST_OK,&r,sizeof r); break;
+    }
+    case AMV_CMD_GET_MOUSE_SETTINGS:
+    case AMV_CMD_GET_MOUSE_OPTIONS:
+    case AMV_CMD_SET_MOUSE_SETTING:
+    case AMV_CMD_SET_MOUSE_POLLING: {
+        unsigned need=cmd==AMV_CMD_GET_MOUSE_SETTINGS?1:cmd==AMV_CMD_GET_MOUSE_OPTIONS?2:4;
+        if (len<need) { reply(AMV_ST_BAD_LEN); break; }
+        if (job.active) { reply(AMV_ST_BUSY); break; }
+        amv_mouse_info_t info={};
+        uint8_t status=amv_proto_mouse_get_info(plat.mouse,p[0],&info);
+        if (status!=AMV_ST_OK) { reply(status); break; }
+        if (info.vid!=0x361d || info.pid!=0x0100) { reply(AMV_ST_UNSUPPORTED); break; }
+        if (cmd!=AMV_CMD_GET_MOUSE_SETTINGS && cmd!=AMV_CMD_SET_MOUSE_POLLING && p[1]!=AMV_SET_POLLING) { reply(AMV_ST_UNSUPPORTED); break; }
+        if (cmd==AMV_CMD_GET_MOUSE_OPTIONS) {
+            amv_options_rep_t r={}; r.index=p[0]; r.setting=p[1]; r.kind=AMV_OPT_LIST; r.unit=AMV_UNIT_HZ; r.n=5;
+            memcpy(r.values,rates,sizeof rates); reply(AMV_ST_OK,&r,16); break;
+        }
+        uint16_t value=0; bool write=cmd!=AMV_CMD_GET_MOUSE_SETTINGS;
+        if (write) {
+            memcpy(&value,p+2,2); bool ok=false;
+            for (auto rate:rates) if (value==rate) ok=true;
+            if (!ok) { reply(AMV_ST_BAD_VALUE); break; }
+        }
+        job={}; job.active=true; job.cmd=cmd; job.seq=seq; job.index=p[0]; job.start=plat.uptime_ms?plat.uptime_ms():0;
+        auto send=plat.mouse->send_finalmouse;
+        job.writing=write;
+        if (!send || !(write ? send(17,p+2,2) : send(96,nullptr,0))) job.failed=true;
+        return 0;
     }
     case AMV_CMD_SAVE_PROFILE: case AMV_CMD_LOAD_PROFILE:
     case AMV_CMD_GET_SLOTS: case AMV_CMD_FACTORY_RESET: {

@@ -91,3 +91,30 @@ iterations that receive/retry a request or drain an event. Hardware must verify
 Vendor requests and EEPROM calls run only in setup()/loop(), never the host ISR.
 Replies retry under backpressure; events may drop. Reboot waits until the reply
 has been queued and all vendor IN transfers complete, without blocking motion.
+
+### Vendor mouse information
+
+GET_MOUSE, GET_MOUSE_DESC and GET_MOUSE_MODEL expose the claimed collection,
+its captured raw HID descriptor, and the shared OpenMouse catalog name. The
+bridge claims one collection as GENERIC. Other HID interfaces visible through
+the three USBHost_t36 parsers are IGNORED (claim unavailable); devices the host
+library does not expose cannot be listed. Product strings and descriptor bytes
+are captured at claim time. Loop snapshots drive both mouse_count and
+EVENT_MOUSE; report interrupts only increment the measurement counter.
+Measured Hz is the maximum of ten one-second samples (zero after attach until
+one sample completes). Unsupported layout facts and device settings stay unknown.
+
+The catalog wrapper compiles the ESP32 catalog C source and generated header
+in place, without copies or edits. With Teensy platform 6.0.0 / GCC 15.2.1,
+comparison against an empty catalog lookup implementation gave:
+
+| Resource | Shared catalog | Empty lookup | Increment |
+| --- | ---: | ---: | ---: |
+| Flash (code + data + headers) | 118780 | 93180 | 25600 bytes |
+| RAM1 variables | 51904 | 27328 | 24576 bytes |
+| RAM1 code + padding | 98304 | 98304 | 0 bytes |
+| RAM2 variables | 16160 | 16160 | 0 bytes |
+
+The default Teensy linker places catalog constants in RAM1. The comparison
+kept all mouse protocol and capture code present; only catalog lookups were
+replaced temporarily. The final build uses the full catalog.

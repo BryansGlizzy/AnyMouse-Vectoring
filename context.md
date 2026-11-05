@@ -2,3 +2,4 @@ READ THE FOLLOWING FILES TO GET CONTEXT OF THE PROJECT INCLUDING EXTERNAL HARDWA
 @AnyMouse-Vectoring/README.md 
 @AnyMouse-Vectoring/PROGRESS.md 
 @AnyMouse-Vectoring/firmware/esp32p4-dongle/README.md
+@Anymouse-Vectoring/firmware/teensy41-dongle/README.md

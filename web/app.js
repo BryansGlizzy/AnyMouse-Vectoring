@@ -7,6 +7,7 @@ import { Radar } from './radar.js';
 
 const $ = (s) => document.querySelector(s);
 const DEMO = new URLSearchParams(location.search).has('demo');
+const DEMO_PROFILE = new URLSearchParams(location.search).get('demo') === 'pro' ? 'pro' : 'esp32';   // ?demo=pro shows the AnyMouse Pro Dongle
 // Only the vendor usage page is matched here; whether a device really is a dongle is decided by
 // the HELLO handshake (dongle.js), so a changed USB VID:PID does not matter.
 const FILTER = { usagePage: P.VENDOR_USAGE_PAGE };
@@ -186,7 +187,7 @@ async function refreshMice() {
         const prev = S.mice?.find((x) => x.uid === m.uid);
         m.caps = m.tier === P.TIER.KNOWN ? (prev?.caps ?? await S.client.getMouseCaps(m.index)) : null;
         if (m.tier !== P.TIER.IGNORED) {
-          // Older and Teensy firmware answer BAD_CMD: omit the values and label the unsupported features.
+          // Older firmware (ESP32 before 0.6.0, Teensy 0.1.x) answers BAD_CMD: omit the values and label the unsupported features.
           m.model = prev?.model ?? await S.client.getMouseModel(m.index).catch(() => null);
           m.set = await S.client.getMouseSettings(m.index).catch(() => null);
           m.options = prev?.options ?? {};
@@ -283,6 +284,17 @@ function renderMice() {
   note.textContent = `${used} in use${S.mice.length > used ? `, ${S.mice.length - used} ignored` : ''}`;
 }
 
+// The AnyMouse Pro Dongle (Teensy 4.1) has High-Speed USB on both sides; every other board is the AnyMouse Dongle,
+// Full-Speed toward the PC (one report per millisecond at most). The capability bit is the protocol's own answer.
+const dongleModel = () => (S.hello?.pro ? 'AnyMouse Pro Dongle' : 'AnyMouse Dongle');
+const pcLinkText = () => (S.hello?.pro ? 'up to 8000 Hz (High-Speed USB)' : 'up to 1000 Hz (Full-Speed USB)');
+const mouseSideText = () => {
+  const m = (S.mice ?? []).filter((x) => x.tier !== P.TIER.IGNORED);
+  if (S.mice === null) return 'not reported by this firmware';
+  if (!m.length) return 'no mouse attached';
+  const hz = Math.max(...m.map((x) => x.nominalHz || 0)), meas = Math.max(...m.map((x) => x.measuredHz || 0));
+  return `${hz ? `up to ${hz} Hz (USB interval)` : 'rate not reported'}${meas ? `, ${meas}/s measured` : ''}`;
+};
 const mouseStatusName = (status) => status === P.ST.BAD_CMD ? 'not supported by this dongle' : statusName(status);
 
 $('#mice').addEventListener('click', (e) => {
@@ -361,7 +373,7 @@ async function attach(hid, demo = false) {
     client.addEventListener('state', onDeviceState);
     client.addEventListener('mouse', onMouseEvent);
     banner('');
-    const product = hid.productName || 'AnyMouse Vectoring Dongle';
+    const product = dongleModel();
     setState(demo ? 'demo' : 'connected', demo ? `Demo (${product})` : `Connected · ${product} · firmware ${S.info.fw}`);
     setEnabled(true);
     render();
@@ -397,7 +409,7 @@ function failure(e) {
 }
 
 async function connectClicked() {
-  if (DEMO) { await attach(new MockHid({ gen: 7, w: [1, 1.15, 1.3, 1.15, 1, 1, 1, 1], filledSlots: [0, 2], slot: 0, mice: [MOCK_RAZER, MOCK_GENERIC, MOCK_KEYBOARD] }, { latencyMs: 3 }), true); return; }
+  if (DEMO) { await attach(new MockHid({ gen: 7, w: [1, 1.15, 1.3, 1.15, 1, 1, 1, 1], filledSlots: [0, 2], slot: 0, mice: [MOCK_RAZER, MOCK_GENERIC, MOCK_KEYBOARD] }, { latencyMs: 3, profile: DEMO_PROFILE }), true); return; }
   try {
     const [dev] = await navigator.hid.requestDevice({ filters: [FILTER] });
     if (!dev) { toast('No device selected.'); return; }
@@ -529,7 +541,8 @@ function render({ skipRadar = false, keepMaster = false } = {}) {
   const rows = [];
   if (on) {
     const pending = S.inFlight || S.dirty;
-    rows.push(['Device', S.hid.productName || 'AnyMouse Vectoring Dongle'], ['Firmware', `${S.info.fw} (protocol ${S.info.proto})`],
+    rows.push(['Device', dongleModel()], ['Firmware', `${S.info.fw} (protocol ${S.info.proto})`],
+      ['Polling to the PC', pcLinkText()], ['Polling from the mouse', mouseSideText()],
       ['Chip revision', S.info.chipRev ? `v${(S.info.chipRev / 100).toFixed(2)}` : 'not reported'],
       ['Serial (MAC)', S.info.mac], ['Active profile', `slot ${S.dev.slot + 1}`], ['Revision', `#${S.dev.gen}${pending ? ' (sending…)' : ''}`],
       ['Last round trip', S.client.lastRttMs == null ? '—' : `${S.client.lastRttMs.toFixed(1)} ms`],

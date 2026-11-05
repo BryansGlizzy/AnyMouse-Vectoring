@@ -16,8 +16,8 @@ The dongle is a USB man-in-the-middle that runs the 8-octant vectoring in hardwa
 | M4 Web Studio | Built; used in Chrome on macOS | §2.3 |
 | M5 hardening and DFU | **Closed on 2026-10-27. Not implemented**: no DFU, rollback self-test, watchdog, brown-out or soak run. Flash over the UART USB-C | None. The 4 MB OTA slots stay so DFU can be added later |
 | M6 stretch goals | Open | §7 |
-| Teensy 4.1 port | **Bridge running 2026-11-04, 8 kHz both sides; vendor channel & profile store built (0.1.0), hardware verification pending** ([`../teensy41-dongle/`](../teensy41-dongle/README.md): 0xFF4D vendor HID, Studio & ./anymouse support, 4 EEPROM slots + boot restore, Finalmouse polling-rate setting; hardware checklist in README). Open: 16-bit output, button-edge merging, multiple mice, OpenMouse per-family loading | §4.0 item 4 |
-| Section 10, full OpenMouse coverage | **Direction changed 2026-10-27:** OpenMouse's own drivers run on the dongle in QuickJS-ng (firmware 0.7.0, flashed, loads at boot); real-mouse test pending | §4.0 |
+| Teensy 4.1 port (the **AnyMouse Pro Dongle**; the ESP32 board is the **AnyMouse Dongle**) | **Firmware 0.2.1 (2026-11-05): feature parity with the ESP32** ([`../teensy41-dongle/`](../teensy41-dongle/README.md)): 8 kHz to the PC from interrupts, 16-bit report, several mice and hubs, the full vendor protocol (`dongle_test.py` 55/55), EEPROM profiles and CPI labels, and OpenMouse's own drivers in QuickJS-ng (the full bundle fits in the 8 MB PSRAM, so per-family loading was not needed). A real Finalmouse ULX works on 0.2.0 (KNOWN, writes verified, `dongle_test.py` 66/66). Open: the Studio in Chrome against it, the Razer and G Pro, a hub, unplug/replug and long runs | §4.0 item 4 |
+| Section 10, full OpenMouse coverage | **Direction changed 2026-10-27:** OpenMouse's own drivers run on the dongle in QuickJS-ng (firmware 0.7.0). A real Finalmouse ULX works through it on both boards (2026-11-04 ESP32, 2026-11-05 Teensy); the Razer and G Pro are still to be run on the engine | §4.0 |
 
 ---
 

@@ -70,7 +70,7 @@ static const tusb_desc_device_t device_desc = {
 static const char *string_desc[] = {
     (const char[]){0x09, 0x04},     /* 0: English */
     "AnyMouse",                     /* 1 */
-    "AnyMouse Vectoring Dongle",    /* 2 */
+    "AnyMouse Dongle",              /* 2 */
     "DEV-0001",                     /* 3 */
     "AnyMouse Mouse",               /* 4 */
     "AnyMouse Control",             /* 5 */

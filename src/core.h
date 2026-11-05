@@ -87,7 +87,16 @@ typedef struct {
     uint8_t  active_slot;
     float    weights[8];
     char     detail[160];
+    /* Filled by dongle_get_status() */
+    bool     pro;               /* AMV_CAP_PRO: the AnyMouse Pro Dongle (High-Speed USB both sides) */
+    char     model[24];         /* "AnyMouse Pro Dongle" or "AnyMouse Dongle" */
+    int      pc_link_hz;        /* the dongle -> PC polling ceiling: from the negotiated USB speed, else from the model; 0 = unknown */
 } dongle_status_t;
+
+/* "AnyMouse Pro Dongle" for the Teensy 4.1 model, "AnyMouse Dongle" for every other board. */
+const char *dongle_model_name(uint16_t caps);
+/* "8000 Hz (High-Speed USB)", "1000 Hz (Full-Speed USB)" ... for a link ceiling; "unknown" for 0. */
+const char *dongle_link_text(int hz);
 
 /* Hardware telemetry decoded directly over /dev/hidrawX (OpenMouse protocol) */
 typedef struct {

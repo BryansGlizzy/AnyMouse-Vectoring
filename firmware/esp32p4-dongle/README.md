@@ -9,15 +9,16 @@ The dongle works standalone: once a profile is saved it vectors with no software
 
 This README describes the dongle **as built**. What is still to do is in [PLAN.md](PLAN.md); the dated history is in [../../PROGRESS.md](../../PROGRESS.md).
 
-## Status (2026-10-27, firmware 0.7.0)
+## Status (firmware 0.7.0; this file last updated 2026-11-05)
 
 - **Working with real mice** (Razer Basilisk Ultimate wired, Logitech G Pro "PRO X Wireless" through its Lightspeed receiver): the PC-facing link, the High-Speed host, per-report scaling, 1 kHz output, flash profiles, the vendor protocol and the Studio. The M0 and M1 exit tests (stability run, PHY reset, the hardware checklist) were signed off by the project owner on 2026-10-27; the only measured figures on file are those in the log entries of PROGRESS.md.
 - **Mouse information** in three tiers (known protocol, generic HID, boot fallback) plus a catalog of 810 OpenMouse device ids, so every mouse OpenMouse knows is named. Drivers: Razer (read, CPI/rate writes verified on the Basilisk Ultimate), Finalmouse ULX and Attack Shark R3 GearHub (read only), Logitech HID++ 2.0 (read; CPI and rate writes on the G Pro receiver).
 - **Finalmouse UltralightX (2026-11-04):** works through the dongle after the host started sending a mouse's output reports on its interrupt OUT endpoint (see [PLAN.md §4.0](PLAN.md)); CPI and polling writes verified from both the desktop app and the Studio (user, 2026-11-04). The ULX is on the write allowlist.
-- **New in 0.7.0: OpenMouse runs on the dongle unchanged.** OpenMouse's own TypeScript drivers (every family) run in the QuickJS-ng engine (`components/amv_js`) instead of C ports; see [OpenMouse engine](#openmouse-engine-firmware-070). Flashed and booting; **not yet tried with a real mouse** (only against a fake Razer on the host). The C ports remain behind `CONFIG_AMV_OPENMOUSE_JS=n`.
+- **New in 0.7.0: OpenMouse runs on the dongle unchanged.** OpenMouse's own TypeScript drivers (every family) run in the QuickJS-ng engine (`components/amv_js`) instead of C ports; see [OpenMouse engine](#openmouse-engine-firmware-070). Driven by a real **Finalmouse UltralightX** (2026-11-04: CPI, rate, battery, Motion Sync, writes); the Razer and the G Pro have not been tried on 0.7.0 (they were verified on the C ports in 0.6.0). Reflashed over the UART on 2026-11-05 with the new USB product string. The C ports remain behind `CONFIG_AMV_OPENMOUSE_JS=n`.
 - **Not built, by decision:** firmware update over the vendor channel (DFU), app rollback, watchdog and soak testing (the M5 milestone was closed on 2026-10-27). Reflash over the UART USB-C. The two 4 MB OTA slots stay in the partition table so DFU can be added later without a layout change.
 - **Open:** calibration through the dongle, the Linux-side checks, the rest of OpenMouse coverage and more. See [PLAN.md](PLAN.md).
-- **Teensy 4.1 (2026-11-04):** the second board now runs a bring-up bridge ([`../teensy41-dongle/`](../teensy41-dongle/README.md)): a Finalmouse ULX dongle on its host port, vectored, out the main USB port at **8 kHz** (both Teensy ports are High-Speed, so the Full-Speed 1000 Hz cap of this board does not apply). The PC received 8000 frames/s in the self-test and up to 7.1k with a live mouse. No vendor channel, Studio support or OpenMouse engine on it yet. Hardware checks from 2026-11-03: [Teensy 4.1](#teensy-41-port-target-hardware-bring-up-2026-11-03).
+- **Naming (2026-11-05):** this board is the **AnyMouse Dongle** (USB product string "AnyMouse Dongle"; Full-Speed to the PC, 1000 Hz). The Teensy 4.1 version is the **AnyMouse Pro Dongle** (High-Speed both sides, 8000 Hz) and sets the `AMV_CAP_PRO` bit in its `HELLO` reply; the desktop app and the Studio name the dongle from that bit, so firmware that predates it reads "AnyMouse Dongle" without a reflash.
+- **Teensy 4.1 (the AnyMouse Pro Dongle, 2026-11-05):** firmware 0.2.1 in [`../teensy41-dongle/`](../teensy41-dongle/README.md) has everything this board has (vendor protocol, EEPROM profiles, several mice, OpenMouse in QuickJS-ng) and sends **8 kHz** to the PC; both Teensy ports are High-Speed, so the Full-Speed 1000 Hz cap of this board does not apply. Verified with a real Finalmouse ULX. Hardware checks from 2026-11-03: [Teensy 4.1](#teensy-41-port-target-hardware-bring-up-2026-11-03).
 
 ## Documents
 | File | Purpose |
@@ -126,7 +127,7 @@ The authority is [`common/amv_dongle_proto.h`](../../common/amv_dongle_proto.h):
 
 **Identity is proven by the protocol, never by USB VID:PID.** The `0xFF4D` vendor collection only makes an interface a *candidate*; the host then sends `HELLO` with a random 8-byte nonce and the dongle answers with the identity word `AMVD`, the same nonce, protocol and firmware versions, capability bits (`AMV_CAP_VECTORED_MOUSE`, `AMV_CAP_MOUSE_HOST`) and its MAC. A different protocol version is reported as incompatible. Firmware older than `HELLO` (0.3.x) is recognised by a well-formed `GET_INFO`. The vendor interface sits on usage page `0xFF4D`, distinct from the Finalmouse `0xFF00` page so `src/hid_driver.c` never confuses them.
 
-**USB identity:** Espressif VID `0x303A` with the placeholder PID `0x4D56`, product "AnyMouse Vectoring Dongle", serial from the P4 MAC. The board's own Serial/JTAG uses `303A:1001`, so the dongle's PID must differ. KDE keys per-device pointer settings on VID:PID: set the dongle to the Flat profile once; on Windows turn off "Enhance pointer precision".
+**USB identity:** Espressif VID `0x303A` with the placeholder PID `0x4D56`, product "AnyMouse Dongle" (named "AnyMouse Vectoring Dongle" by firmware before 2026-11-05; the host tools name it from the protocol, so both read "AnyMouse Dongle"), serial from the P4 MAC. The board's own Serial/JTAG uses `303A:1001`, so the dongle's PID must differ. KDE keys per-device pointer settings on VID:PID: set the dongle to the Flat profile once; on Windows turn off "Enhance pointer precision".
 
 **Double-scaling guard (Linux app).** The mouse interface on the same USB device as a dongle candidate is flagged `is_dongle` and never auto-grabbed, and the GUI shows "Vectoring: Dongle". It fails safe: an unverified, silent, unopenable or incompatible candidate still guards its mouse. Explicitly choosing the dongle's mouse is refused with a message.
 
@@ -187,10 +188,10 @@ The console prints every 5 s: input reports, frames out, raw vs out counts, and 
 With both USB-C cables connected and the firmware flashed:
 ```bash
 pip install hidapi
-python3 -I firmware/esp32p4-dongle/tools/dongle_test.py          # 68 checks over the vendor-HID channel
+python3 -I firmware/esp32p4-dongle/tools/dongle_test.py          # the vendor-HID protocol checks (66 with a Finalmouse attached); picks the ESP32 or Teensy profile itself
 cc -std=c11 -Wall -Wextra -Icommon firmware/esp32p4-dongle/tests/test_octant.c -lm -o /tmp/test_octant && /tmp/test_octant   # from the repo root
 (cd firmware/esp32p4-dongle && cc -std=c11 -Wall -Wextra -Icomponents/amv_hid_parse/include tests/test_hid_parse.c components/amv_hid_parse/amv_hid_parse.c -o /tmp/test_hid_parse && /tmp/test_hid_parse)   # descriptor parser, 30 checks
-(cd web && node --test tests/*.test.mjs)                          # Studio, 23 tests
+(cd web && node --test tests/*.test.mjs)                          # Studio, 25 tests
 (cd firmware/esp32p4-dongle && qjs --std --module tests/js_bridge/razer_fake.test.js)   # OpenMouse bridge vs a fake Basilisk Ultimate, 11 checks
 (cd firmware/esp32p4-dongle && node tests/js_bridge/finalmouse_fake.test.mjs)            # the same bridge vs a fake Finalmouse ULX (real descriptor, vendor replies on INPUT reports of the mouse's own interface), 10 checks; Node only, no qjs
 make test-dongle                                                  # Linux only: 104 link, slot, settings and guard checks against a fake dongle

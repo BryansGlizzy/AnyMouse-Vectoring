@@ -19,7 +19,11 @@ Run the tests first (`cd web && node --test tests/*.test.mjs`). The skipped file
 python3 -m http.server 8765 --directory web      # from the repo root
 # then open http://localhost:8765 in Chrome, plug in the dongle's PC-facing USB-C, press "Connect dongle"
 ```
-`localhost` counts as a secure context, which WebHID requires. For a shared deployment, host the `web/` folder on any HTTPS static host (GitHub Pages works). **Demo mode** (`/?demo`) runs the whole UI against a simulated dongle built into the page, so you can try it without hardware.
+`localhost` counts as a secure context, which WebHID requires. For a shared deployment, host the `web/` folder on any HTTPS static host (GitHub Pages works). **Demo mode** (`/?demo`) runs the whole UI against a simulated dongle built into the page, so you can try it without hardware. `/?demo=pro` simulates the **AnyMouse Pro Dongle** (Teensy 4.1).
+
+**Naming and polling.** The Studio names the dongle from the capability bit in its `HELLO` reply (`CAP_PRO`: **AnyMouse Pro Dongle**, otherwise **AnyMouse Dongle**), never from the USB product string, so a dongle with older firmware is named right too. The Device card shows the dongle's own polling rates: *to the PC* (up to 8000 Hz for the Pro, 1000 Hz for the standard dongle; a browser cannot read the negotiated USB speed, so this is the model's rate) and *from the mouse* (its USB interval and the measured rate).
+
+**The chart** grabs a handle only when you press on the dot (a little wider for touch), and it does not jump to the pointer: nothing changes until you drag.
 
 ## Use it
 - Drag a handle on the chart, or use the sliders and number boxes. Changes go to the dongle at up to about 30 per second, and it saves the active slot by itself two seconds after the last change.
@@ -60,7 +64,7 @@ Flatpak and Snap browsers cannot see hidraw devices; use a native package. On Wi
 
 ## Tests
 ```bash
-cd web && node --test tests/*.test.mjs        # 24 tests, no dependencies
+cd web && node --test tests/*.test.mjs        # 25 tests, no dependencies
 ```
 They check that `proto.js` is current, that the client's requests are byte-identical to the ones recorded from the real firmware, that the demo device answers like the real firmware (replayed from the recording), and the client's behaviour (stale and invalid writes, events, timeouts, profile import). To re-record against a connected dongle: `python3 -I firmware/esp32p4-dongle/tools/capture_fixtures.py` (needs `pip install hidapi`).
 

@@ -234,7 +234,7 @@ export class DongleClient extends EventTarget {
     const caps = v.getUint16(16, true);
     return {
       legacy: false, proto, caps,
-      vectoring: (caps & P.CAP_VECTORED_MOUSE) !== 0, mouseHost: (caps & P.CAP_MOUSE_HOST) !== 0,
+      vectoring: (caps & P.CAP_VECTORED_MOUSE) !== 0, mouseHost: (caps & P.CAP_MOUSE_HOST) !== 0, pro: (caps & P.CAP_PRO) !== 0,
       fw: `${r.payload[13]}.${r.payload[14]}.${r.payload[15]}`,
       mac: Array.from(r.payload.slice(18, 24), (b) => b.toString(16).padStart(2, '0')).join(':'),
     };

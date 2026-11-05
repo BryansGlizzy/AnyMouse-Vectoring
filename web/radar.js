@@ -43,9 +43,11 @@ export class Radar {
 
   _pos(e) { const r = this.c.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 
-  _nearest(p) {
+  // A handle is grabbed only by pressing on the dot itself (its drawn radius plus a little slack; more for a finger),
+  // never by pressing somewhere near it or in its direction: an accidental click must not change a weight.
+  _nearest(p, reach = 12) {
     const g = this._geom();
-    let best = -1, bd = 22;
+    let best = -1, bd = reach;
     for (let k = 0; k < 8; k++) {
       const h = this._handle(g, k), d = Math.hypot(h.x - p.x, h.y - p.y);
       if (d < bd) { bd = d; best = k; }
@@ -55,12 +57,16 @@ export class Radar {
 
   _down(e) {
     if (!this.enabled) return;
-    const k = this._nearest(this._pos(e));
+    const p = this._pos(e);
+    const k = this._nearest(p, e.pointerType === 'touch' ? 24 : 12);
     if (k < 0) return;
     this.drag = k;
     this.lockedMax = Math.max(this.rMax, 3);       // keep the scale steady while dragging
     this.c.setPointerCapture(e.pointerId);
-    this._move(e);
+    // Remember where on the dot it was grabbed: nothing changes until the pointer actually moves.
+    const g = this._geom(), a = OCTANTS[k].angle * RAD;
+    const along = (p.x - g.cx) * Math.cos(a) - (p.y - g.cy) * Math.sin(a);
+    this.grabOff = (this.w[k] / this.rMax) * g.R - along;
   }
 
   _move(e) {
@@ -71,7 +77,7 @@ export class Radar {
       return;
     }
     const g = this._geom(), a = OCTANTS[this.drag].angle * RAD;
-    const along = (p.x - g.cx) * Math.cos(a) - (p.y - g.cy) * Math.sin(a);   // distance along the spoke
+    const along = (p.x - g.cx) * Math.cos(a) - (p.y - g.cy) * Math.sin(a) + (this.grabOff || 0);   // distance along the spoke
     const v = clampWeight(round2((along / g.R) * this.rMax));
     if (v !== this.w[this.drag]) {
       this.w[this.drag] = v;

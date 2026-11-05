@@ -269,6 +269,36 @@ static void test_boot_round_trip(void) {
     printf("  [PASS] test_boot_round_trip\n");
 }
 
+static void test_cpi_labels(void) {
+    printf("  [TEST] test_cpi_labels\n");
+    reset_test_env();
+    uint16_t cpi = 0;
+    assert(!amv_store_label_get(0x1234, 0x5678, &cpi));
+    assert(amv_store_label_set(0x1234, 0x5678, 1600));
+    assert(amv_store_label_set(0x046d, 0xc08b, 800));
+    assert(amv_store_label_get(0x1234, 0x5678, &cpi) && cpi == 1600);
+    assert(amv_store_label_set(0x1234, 0x5678, 3200));                 // overwrite in place
+    assert(amv_store_label_get(0x1234, 0x5678, &cpi) && cpi == 3200);
+    assert(amv_store_label_get(0x046d, 0xc08b, &cpi) && cpi == 800);
+    // the labels live after the profiles and the boot record and never disturb them
+    amv_profile_t p; for (int i = 0; i < 8; i++) p.w[i] = 1.5f;
+    const amv_store_ops_t *ops = amv_store_teensy_ops();
+    assert(ops->save(3, &p) && ops->save_boot(3, &p, false));
+    assert(amv_store_label_get(0x1234, 0x5678, &cpi) && cpi == 3200);
+    assert(amv_store_label_set(0x1234, 0x5678, 0));                    // 0 removes
+    assert(!amv_store_label_get(0x1234, 0x5678, &cpi));
+    for (uint16_t i = 0; i < AMV_STORE_LABELS + 3; i++) assert(amv_store_label_set(0x1000, i, (uint16_t)(400 + i)));   // full: replaces
+    assert(amv_store_label_get(0x1000, AMV_STORE_LABELS + 2, &cpi) && cpi == 400 + AMV_STORE_LABELS + 2);
+    // a corrupted record is ignored
+    uint16_t off = (uint16_t)offsetof(amv_store_layout_t, labels);
+    for (int i = 0; i < AMV_STORE_LABELS; i++) s_test_ram[off + i * sizeof(amv_label_record_t) + 6] ^= 0x55;
+    assert(!amv_store_label_get(0x046d, 0xc08b, &cpi));
+    amv_profile_t q; assert(ops->load(3, &q) && q.w[0] == 1.5f);
+    assert(ops->factory_reset());
+    assert(!amv_store_label_get(0x1000, AMV_STORE_LABELS + 2, &cpi));
+    printf("  [PASS] test_cpi_labels\n");
+}
+
 int main(void) {
     printf("Running amv_store_teensy unit tests...\n");
     test_ops_presence();
@@ -278,6 +308,7 @@ int main(void) {
     test_invalid_weights();
     test_factory_reset();
     test_boot_round_trip();
+    test_cpi_labels();
     printf("All amv_store_teensy tests passed!\n");
     return 0;
 }

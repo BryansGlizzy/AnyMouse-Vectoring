@@ -1,6 +1,6 @@
 # AnyMouse Teensy 4.1 Bridge (bring-up)
 
-The Teensy 4.1 port of the dongle's mouse path: USB host in, octant vectoring, USB device out, **both ports High-Speed**, so unlike the ESP32-P4 (Full-Speed toward the PC, 1000 Hz cap) it can present an **8 kHz** mouse to the PC. This first version is a bring-up: it proves 8 kHz on both sides and measures what the vectoring costs. It has no vendor HID channel, no Studio support and no OpenMouse engine yet (see [Not done](#not-done)). The ESP32-P4 firmware is in [../esp32p4-dongle/](../esp32p4-dongle/README.md); project history is in [../../PROGRESS.md](../../PROGRESS.md).
+The Teensy 4.1 port of the dongle's mouse path: USB host in, octant vectoring, USB device out, **both ports High-Speed**, so unlike the ESP32-P4 (Full-Speed toward the PC, 1000 Hz cap) it can present an **8 kHz** mouse to the PC. This first version is a bring-up: it proves 8 kHz on both sides and measures what the vectoring costs. Its vendor HID transport currently echoes frames until the protocol handler lands, so Studio support and the OpenMouse engine are still pending (see [Not done](#not-done)). The ESP32-P4 firmware is in [../esp32p4-dongle/](../esp32p4-dongle/README.md); project history is in [../../PROGRESS.md](../../PROGRESS.md).
 
 ```
  mouse / receiver ──▶ Teensy USB host pigtail (HS, EHCI)      Teensy main micro-USB (HS device) ──▶ PC
@@ -33,13 +33,13 @@ Not shown by these runs: a steady 8000.0 reports/s from the mouse. By hand the U
 
 ```bash
 cd firmware/teensy41-dongle
-tools/make_core.sh                    # once: builds ./fw, the Teensy framework with two small core patches (below)
+tools/make_core.sh                    # once: builds ./fw with the AnyMouse USB type and mouse patches
 ~/.platformio/penv/bin/pio run -t upload
 ```
 
 `pio run -t upload` reboots the running program into the HalfKay bootloader by itself. `fw/` and `.pio/` are git-ignored; `make_core.sh` can be re-run any time. The installed framework is not modified.
 
-**Why a patched core.** The stock `USB_SERIAL_HID` type (serial console plus keyboard, mouse and joystick) declares the mouse endpoint with `bInterval` 2, which is 250 us (4 kHz) at High-Speed. `make_core.sh` copies the Teensy 4 core and (1) sets it to 1 (125 us, 8 kHz; Full-Speed hosts still see 1 ms), and (2) adds `usb_mouse_idle()` so the firmware can keep exactly one report in flight. The patched copy is picked up with `platform_packages = framework-arduinoteensy @ symlink://./fw`.
+**Patched core and USB type.** The firmware builds with `-D USB_AMV_DONGLE`. `make_core.sh` copies the Teensy 4 core and adds this type with VID:PID `16c0:0489` and product string `AnyMouse Vectoring Dongle (Teensy 4.1)`. It exposes exactly CDC serial, the existing 8-byte mouse interface, and a vendor HID interface based on Teensyduino's RawHID implementation. The mouse keeps `bInterval` 1 (125 us at High-Speed, 1 ms at Full-Speed) and `usb_mouse_idle()` keeps exactly one report in flight. Vendor HID uses usage page `0xFF4D`, usage `0x01`, no report IDs, and 64-byte IN and OUT interrupt reports, both with `bInterval` 1. Keyboard, joystick and SEREMU are not included. The patched copy is picked up with `platform_packages = framework-arduinoteensy @ symlink://./fw`.
 
 ## Console and measuring
 
@@ -66,10 +66,9 @@ To run the whole check: `measure_pc.py 20` in one terminal, `console.py 20` in a
 
 ## Not done
 
-- **No vendor HID channel**, so the Studio and `./anymouse` cannot see or configure it; weights are set from the serial console and are lost at reboot (no flash profile slots).
+- **No vendor protocol handler yet:** the `0xFF4D` channel only echoes frames, so the Studio and `./anymouse` cannot configure it. Weights are set from the serial console and are lost at reboot (no flash profile slots).
 - **Only one mouse collection** from one device is claimed; keyboards, absolute pointers and vendor interfaces are not handled. Hubs are supported by USBHost_t36 but untested here.
 - **Output is the Teensy core's 8-byte report:** 8-bit X/Y, 8 buttons. A frame beyond +-127 counts carries the rest to the next frame, nothing is lost, but 16-bit output is the right long-term format.
 - **A press and release inside one 125 us slot would merge** (only the latest button state is sent).
-- The USB type is `USB_SERIAL_HID`, so the PC also sees a keyboard, a joystick and a RawHID-style serial emulation interface that do nothing, and the VID:PID is Teensyduino's shared `16c0:0487`.
 - No OpenMouse engine (CPI and rate for known mice) beyond the hand-written Finalmouse polling command; that needs the per-family loading in the ESP32 PLAN section 4.0.
 - Not tested: the Attack Shark R3 receiver, a Razer, a hub, long runs, and the PC link while the PC sleeps.

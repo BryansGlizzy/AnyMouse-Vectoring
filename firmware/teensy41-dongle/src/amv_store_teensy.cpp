@@ -193,6 +193,41 @@ static bool store_save_boot(uint8_t active_slot, const amv_profile_t *p, bool by
     return ok;
 }
 
+static bool label_read(unsigned i, amv_label_record_t *rec) {
+    uint16_t addr = (uint16_t)(offsetof(amv_store_layout_t, labels) + i * sizeof(amv_label_record_t));
+    if (!backend_read(addr, rec, sizeof *rec)) return false;
+    return rec->magic == AMV_STORE_LABEL_MAGIC && rec->crc == amv_store_crc32(rec, sizeof *rec - sizeof rec->crc) && rec->cpi;
+}
+
+static bool label_write(unsigned i, uint16_t vid, uint16_t pid, uint16_t cpi) {
+    amv_label_record_t rec = {};
+    rec.magic = AMV_STORE_LABEL_MAGIC;
+    rec.vid = vid; rec.pid = pid; rec.cpi = cpi;
+    rec.crc = amv_store_crc32(&rec, sizeof rec - sizeof rec.crc);
+    uint16_t addr = (uint16_t)(offsetof(amv_store_layout_t, labels) + i * sizeof(amv_label_record_t));
+    return backend_write(addr, &rec, sizeof rec);
+}
+
+bool amv_store_label_get(uint16_t vid, uint16_t pid, uint16_t *cpi) {
+    amv_label_record_t rec;
+    for (unsigned i = 0; i < AMV_STORE_LABELS; i++)
+        if (label_read(i, &rec) && rec.vid == vid && rec.pid == pid) { *cpi = rec.cpi; return true; }
+    return false;
+}
+
+bool amv_store_label_set(uint16_t vid, uint16_t pid, uint16_t cpi) {
+    amv_label_record_t rec;
+    int free_i = -1;
+    for (unsigned i = 0; i < AMV_STORE_LABELS; i++) {
+        if (label_read(i, &rec)) {
+            if (rec.vid == vid && rec.pid == pid) return label_write(i, vid, pid, cpi);
+        } else if (free_i < 0) free_i = (int)i;
+    }
+    if (!cpi) return true;
+    if (free_i < 0) free_i = (int)(((unsigned)vid ^ pid) % AMV_STORE_LABELS);   /* full: replace one */
+    return label_write((unsigned)free_i, vid, pid, cpi);
+}
+
 static const amv_store_ops_t s_store_ops = {
     store_load,
     store_save,

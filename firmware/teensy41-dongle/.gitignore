@@ -1,2 +1,4 @@
 fw/
 .pio/
+tests/test_proto
+tests/test_store

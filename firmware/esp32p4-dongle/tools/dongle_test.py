@@ -43,6 +43,7 @@ class Dongle:
         self.seq = 0
         self.events = []
         self.profile = profile
+        self.legacy = False
         self.product = ""
         self.hello = None
         self.open()
@@ -74,7 +75,10 @@ class Dongle:
                 self.product = d.get("product_string") or ""
                 self.hello = dict(fw=(major, minor, patch), caps=caps, mac=mac.hex(":"))
                 if self.profile == "auto":
-                    self.profile = "teensy" if self.hello["fw"] == (0, 1, 0) or "Teensy 4.1" in self.product else "esp32"
+                    self.profile = "teensy" if self.hello["fw"] == (0, 1, 0) or (caps & C["AMV_CAP_PRO"]) or "Teensy 4.1" in self.product else "esp32"
+                # Teensy firmware 0.1.x had no mouse capabilities, descriptor download or self-change; 0.2.0 has all
+                # of them, so only the board facts (eFuse MAC, chip revision) differ from the ESP32.
+                self.legacy = self.profile == "teensy" and self.hello["fw"] < (0, 2, 0)
                 return
             time.sleep(0.25)
         raise RuntimeError("AnyMouse dongle vendor interface not found (HELLO handshake required)")
@@ -274,9 +278,9 @@ def main(argv=None):
         s2, b2 = d.request(C["AMV_CMD_GET_MOUSE"], bytes([count + 5]))
         check("index out of range answers NO_MOUSE with the count", s2 == C["AMV_ST_NO_MOUSE"] and b2[1] == count, f"status {s2}")
         # Descriptor, fetched in pieces, must be a well-formed HID descriptor that starts a mouse collection
-        if d.profile == "teensy":
-            skip("report descriptor retrieved in pieces", "not supported by this dongle")
-            skip("descriptor declares a Generic Desktop Mouse", "not supported by this dongle")
+        if d.legacy:
+            skip("report descriptor retrieved in pieces", "not supported by this firmware")
+            skip("descriptor declares a Generic Desktop Mouse", "not supported by this firmware")
         else:
             desc, off = b"", 0
             while True:
@@ -290,11 +294,11 @@ def main(argv=None):
             check("report descriptor retrieved in pieces", s3 == 0 and len(desc) == total and len(desc) > 20, f"{len(desc)} of {total}")
             check("descriptor declares a Generic Desktop Mouse", desc[:4] == bytes([0x05, 0x01, 0x09, 0x02]), desc[:6].hex())
         if tier == C["AMV_TIER_KNOWN"]:
-            if d.profile == "teensy":
-                skip("known mouse has capabilities", "not supported by this dongle")
-                skip("rates and CPI range plausible", "not supported by this dongle")
-                skip("a polling rate the mouse does not accept is refused", "not supported by this dongle")
-                skip("a CPI below the range is refused", "not supported by this dongle")
+            if d.legacy:
+                skip("known mouse has capabilities", "not supported by this firmware")
+                skip("rates and CPI range plausible", "not supported by this firmware")
+                skip("a polling rate the mouse does not accept is refused", "not supported by this firmware")
+                skip("a CPI below the range is refused", "not supported by this firmware")
             else:
                 s4, b4 = d.request(C["AMV_CMD_GET_MOUSE_CAPS"], bytes([0]))
                 caps = struct.unpack("<BBBB8HHHH16s", b4[:42]) if s4 == 0 else None
@@ -302,16 +306,17 @@ def main(argv=None):
                 if caps:
                     rates = list(caps[4:4 + caps[2]])
                     print(f"   caps: rates {rates}, CPI {caps[12]}..{caps[13]} step {caps[14]}, firmware {caps[15].split(bytes(1))[0].decode()!r}")
-                    check("rates and CPI range plausible", len(rates) > 0 and caps[12] < caps[13])
+                    # a driver may publish no CPI range (OpenMouse's Finalmouse does not): 0..0 means "unpublished", the options fall back to 50..64000
+                    check("rates and CPI range plausible", len(rates) > 0 and (caps[12] < caps[13] or caps[12] == caps[13] == 0))
                     # Refusals only: nothing here changes the mouse
                     bad = max(rates) * 3 + 7
                     s5, _ = d.request(C["AMV_CMD_SET_MOUSE_POLLING"], struct.pack("<BBH", 0, 0, bad))
                     check("a polling rate the mouse does not accept is refused", s5 == C["AMV_ST_BAD_VALUE"], f"status {s5}")
                     s6, _ = d.request(C["AMV_CMD_SET_MOUSE_CPI"], struct.pack("<BBH", 0, 0, 7))
                     check("a CPI below the range is refused", s6 == C["AMV_ST_BAD_VALUE"], f"status {s6}")
-        elif d.profile == "teensy":
-            skip("generic mouse has no vendor capabilities", "not supported by this dongle")
-            skip("polling cannot be set on a generic mouse", "not supported by this dongle")
+        elif d.legacy:
+            skip("generic mouse has no vendor capabilities", "not supported by this firmware")
+            skip("polling cannot be set on a generic mouse", "not supported by this firmware")
         else:
             s4, _ = d.request(C["AMV_CMD_GET_MOUSE_CAPS"], bytes([0]))
             check("generic mouse has no vendor capabilities", s4 == C["AMV_ST_UNSUPPORTED"], f"status {s4}")
@@ -365,11 +370,11 @@ def main(argv=None):
     check("GEN_ANY applies regardless", s == 0)
 
     print("== device -> host: self-originated change ==")
-    if d.profile == "teensy":
-        skip("self-change scheduled", "not supported by this dongle")
-        skip("device-originated event received", "not supported by this dongle")
-        skip("event carries the new weight", "not supported by this dongle")
-        skip("host readback matches event", "not supported by this dongle")
+    if d.legacy:
+        skip("self-change scheduled", "not supported by this firmware")
+        skip("device-originated event received", "not supported by this firmware")
+        skip("event carries the new weight", "not supported by this firmware")
+        skip("host readback matches event", "not supported by this firmware")
     else:
         d.drain()
         cur = d.state()

@@ -109,6 +109,10 @@
 /* HELLO capability bits */
 #define AMV_CAP_VECTORED_MOUSE 0x0001   /* the HID mouse on this USB device already carries vectored motion */
 #define AMV_CAP_MOUSE_HOST     0x0002   /* a downstream mouse can be attached (USB host side present) */
+#define AMV_CAP_PRO            0x0004   /* the "AnyMouse Pro Dongle" (Teensy 4.1): High-Speed USB on both sides, so the PC link
+                                         * polls at 8 kHz. Dongles without it (the ESP32-P4 board) are the "AnyMouse Dongle":
+                                         * Full-Speed toward the PC, 1 kHz. Only a model name and a link-rate hint; the protocol
+                                         * is identical. */
 
 /* Device tiers (firmware/esp32p4-dongle/README.md, Mouse discovery and information) */
 #define AMV_TIER_KNOWN     1   /* vendor protocol known (OpenMouse driver on the dongle): real CPI / polling */

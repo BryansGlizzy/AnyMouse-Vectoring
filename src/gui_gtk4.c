@@ -23,6 +23,8 @@ static const char *DARK_CSS =
     "button.slot-active, button.slot-active:checked { border-color: #00f0ff; border-width: 2px; }\n"
     "button:checked { background-color: #2c3348; color: #00f0ff; }\n"
     "label.dg-warn { color: #fbbf24; font-size: 12px; }\n"
+    "label.dg-info { color: #e2e8f0; font-size: 12px; }\n"
+    "label.dg-model { color: #00f0ff; font-weight: bold; font-size: 13px; }\n"
     "label.dg-mice { font-family: monospace; font-size: 11px; color: #cbd5e1; }\n"
     ".badge { background-color: #1e2536; border: 1px solid #334155; border-radius: 6px; padding: 3px 8px; font-size: 11px; font-weight: bold; }\n"
     ".badge-cyan { color: #38bdf8; }\n"
@@ -45,6 +47,7 @@ typedef struct {
     GtkWidget *badge_bat;
     GtkWidget *badge_sync;
     GtkWidget *badge_rssi;
+    GtkWidget *badge_dg;          /* the dongle's own polling rate toward the PC (shown while a dongle is linked) */
     GtkWidget *cpi_dropdown;
     GtkWidget *btn_cpi_3200;
     GtkWidget *btn_cpi_6400;
@@ -77,6 +80,8 @@ typedef struct {
     GtkWidget *lbl_dg_status;
     GtkWidget *lbl_dg_warn;       /* why a mouse behind the dongle shows blanks */
     GtkWidget *lbl_dg_mice;       /* every device plugged into the dongle */
+    GtkWidget *lbl_dg_model;      /* "AnyMouse Pro Dongle" / "AnyMouse Dongle", firmware */
+    GtkWidget *lbl_dg_info;       /* the dongle's polling: toward the PC, and from the mice */
     int        dg_sel;            /* slot picked in the panel (0-based); -1 = follow the active slot */
     bool       dg_busy;           /* a slot / bypass request is running on its worker thread */
     uint32_t   last_slots_rev;
@@ -113,6 +118,10 @@ typedef struct {
     int        hover_idx;
     double     drag_start_x;
     double     drag_start_y;
+    double     grab_dx;           /* handle centre minus the click, so grabbing a dot never makes it jump */
+    double     grab_dy;
+    GtkWidget *root_box;          /* two columns side by side, or stacked when the window is narrow */
+    bool       stacked;
     bool       mirror_lr;
     bool       mirror_ud;
     bool       updating_ui;
@@ -129,6 +138,7 @@ static const int CPI_OPTIONS[] = { 800, 1600, 3200, 6400, 8000, 12000, 26000 };
 static const char *CPI_STRINGS[] = { "800", "1600", "3200", "6400", "8000", "12000", "26000", NULL };
 
 static void sync_ui_from_state(void);
+static void update_responsive_layout(void);
 
 static void set_octant_weight_with_symmetry(int idx, float val) {
     if (val < 0.01f) val = 0.01f;
@@ -167,38 +177,26 @@ static void octant_screen_pos(int idx, float weight, double cx, double cy, doubl
     *out_y = cy - norm_r * sin(rad);
 }
 
+/* A handle is grabbed only by clicking on the dot itself (its drawn radius plus a few pixels of slack),
+ * never by clicking somewhere in the same direction: the chart is easy to brush past and an accidental
+ * click must not change a weight. Overlapping dots: the nearest centre wins. */
+#define HANDLE_HIT_PX 10.0
+
 static int find_nearest_octant_handle(double mx, double my, int width, int height) {
     double cx, cy, radius;
     get_radar_geometry(width, height, &cx, &cy, &radius);
-
-    double dx = mx - cx;
-    double dy = -(my - cy);
-    double angle = atan2(dy, dx) * (180.0 / PI);
-    if (angle < 0.0) angle += 360.0;
-
-    int best_idx = 0;
-    double min_diff = 360.0;
+    int best = -1;
+    double best_d = HANDLE_HIT_PX;
     for (int i = 0; i < 8; i++) {
-        double diff = fabs(angle - OCTANT_INFO[i].angle_deg);
-        if (diff > 180.0) diff = 360.0 - diff;
-        if (diff < min_diff) {
-            min_diff = diff;
-            best_idx = i;
-        }
+        float w = atomic_load_explicit(&g_state.octant_weights[i], memory_order_relaxed);
+        double hx, hy;
+        octant_screen_pos(i, w, cx, cy, radius, &hx, &hy);
+        double d = hypot(mx - hx, my - hy);
+        if (d <= best_d) { best_d = d; best = i; }
     }
-
-    float w = atomic_load_explicit(&g_state.octant_weights[best_idx], memory_order_relaxed);
-    double hx, hy;
-    octant_screen_pos(best_idx, w, cx, cy, radius, &hx, &hy);
-    double dist_to_handle = hypot(mx - hx, my - hy);
-
-    if (dist_to_handle < 26.0 || min_diff < 16.0) {
-        return best_idx;
-    }
-    return -1;
+    return best;
 }
 
-/* Cairo Draw Callback for the Polar Anisotropic Sensitivity Map */
 static void on_radar_draw(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data) {
     (void)area;
     (void)user_data;
@@ -367,6 +365,8 @@ static void update_radar_from_pointer(double mx, double my) {
     double cx, cy, radius;
     get_radar_geometry(w, h, &cx, &cy, &radius);
 
+    mx += g_ui.grab_dx;
+    my += g_ui.grab_dy;
     double dist = hypot(mx - cx, my - cy);
     float new_w = (float)((dist / radius) * g_ui.max_scale);
     if (new_w < 0.02f) new_w = 0.02f;
@@ -384,8 +384,15 @@ static void on_radar_drag_begin(GtkGestureDrag *gesture, double start_x, double 
     g_ui.drag_start_x = start_x;
     g_ui.drag_start_y = start_y;
     g_ui.dragging_idx = find_nearest_octant_handle(start_x, start_y, w, h);
+    g_ui.grab_dx = g_ui.grab_dy = 0.0;
     if (g_ui.dragging_idx >= 0) {
-        update_radar_from_pointer(start_x, start_y);
+        /* Remember where on the dot it was grabbed; nothing changes until the pointer actually moves. */
+        double cx, cy, radius, hx, hy;
+        get_radar_geometry(w, h, &cx, &cy, &radius);
+        float cur = atomic_load_explicit(&g_state.octant_weights[g_ui.dragging_idx], memory_order_relaxed);
+        octant_screen_pos(g_ui.dragging_idx, cur, cx, cy, radius, &hx, &hy);
+        g_ui.grab_dx = hx - start_x;
+        g_ui.grab_dy = hy - start_y;
         gtk_widget_queue_draw(g_ui.drawing_area);
     }
 }
@@ -1035,19 +1042,60 @@ static void on_load_profile_clicked(GtkButton *btn, gpointer user_data) {
 static const char *IGNORE_REASON[] = { "", "not a mouse", "absolute pointer", "report descriptor unusable",
                                        "too many mice", "could not be claimed" };
 
+/* The dongle itself: its model, and its polling rates. The dongle has two: the rate it presents to the PC
+ * (a property of its USB link, what an application on the PC can receive at most) and the rate it reads its
+ * mice at (their own, shown per mouse below). The mouse's set rate is in the Hardware panel. */
+static void refresh_dongle_info(const dongle_mouse_t *m, int n) {
+    dongle_status_t dg;
+    if (!dongle_get_status(&dg)) {
+        gtk_widget_set_visible(g_ui.badge_dg, FALSE);
+        return;
+    }
+    char b[320];
+    snprintf(b, sizeof(b), "%s · firmware %u.%u.%u", dg.model, dg.fw[0], dg.fw[1], dg.fw[2]);
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_model), b);
+
+    int in_hz = 0, meas = 0;
+    for (int i = 0; i < n; i++) {
+        if (m[i].info.tier == AMV_TIER_IGNORED) continue;
+        if (m[i].info.nominal_hz > in_hz) in_hz = m[i].info.nominal_hz;
+        if (m[i].info.measured_hz > meas) meas = m[i].info.measured_hz;
+    }
+    char in_txt[96];
+    if (n < 0) snprintf(in_txt, sizeof(in_txt), "not reported by this firmware");
+    else if (in_hz > 0) snprintf(in_txt, sizeof(in_txt), "%s", dongle_link_text(in_hz));
+    else snprintf(in_txt, sizeof(in_txt), "no mouse attached");
+    char meas_txt[64] = "";
+    if (meas > 0) snprintf(meas_txt, sizeof(meas_txt), " · measured %d Hz", meas);
+    snprintf(b, sizeof(b), "Polling to the PC: up to %s\nPolling from the mouse: up to %s%s",
+             dongle_link_text(dg.pc_link_hz), in_txt, meas_txt);
+    gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_info), b);
+    gtk_widget_set_tooltip_text(g_ui.lbl_dg_info,
+        dg.pro ? "The Pro dongle uses High-Speed USB on both sides: the PC can receive up to 8000 reports per second.\n"
+                 "How many actually arrive depends on the mouse: it only reports while its sensor moves."
+               : "This dongle's PC side is Full-Speed USB, which polls at most once per millisecond (1000 Hz), "
+                 "whatever rate the mouse is set to. The mouse is still read at its own rate, so no motion is lost.");
+
+    snprintf(b, sizeof(b), "🔗 %s → PC: %d Hz", dg.model, dg.pc_link_hz);
+    gtk_label_set_text(GTK_LABEL(g_ui.badge_dg), dg.pc_link_hz > 0 ? b : dg.model);
+    gtk_widget_set_tooltip_text(g_ui.badge_dg, dongle_link_text(dg.pc_link_hz));
+    gtk_widget_set_visible(g_ui.badge_dg, TRUE);
+}
+
 static void refresh_dongle_mice(void) {
     dongle_mouse_t m[8];
     int n = dongle_get_mice(m, 8);
+    refresh_dongle_info(m, n);
     if (n < 0) {
-        gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_mice), "Plugged into the dongle: not reported by this firmware (needs 0.5.0)");
+        gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_mice), "Mice: not reported by this firmware (needs 0.5.0)");
         return;
     }
     if (n == 0) {
-        gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_mice), "Plugged into the dongle: nothing");
+        gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_mice), "Mice: nothing plugged into the dongle");
         return;
     }
     static const char *TIER[] = { "?", "known protocol", "generic HID", "boot fallback", "not used" };
-    GString *g = g_string_new("Plugged into the dongle:");
+    GString *g = g_string_new("Mice plugged into the dongle:");
     for (int i = 0; i < n; i++) {
         const amv_mouse_info_t *x = &m[i].info;
         const char *name = (m[i].has_model && m[i].model.model[0]) ? m[i].model.model : x->name;
@@ -1059,7 +1107,7 @@ static void refresh_dongle_mice(void) {
         if (x->cpi) g_string_append_printf(g, " · %u CPI%s", x->cpi, x->cpi_source == AMV_CPI_USER ? " (your label)" : "");
         if (x->device_hz) g_string_append_printf(g, " · set %u Hz", x->device_hz);
         else g_string_append(g, " · set rate unknown");
-        g_string_append_printf(g, " · USB interval %u Hz · measured %u Hz", x->nominal_hz, x->measured_hz);
+        g_string_append_printf(g, " · read at %u Hz (USB interval) · measured %u Hz", x->nominal_hz, x->measured_hz);
         if (x->battery != 0xFF) g_string_append_printf(g, " · battery %u%%", x->battery);
         if (m[i].has_caps && m[i].caps.firmware[0]) g_string_append_printf(g, " · fw %s", m[i].caps.firmware);
         if (m[i].caps_unsupported || m[i].settings_unsupported || m[i].model_unsupported)
@@ -1075,7 +1123,7 @@ static void refresh_dongle_panel(void) {
     dongle_slots_t sl;
     bool linked = dongle_get_slots(&sl);
     gtk_widget_set_visible(g_ui.dg_frame, linked);
-    if (!linked) return;
+    if (!linked) { gtk_widget_set_visible(g_ui.badge_dg, FALSE); return; }
 
     int sel = g_ui.dg_sel >= 0 && g_ui.dg_sel < sl.count ? g_ui.dg_sel : sl.active;
     g_ui.updating_ui = true;
@@ -1246,8 +1294,8 @@ static gboolean on_ui_tick(gpointer user_data) {
     size_t used = strlen(rt_buf);
     switch (dg.link) {
     case DONGLE_LINKED:
-        snprintf(rt_buf + used, sizeof(rt_buf) - used, "\n🔗 Vectoring: Dongle (%s; gen %u%s)",
-                 dg.detail, dg.gen, dg.bypass ? ", BYPASS" : "");
+        snprintf(rt_buf + used, sizeof(rt_buf) - used, "\n🔗 Vectoring: %s (%s; gen %u%s)",
+                 dg.model, dg.detail, dg.gen, dg.bypass ? ", BYPASS" : "");
         break;
     case DONGLE_NO_ACCESS: case DONGLE_NOT_RESPONDING: case DONGLE_INCOMPATIBLE:
         snprintf(rt_buf + used, sizeof(rt_buf) - used, "\n⚠️ Dongle: %s", dg.detail);
@@ -1285,6 +1333,7 @@ static gboolean on_ui_tick(gpointer user_data) {
         refresh_dongle_mice();
     }
     if (g_ui.dg_feedback_ticks > 0 && --g_ui.dg_feedback_ticks == 0) refresh_dongle_panel();
+    update_responsive_layout();
     if (g_ui.faf_feedback_ticks > 0) {
         if (--g_ui.faf_feedback_ticks == 0) {
             refresh_faf_install_widgets();
@@ -1396,6 +1445,101 @@ static gboolean on_ui_tick(gpointer user_data) {
     return G_SOURCE_CONTINUE;
 }
 
+/* ---- layout helpers: everything must be able to shrink, wrap or scroll; nothing may force a window size ---- */
+
+/* A dropdown whose entries are cut short with an ellipsis. By default a GtkDropDown is as wide as its longest
+ * entry (a /dev/input/by-id path, or a long product name), which sets the window's minimum width. */
+static void ellipsized_item_setup(GtkSignalListItemFactory *f, GtkListItem *item, gpointer d) {
+    (void)f; (void)d;
+    GtkWidget *l = gtk_label_new(NULL);
+    gtk_label_set_xalign(GTK_LABEL(l), 0.0f);
+    gtk_label_set_ellipsize(GTK_LABEL(l), PANGO_ELLIPSIZE_MIDDLE);
+    gtk_label_set_max_width_chars(GTK_LABEL(l), 60);
+    gtk_list_item_set_child(item, l);
+}
+
+static void ellipsized_item_bind(GtkSignalListItemFactory *f, GtkListItem *item, gpointer d) {
+    (void)f; (void)d;
+    GtkStringObject *o = GTK_STRING_OBJECT(gtk_list_item_get_item(item));
+    GtkWidget *l = gtk_list_item_get_child(item);
+    const char *t = o ? gtk_string_object_get_string(o) : "";
+    gtk_label_set_text(GTK_LABEL(l), t);
+    gtk_widget_set_tooltip_text(l, t);
+}
+
+static void dropdown_ellipsize(GtkWidget *dd) {
+    GtkListItemFactory *f = gtk_signal_list_item_factory_new();
+    g_signal_connect(f, "setup", G_CALLBACK(ellipsized_item_setup), NULL);
+    g_signal_connect(f, "bind", G_CALLBACK(ellipsized_item_bind), NULL);
+    gtk_drop_down_set_factory(GTK_DROP_DOWN(dd), f);
+    gtk_drop_down_set_list_factory(GTK_DROP_DOWN(dd), f);
+    g_object_unref(f);
+}
+
+/* Developer hook: ANYMOUSE_SHOT=file.png renders just this window to a PNG after the page has settled and then
+ * exits WITHOUT saving the profile; ANYMOUSE_WINDOW=WxH opens it at that size. Used to check the layout at different window sizes. */
+static gboolean dev_shot_cb(gpointer path) {
+    GtkWidget *w = g_ui.window;
+    int ww = gtk_widget_get_width(w), hh = gtk_widget_get_height(w);
+    GdkPaintable *pt = gtk_widget_paintable_new(w);
+    GtkSnapshot *sn = gtk_snapshot_new();
+    gdk_paintable_snapshot(pt, sn, ww, hh);
+    GskRenderNode *node = gtk_snapshot_free_to_node(sn);
+    GskRenderer *r = gtk_native_get_renderer(GTK_NATIVE(w));
+    graphene_rect_t b = GRAPHENE_RECT_INIT(0, 0, (float)ww, (float)hh);
+    GdkTexture *tex = r && node ? gsk_renderer_render_texture(r, node, &b) : NULL;
+    if (tex) {
+        gdk_texture_save_to_png(tex, (const char *)path);
+        printf("[GUI] wrote %dx%d window image to %s (%s layout)\n", ww, hh, (const char *)path, g_ui.stacked ? "stacked" : "two-column");
+        g_object_unref(tex);
+    }
+    if (node) gsk_render_node_unref(node);
+    g_object_unref(pt);
+    fflush(stdout);
+    _exit(0);      /* a normal quit would auto-save the weights this test run adopted from the dongle */
+    return G_SOURCE_REMOVE;
+}
+
+/* A frame whose title can be cut short instead of widening the window. */
+static GtkWidget *frame_new(const char *title) {
+    GtkWidget *f = gtk_frame_new(NULL);
+    GtkWidget *l = gtk_label_new(title);
+    gtk_label_set_ellipsize(GTK_LABEL(l), PANGO_ELLIPSIZE_END);
+    gtk_widget_set_tooltip_text(l, title);
+    gtk_frame_set_label_widget(GTK_FRAME(f), l);
+    return f;
+}
+
+/* A row of controls that wraps onto more lines when the window is narrow. */
+static GtkWidget *flow_new(void) {
+    GtkWidget *f = gtk_flow_box_new();
+    gtk_flow_box_set_selection_mode(GTK_FLOW_BOX(f), GTK_SELECTION_NONE);
+    gtk_flow_box_set_homogeneous(GTK_FLOW_BOX(f), FALSE);
+    gtk_flow_box_set_max_children_per_line(GTK_FLOW_BOX(f), 32);
+    gtk_flow_box_set_column_spacing(GTK_FLOW_BOX(f), 8);
+    gtk_flow_box_set_row_spacing(GTK_FLOW_BOX(f), 6);
+    gtk_flow_box_set_activate_on_single_click(GTK_FLOW_BOX(f), FALSE);
+    return f;
+}
+
+static void flow_add(GtkWidget *f, GtkWidget *w) {
+    gtk_flow_box_append(GTK_FLOW_BOX(f), w);
+    GtkWidget *child = gtk_widget_get_parent(w);          /* the GtkFlowBoxChild wrapper: not a tab stop */
+    if (child) gtk_widget_set_focusable(child, FALSE);
+}
+
+/* Narrow window: put the two columns above each other (the page then scrolls) instead of cutting things off. */
+static void update_responsive_layout(void) {
+    if (!g_ui.root_box || !g_ui.window) return;
+    int w = gtk_widget_get_width(g_ui.window);
+    if (w <= 0) return;
+    bool want = g_ui.stacked ? w < 1060 : w < 1000;       /* hysteresis, so dragging the edge does not flicker */
+    if (want == g_ui.stacked) return;
+    g_ui.stacked = want;
+    gtk_orientable_set_orientation(GTK_ORIENTABLE(g_ui.root_box),
+                                   want ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL);
+}
+
 static void on_app_activate(GtkApplication *app, gpointer user_data) {
     (void)user_data;
 
@@ -1410,15 +1554,26 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
 
     GtkWidget *win = gtk_application_window_new(app);
     g_ui.window = win;
-    gtk_window_set_title(GTK_WINDOW(win), "AnyMouse Vectoring — Unified C 8-Octant Polar DPI & FpsAimForge Telemetry Studio");
-    gtk_window_set_default_size(GTK_WINDOW(win), 1160, 820);
+    gtk_window_set_title(GTK_WINDOW(win), "AnyMouse Vectoring Studio");
+    int win_w = 1120, win_h = 740;
+    const char *env_size = g_getenv("ANYMOUSE_WINDOW");
+    if (env_size) sscanf(env_size, "%dx%d", &win_w, &win_h);
+    gtk_window_set_default_size(GTK_WINDOW(win), win_w, win_h);
 
     GtkWidget *root_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 14);
     gtk_widget_set_margin_start(root_hbox, 14);
     gtk_widget_set_margin_end(root_hbox, 14);
     gtk_widget_set_margin_top(root_hbox, 14);
     gtk_widget_set_margin_bottom(root_hbox, 14);
-    gtk_window_set_child(GTK_WINDOW(win), root_hbox);
+    g_ui.root_box = root_hbox;
+
+    /* The whole page scrolls, so the window can be any size and nothing is ever clipped out of reach. */
+    GtkWidget *scroller = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scroller), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_propagate_natural_width(GTK_SCROLLED_WINDOW(scroller), FALSE);
+    gtk_scrolled_window_set_propagate_natural_height(GTK_SCROLLED_WINDOW(scroller), FALSE);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), root_hbox);
+    gtk_window_set_child(GTK_WINDOW(win), scroller);
 
     /* ================= LEFT COLUMN ================= */
     GtkWidget *left_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
@@ -1426,7 +1581,7 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(root_hbox), left_vbox);
 
     /* 1. Hardware Mouse & Sensor Sync Frame */
-    GtkWidget *hw_frame = gtk_frame_new("Hardware Mouse & Sensor Sync (OpenMouse HIDraw + RT Engine)");
+    GtkWidget *hw_frame = frame_new("Hardware Mouse & Sensor Sync (OpenMouse HIDraw + RT Engine)");
     GtkWidget *hw_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_frame_set_child(GTK_FRAME(hw_frame), hw_vbox);
     gtk_box_append(GTK_BOX(left_vbox), hw_frame);
@@ -1436,6 +1591,7 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     g_ui.device_model = gtk_string_list_new(NULL);
     g_ui.device_dropdown = gtk_drop_down_new(G_LIST_MODEL(g_ui.device_model), NULL);
     gtk_widget_set_hexpand(g_ui.device_dropdown, TRUE);
+    dropdown_ellipsize(g_ui.device_dropdown);
     g_signal_connect(g_ui.device_dropdown, "notify::selected", G_CALLBACK(on_device_dropdown_changed), NULL);
     gtk_box_append(GTK_BOX(dev_hbox), g_ui.device_dropdown);
 
@@ -1473,26 +1629,32 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_label_set_ellipsize(GTK_LABEL(g_ui.lbl_rt_status), PANGO_ELLIPSIZE_END);
     gtk_box_append(GTK_BOX(hw_vbox), g_ui.lbl_rt_status);
 
-    GtkWidget *badge_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *badge_hbox = flow_new();
     g_ui.badge_rate = gtk_label_new("⚡ Polling: -- Hz");
     gtk_widget_add_css_class(g_ui.badge_rate, "badge");
     gtk_widget_add_css_class(g_ui.badge_rate, "badge-cyan");
-    gtk_box_append(GTK_BOX(badge_hbox), g_ui.badge_rate);
+    flow_add(badge_hbox, g_ui.badge_rate);
 
     g_ui.badge_bat = gtk_label_new("🔋 Battery: --%");
     gtk_widget_add_css_class(g_ui.badge_bat, "badge");
     gtk_widget_add_css_class(g_ui.badge_bat, "badge-green");
-    gtk_box_append(GTK_BOX(badge_hbox), g_ui.badge_bat);
+    flow_add(badge_hbox, g_ui.badge_bat);
 
     g_ui.badge_sync = gtk_label_new("🎯 Motion Sync: --");
     gtk_widget_add_css_class(g_ui.badge_sync, "badge");
     gtk_widget_add_css_class(g_ui.badge_sync, "badge-pink");
-    gtk_box_append(GTK_BOX(badge_hbox), g_ui.badge_sync);
+    flow_add(badge_hbox, g_ui.badge_sync);
 
     g_ui.badge_rssi = gtk_label_new("📶 Signal: -- dBm");
     gtk_widget_add_css_class(g_ui.badge_rssi, "badge");
     gtk_widget_add_css_class(g_ui.badge_rssi, "badge-amber");
-    gtk_box_append(GTK_BOX(badge_hbox), g_ui.badge_rssi);
+    flow_add(badge_hbox, g_ui.badge_rssi);
+
+    g_ui.badge_dg = gtk_label_new("🔗 AnyMouse Dongle → PC");
+    gtk_widget_add_css_class(g_ui.badge_dg, "badge");
+    gtk_widget_add_css_class(g_ui.badge_dg, "badge-cyan");
+    gtk_widget_set_visible(g_ui.badge_dg, FALSE);        /* until a dongle links */
+    flow_add(badge_hbox, g_ui.badge_dg);
     gtk_box_append(GTK_BOX(hw_vbox), badge_hbox);
 
     /* Shown only when a mouse behind the dongle has a driver but did not answer it */
@@ -1505,37 +1667,50 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_set_visible(g_ui.lbl_dg_warn, FALSE);
     gtk_box_append(GTK_BOX(hw_vbox), g_ui.lbl_dg_warn);
 
-    GtkWidget *cpi_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-    gtk_box_append(GTK_BOX(cpi_hbox), gtk_label_new("Locked Sensor CPI:"));
+    GtkWidget *cpi_hbox = flow_new();
+    flow_add(cpi_hbox, gtk_label_new("Locked Sensor CPI:"));
     g_ui.cpi_dropdown = gtk_drop_down_new_from_strings(CPI_STRINGS);
     gtk_drop_down_set_selected(GTK_DROP_DOWN(g_ui.cpi_dropdown), 2); /* 3200 CPI */
     g_signal_connect(g_ui.cpi_dropdown, "notify::selected", G_CALLBACK(on_cpi_dropdown_changed), NULL);
-    gtk_box_append(GTK_BOX(cpi_hbox), g_ui.cpi_dropdown);
+    flow_add(cpi_hbox, g_ui.cpi_dropdown);
 
     g_ui.btn_cpi_3200 = gtk_button_new_with_label("Set 3200 CPI");
     g_signal_connect(g_ui.btn_cpi_3200, "clicked", G_CALLBACK(on_set_device_cpi_clicked), GINT_TO_POINTER(3200));
-    gtk_box_append(GTK_BOX(cpi_hbox), g_ui.btn_cpi_3200);
+    flow_add(cpi_hbox, g_ui.btn_cpi_3200);
 
     g_ui.btn_cpi_6400 = gtk_button_new_with_label("Set 6400 CPI");
     g_signal_connect(g_ui.btn_cpi_6400, "clicked", G_CALLBACK(on_set_device_cpi_clicked), GINT_TO_POINTER(6400));
-    gtk_box_append(GTK_BOX(cpi_hbox), g_ui.btn_cpi_6400);
+    flow_add(cpi_hbox, g_ui.btn_cpi_6400);
 
-    gtk_box_append(GTK_BOX(cpi_hbox), gtk_label_new("Polling:"));
+    flow_add(cpi_hbox, gtk_label_new("Polling:"));
     g_ui.rate_model = gtk_string_list_new(NULL);
     g_ui.rate_dropdown = gtk_drop_down_new(G_LIST_MODEL(g_ui.rate_model), NULL);
     g_signal_connect(g_ui.rate_dropdown, "notify::selected", G_CALLBACK(on_rate_dropdown_changed), NULL);
-    gtk_box_append(GTK_BOX(cpi_hbox), g_ui.rate_dropdown);
+    flow_add(cpi_hbox, g_ui.rate_dropdown);
 
     GtkWidget *btn_refresh = gtk_button_new_with_label("🔄 Refresh");
     g_signal_connect(btn_refresh, "clicked", G_CALLBACK(on_refresh_hw_clicked), NULL);
-    gtk_box_append(GTK_BOX(cpi_hbox), btn_refresh);
+    flow_add(cpi_hbox, btn_refresh);
     gtk_box_append(GTK_BOX(hw_vbox), cpi_hbox);
 
     /* 1b. AnyMouse dongle: profiles stored on the device (shown while a dongle is linked) */
-    g_ui.dg_frame = gtk_frame_new("AnyMouse Dongle · Profiles Stored on the Device");
+    g_ui.dg_frame = frame_new("Dongle · Profiles Stored on the Device");
     GtkWidget *dg_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
     gtk_frame_set_child(GTK_FRAME(g_ui.dg_frame), dg_vbox);
     g_ui.dg_sel = -1;
+
+    g_ui.lbl_dg_model = gtk_label_new("AnyMouse Dongle");
+    gtk_widget_add_css_class(g_ui.lbl_dg_model, "dg-model");
+    gtk_widget_set_halign(g_ui.lbl_dg_model, GTK_ALIGN_START);
+    gtk_label_set_ellipsize(GTK_LABEL(g_ui.lbl_dg_model), PANGO_ELLIPSIZE_END);
+    gtk_box_append(GTK_BOX(dg_vbox), g_ui.lbl_dg_model);
+
+    g_ui.lbl_dg_info = gtk_label_new("");
+    gtk_widget_add_css_class(g_ui.lbl_dg_info, "dg-info");
+    gtk_widget_set_halign(g_ui.lbl_dg_info, GTK_ALIGN_START);
+    gtk_label_set_xalign(GTK_LABEL(g_ui.lbl_dg_info), 0.0f);
+    gtk_label_set_wrap(GTK_LABEL(g_ui.lbl_dg_info), TRUE);
+    gtk_box_append(GTK_BOX(dg_vbox), g_ui.lbl_dg_info);
 
     GtkWidget *dg_slots = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
     for (int i = 0; i < AMV_NUM_SLOTS; i++) {
@@ -1547,19 +1722,19 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     }
     gtk_box_append(GTK_BOX(dg_vbox), dg_slots);
 
-    GtkWidget *dg_actions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *dg_actions = flow_new();
     g_ui.btn_dg_load = gtk_button_new_with_label("📂 Load slot");
     gtk_widget_set_tooltip_text(g_ui.btn_dg_load, "Make the selected slot's saved weights the ones in effect (on the dongle and in the radar)");
     g_signal_connect(g_ui.btn_dg_load, "clicked", G_CALLBACK(on_dg_load_clicked), NULL);
-    gtk_box_append(GTK_BOX(dg_actions), g_ui.btn_dg_load);
+    flow_add(dg_actions, g_ui.btn_dg_load);
     g_ui.btn_dg_save = gtk_button_new_with_label("💾 Save current to slot");
     gtk_widget_set_tooltip_text(g_ui.btn_dg_save, "Store the weights now in effect in the selected slot and make it the active one");
     g_signal_connect(g_ui.btn_dg_save, "clicked", G_CALLBACK(on_dg_save_clicked), NULL);
-    gtk_box_append(GTK_BOX(dg_actions), g_ui.btn_dg_save);
+    flow_add(dg_actions, g_ui.btn_dg_save);
     g_ui.chk_dg_bypass = gtk_check_button_new_with_label("Bypass (all directions 1.0)");
     gtk_widget_set_tooltip_text(g_ui.chk_dg_bypass, "Disables the vectoring without touching the saved profile. Not saved: it resets when the dongle powers up.");
     g_signal_connect(g_ui.chk_dg_bypass, "toggled", G_CALLBACK(on_dg_bypass_toggled), NULL);
-    gtk_box_append(GTK_BOX(dg_actions), g_ui.chk_dg_bypass);
+    flow_add(dg_actions, g_ui.chk_dg_bypass);
     gtk_box_append(GTK_BOX(dg_vbox), dg_actions);
 
     g_ui.lbl_dg_status = gtk_label_new("");
@@ -1581,10 +1756,10 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(left_vbox), g_ui.dg_frame);
 
     /* 2. Interactive Polar Radar Chart Frame */
-    GtkWidget *radar_frame = gtk_frame_new("Polar Anisotropic Sensitivity Map (Drag Handles · Yellow=P₁, Green=Target T)");
+    GtkWidget *radar_frame = frame_new("Polar Sensitivity Map (drag the dots · Yellow=P₁, Green=Target T)");
     gtk_widget_set_vexpand(radar_frame, TRUE);
     g_ui.drawing_area = gtk_drawing_area_new();
-    gtk_widget_set_size_request(g_ui.drawing_area, 400, 400);
+    gtk_widget_set_size_request(g_ui.drawing_area, 300, 300);
     gtk_widget_set_vexpand(g_ui.drawing_area, TRUE);
     gtk_widget_set_hexpand(g_ui.drawing_area, TRUE);
     gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(g_ui.drawing_area), on_radar_draw, NULL, NULL);
@@ -1603,8 +1778,8 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(left_vbox), radar_frame);
 
     /* 3. Quick Presets Bar */
-    GtkWidget *preset_frame = gtk_frame_new("Quick Presets");
-    GtkWidget *preset_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *preset_frame = frame_new("Quick Presets");
+    GtkWidget *preset_hbox = flow_new();
     gtk_frame_set_child(GTK_FRAME(preset_frame), preset_hbox);
 
     const struct { const char *label; const char *key; } presets[] = {
@@ -1619,9 +1794,13 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
         GtkWidget *b = gtk_button_new_with_label(presets[i].label);
         gtk_widget_set_hexpand(b, TRUE);
         g_signal_connect(b, "clicked", G_CALLBACK(on_preset_clicked), (gpointer)presets[i].key);
-        gtk_box_append(GTK_BOX(preset_hbox), b);
+        flow_add(preset_hbox, b);
     }
     gtk_box_append(GTK_BOX(left_vbox), preset_frame);
+
+    /* The radar is the main control: it and its presets come first, the hardware and dongle panels below it */
+    gtk_box_reorder_child_after(GTK_BOX(left_vbox), radar_frame, NULL);
+    gtk_box_reorder_child_after(GTK_BOX(left_vbox), preset_frame, radar_frame);
 
     /* ================= RIGHT COLUMN ================= */
     GtkWidget *right_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 12);
@@ -1629,7 +1808,7 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(root_hbox), right_vbox);
 
     /* 4. FpsAimForge (FAF) Live Telemetry & Phase 2 Calibration Frame */
-    GtkWidget *kov_frame = gtk_frame_new("Phase 2: FpsAimForge (FAF) Native Plugin Telemetry & Ballistic Auto-Calibration");
+    GtkWidget *kov_frame = frame_new("Phase 2: FpsAimForge (FAF) Native Plugin Telemetry & Ballistic Auto-Calibration");
     GtkWidget *kov_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_frame_set_child(GTK_FRAME(kov_frame), kov_vbox);
     gtk_box_append(GTK_BOX(right_vbox), kov_frame);
@@ -1649,22 +1828,22 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_label_set_ellipsize(GTK_LABEL(g_ui.lbl_last_flick), PANGO_ELLIPSIZE_END);
     gtk_box_append(GTK_BOX(kov_vbox), g_ui.lbl_last_flick);
 
-    GtkWidget *calib_ctrl_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+    GtkWidget *calib_ctrl_hbox = flow_new();
     g_ui.chk_auto_calib = gtk_check_button_new_with_label("Inter-Round Auto-Adapt (α=0.35, ±5% clamp on Round End)");
     g_signal_connect(g_ui.chk_auto_calib, "toggled", G_CALLBACK(on_auto_calib_toggled), NULL);
     /* Reflect --auto-calibrate passed on the command line */
     gtk_check_button_set_active(GTK_CHECK_BUTTON(g_ui.chk_auto_calib),
                                 atomic_load_explicit(&g_state.auto_calibrate, memory_order_relaxed));
-    gtk_box_append(GTK_BOX(calib_ctrl_hbox), g_ui.chk_auto_calib);
+    flow_add(calib_ctrl_hbox, g_ui.chk_auto_calib);
 
     GtkWidget *btn_apply_calib = gtk_button_new_with_label("⚡ Apply Damped Update");
     gtk_widget_add_css_class(btn_apply_calib, "primary-btn");
     g_signal_connect(btn_apply_calib, "clicked", G_CALLBACK(on_apply_calib_now_clicked), NULL);
-    gtk_box_append(GTK_BOX(calib_ctrl_hbox), btn_apply_calib);
+    flow_add(calib_ctrl_hbox, btn_apply_calib);
 
     GtkWidget *btn_reset_calib = gtk_button_new_with_label("↺ Reset Stats");
     g_signal_connect(btn_reset_calib, "clicked", G_CALLBACK(on_reset_calib_clicked), NULL);
-    gtk_box_append(GTK_BOX(calib_ctrl_hbox), btn_reset_calib);
+    flow_add(calib_ctrl_hbox, btn_reset_calib);
     gtk_box_append(GTK_BOX(kov_vbox), calib_ctrl_hbox);
 
     GtkWidget *faf_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
@@ -1684,7 +1863,7 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(kov_vbox), faf_hbox);
 
     /* 5. Master Vector Scaling Frame */
-    GtkWidget *master_frame = gtk_frame_new("Master Vector Scaling & Symmetry");
+    GtkWidget *master_frame = frame_new("Master Vector Scaling & Symmetry");
     GtkWidget *master_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 6);
     gtk_frame_set_child(GTK_FRAME(master_frame), master_vbox);
 
@@ -1703,19 +1882,19 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(m_hbox), g_ui.master_spin);
     gtk_box_append(GTK_BOX(master_vbox), m_hbox);
 
-    GtkWidget *sym_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    GtkWidget *sym_hbox = flow_new();
     g_ui.chk_mirror_lr = gtk_check_button_new_with_label("Link Left/Right (E↔W, NE↔NW, SE↔SW)");
     g_signal_connect(g_ui.chk_mirror_lr, "toggled", G_CALLBACK(on_mirror_lr_toggled), NULL);
-    gtk_box_append(GTK_BOX(sym_hbox), g_ui.chk_mirror_lr);
+    flow_add(sym_hbox, g_ui.chk_mirror_lr);
 
     g_ui.chk_mirror_ud = gtk_check_button_new_with_label("Link Up/Down (N↔S)");
     g_signal_connect(g_ui.chk_mirror_ud, "toggled", G_CALLBACK(on_mirror_ud_toggled), NULL);
-    gtk_box_append(GTK_BOX(sym_hbox), g_ui.chk_mirror_ud);
+    flow_add(sym_hbox, g_ui.chk_mirror_ud);
     gtk_box_append(GTK_BOX(master_vbox), sym_hbox);
     gtk_box_append(GTK_BOX(right_vbox), master_frame);
 
     /* 6. Octant Fine Tuning Grid */
-    GtkWidget *oct_frame = gtk_frame_new("Octant Fine Tuning & Live Ballistic Ratios");
+    GtkWidget *oct_frame = frame_new("Octant Fine Tuning & Live Ballistic Ratios");
     gtk_widget_set_vexpand(oct_frame, TRUE);
     GtkWidget *grid = gtk_grid_new();
     gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
@@ -1761,21 +1940,21 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_box_append(GTK_BOX(right_vbox), oct_frame);
 
     /* 7. Bottom Profile Save/Load Bar */
-    GtkWidget *bot_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    GtkWidget *bot_hbox = flow_new();
     GtkWidget *btn_save = gtk_button_new_with_label("💾 Save Profile (auto-saved on exit)");
     g_signal_connect(btn_save, "clicked", G_CALLBACK(on_save_profile_clicked), NULL);
-    gtk_box_append(GTK_BOX(bot_hbox), btn_save);
+    flow_add(bot_hbox, btn_save);
 
     GtkWidget *btn_load = gtk_button_new_with_label("📂 Reload Saved Profile");
     g_signal_connect(btn_load, "clicked", G_CALLBACK(on_load_profile_clicked), NULL);
-    gtk_box_append(GTK_BOX(bot_hbox), btn_load);
+    flow_add(bot_hbox, btn_load);
 
     g_ui.lbl_profile_status = gtk_label_new("⚡ Direct Shared-Memory Atomic Engine");
     gtk_widget_set_halign(g_ui.lbl_profile_status, GTK_ALIGN_START);
     gtk_widget_set_hexpand(g_ui.lbl_profile_status, TRUE);
     gtk_label_set_ellipsize(GTK_LABEL(g_ui.lbl_profile_status), PANGO_ELLIPSIZE_END);
     gtk_widget_add_css_class(g_ui.lbl_profile_status, "badge-green");
-    gtk_box_append(GTK_BOX(bot_hbox), g_ui.lbl_profile_status);
+    flow_add(bot_hbox, g_ui.lbl_profile_status);
     gtk_box_append(GTK_BOX(right_vbox), bot_hbox);
 
     g_hw_queue = g_async_queue_new();
@@ -1787,6 +1966,8 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     g_timeout_add(100, on_ui_tick, NULL);
 
     gtk_window_present(GTK_WINDOW(win));
+    const char *shot = g_getenv("ANYMOUSE_SHOT");
+    if (shot && shot[0]) g_timeout_add(4000, dev_shot_cb, g_strdup(shot));
 }
 
 int gui_run(int argc, char **argv) {

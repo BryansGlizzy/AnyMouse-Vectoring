@@ -18,39 +18,15 @@ static void frame(uint8_t *out, uint8_t cmd, uint8_t seq, uint8_t status,
     memcpy(out, &h, sizeof h);
     if (len) memcpy(out + 8, p, len);
 }
-static const uint16_t rates[] = {500,1000,2000,4000,8000};
-static struct { bool active, failed, writing, ack; uint8_t cmd, seq, index, seen; uint32_t start; uint16_t cpi, rate, battery; } job;
-void amv_proto_finalmouse_reply(uint8_t cmd, uint16_t value) {
-    if (!job.active) return;
-    if (job.writing) { if (cmd==17) job.ack=true; return; }
-    if (cmd==3) { job.cpi=value; job.seen|=1; }
-    if (cmd==4) { job.rate=value; job.seen|=2; }
-    if (cmd==5) { int pct=(int(value)-3400)*100/800; job.battery=pct<0?0:pct>100?100:pct; job.seen|=4; }
-}
-bool amv_proto_poll_mouse(uint8_t *out) {
-    if (!job.active) return false;
-    uint32_t now=plat.uptime_ms ? plat.uptime_ms() : 0;
-    // Some dongles do not acknowledge writes. Retry the read after the OUT
-    // transfer has had time to complete; never spin waiting for that endpoint.
-    if (job.writing && (job.ack || uint32_t(now-job.start)>=10)) {
-        if (plat.mouse->send_finalmouse(96,nullptr,0)) { job.writing=false; job.seen=0; }
-    }
-    amv_mouse_info_t info={};
-    bool gone=amv_proto_mouse_get_info(plat.mouse,job.index,&info)!=AMV_ST_OK || info.vid!=0x361d || info.pid!=0x0100;
-    if (!job.failed && !gone && job.seen!=7 && uint32_t(now-job.start)<1000) return false;
-    uint8_t status=job.failed || gone || job.seen!=7 ? AMV_ST_DEVICE_ERR : AMV_ST_OK;
-    if (job.cmd==AMV_CMD_SET_MOUSE_POLLING) {
-        info.device_hz=job.rate;
-        frame(out,job.cmd,job.seq,status,&info,sizeof info);
-    } else {
-        amv_settings_rep_t r={}; r.index=job.index; r.count=3; r.link=AMV_LINK_CONNECTED;
-        r.s[0]={AMV_SET_POLLING,AMV_SETF_READABLE|AMV_SETF_WRITABLE,job.rate};
-        r.s[1]={AMV_SET_CPI,AMV_SETF_READABLE,job.cpi};
-        r.s[2]={AMV_SET_BATTERY,AMV_SETF_READABLE,job.battery};
-        frame(out,job.cmd,job.seq,status,status==AMV_ST_OK?&r:nullptr,status==AMV_ST_OK?16:0);
-    }
-    job.active=false; return true;
-}
+// GET_STATS counters (amv_stats_payload_t, the ESP32's layout)
+static amv_stats_payload_t counters;
+// A mouse write whose reply waits for the driver (one at a time).
+static struct { bool active; uint8_t cmd, seq, index; } deferred;
+// TEST_SELF_CHANGE: one pending device-side change.
+static struct { bool pending; uint8_t octant; float value; uint32_t due; } self_change;
+
+void amv_proto_count_event(bool sent) { if (sent) counters.events_sent++; else counters.events_dropped++; }
+
 static bool valid(const float *w) {
     for (unsigned i=0; i<8; ++i)
         if (!std::isfinite(w[i]) || w[i] < float(AMV_WEIGHT_MIN) || w[i] > float(AMV_WEIGHT_MAX)) return false;
@@ -76,7 +52,7 @@ void amv_proto_init(const amv_plat_t *p) {
     plat = p ? *p : amv_plat_t{};
     state = {}; state.gen=1;
     for (unsigned i=0;i<8;++i) state.w[i]=1;
-    job={}; rem={}; head=count=0; reboot_pending=false;
+    rem={}; head=count=0; reboot_pending=false; counters={}; deferred={}; self_change={};
     float w[8]; memcpy(w,state.w,sizeof w);
     if (plat.apply) plat.apply(w,false);
 }
@@ -92,12 +68,33 @@ void amv_proto_notify_mouse(uint8_t change, uint16_t uid) {
     frame(events[(head+count)%32], AMV_CMD_EVENT_MOUSE, 0, AMV_ST_OK, &ev, sizeof ev);
     ++count;
 }
-uint8_t amv_proto_mouse_get_info(const amv_mouse_ops_t *ops, uint8_t index, amv_mouse_info_t *p) {
-    *p={}; p->index=index;
-    p->count=ops && ops->count ? ops->count() : 0;
-    if (index >= p->count || !ops->info || !ops->info(index,p)) return AMV_ST_NO_MOUSE;
-    p->index=index; p->count=ops->count();
-    return AMV_ST_OK;
+// Reply to a mouse write: the mouse's entry (SET_MOUSE_CPI / _POLLING) or its settings list (SET_MOUSE_SETTING),
+// sent even when the write was refused so a client can resync, as the ESP32 does.
+static void amv_proto_mouse_reply(uint8_t *out, uint8_t status) {
+    if (deferred.cmd==AMV_CMD_SET_MOUSE_SETTING) {
+        amv_settings_rep_t r={}; r.index=deferred.index;
+        uint8_t g=plat.mouse->settings(deferred.index,&r);
+        uint8_t s=status!=AMV_ST_OK ? status : g;
+        frame(out,deferred.cmd,deferred.seq,s,&r,s==AMV_ST_NO_MOUSE || g!=AMV_ST_OK ? 0 : uint8_t(4+4*r.count));
+    } else {
+        amv_mouse_info_t r={}; r.index=deferred.index;
+        plat.mouse->info(deferred.index,&r);
+        frame(out,deferred.cmd,deferred.seq,status,&r,status==AMV_ST_NO_MOUSE ? 2 : sizeof r);
+    }
+}
+bool amv_proto_poll_mouse(uint8_t *out) {
+    uint8_t status;
+    if (!deferred.active || !plat.mouse || !plat.mouse->write_done(&status)) return false;
+    deferred.active=false;
+    amv_proto_mouse_reply(out,status);
+    return true;
+}
+void amv_proto_tick() {
+    if (!self_change.pending || !plat.uptime_ms || int32_t(plat.uptime_ms()-self_change.due)<0) return;
+    self_change.pending=false;
+    float w[8]; memcpy(w,state.w,sizeof w);
+    w[self_change.octant]=self_change.value;
+    if (valid(w)) { memcpy(state.w,w,sizeof w); changed(AMV_SRC_DEVICE); }
 }
 size_t amv_proto_handle(const uint8_t *input, uint8_t *out, uint8_t source) {
     uint8_t in[64]; memcpy(in,input,64);
@@ -112,7 +109,7 @@ size_t amv_proto_handle(const uint8_t *input, uint8_t *out, uint8_t source) {
         if (len!=8) { reply(AMV_ST_BAD_LEN); break; }
         amv_hello_rep_t r={}; r.ident=AMV_HELLO_IDENT; memcpy(r.nonce,p,8);
         r.proto_ver=AMV_PROTO_VERSION; r.fw_major=AMV_TEENSY_FW_MAJOR; r.fw_minor=AMV_TEENSY_FW_MINOR; r.fw_patch=AMV_TEENSY_FW_PATCH;
-        r.caps=AMV_CAP_VECTORED_MOUSE|AMV_CAP_MOUSE_HOST;
+        r.caps=AMV_CAP_VECTORED_MOUSE|AMV_CAP_MOUSE_HOST|AMV_CAP_PRO;
         if (plat.unit_id) plat.unit_id(r.mac);
         reply(AMV_ST_OK,&r,sizeof r); break;
     }
@@ -127,9 +124,9 @@ size_t amv_proto_handle(const uint8_t *input, uint8_t *out, uint8_t source) {
     case AMV_CMD_SET_WEIGHTS: {
         if (len!=36) { reply(AMV_ST_BAD_LEN); break; }
         uint32_t gen; float w[8]; memcpy(&gen,p,4); memcpy(w,p+4,32);
-        if (!valid(w)) st(AMV_ST_BAD_VALUE);
-        else if (gen!=AMV_GEN_ANY && gen!=state.gen) st(AMV_ST_STALE);
-        else { memcpy(state.w,w,32); changed(source); st(AMV_ST_OK); }
+        if (!valid(w)) { counters.bad_value_rejects++; st(AMV_ST_BAD_VALUE); }
+        else if (gen!=AMV_GEN_ANY && gen!=state.gen) { counters.stale_rejects++; st(AMV_ST_STALE); }
+        else { memcpy(state.w,w,32); changed(source); counters.sets_ok++; st(AMV_ST_OK); }
         break;
     }
     case AMV_CMD_SET_BYPASS:
@@ -137,6 +134,7 @@ size_t amv_proto_handle(const uint8_t *input, uint8_t *out, uint8_t source) {
         else { state.bypass=!!p[0]; changed(source); st(AMV_ST_OK); } break;
     case AMV_CMD_GET_STATS: {
         uint8_t data[56]={}, n=sizeof(amv_stats_payload_t);
+        memcpy(data,&counters,sizeof counters);
         if (plat.get_stats) plat.get_stats(data,&n);
         if (n>56) reply(AMV_ST_BAD_LEN); else reply(AMV_ST_OK,data,n);
         break;
@@ -149,71 +147,69 @@ size_t amv_proto_handle(const uint8_t *input, uint8_t *out, uint8_t source) {
         int32_t x,y; uint8_t oct;
         amv_octant_scale(w,&rem,req.dx,req.dy,&x,&y,&oct);
         amv_test_scale_rep_t r={x,y,rem.rem_x,rem.rem_y,oct};
+        counters.test_scales++;
         reply(AMV_ST_OK,&r,sizeof r); break;
     }
+    case AMV_CMD_TEST_SELF_CHANGE: {
+        if (len!=sizeof(amv_test_self_change_req_t)) { reply(AMV_ST_BAD_LEN); break; }
+        amv_test_self_change_req_t req; memcpy(&req,p,sizeof req);
+        if (req.octant>7) { reply(AMV_ST_BAD_VALUE); break; }
+        if (self_change.pending) { reply(AMV_ST_BUSY); break; }
+        self_change.pending=true; self_change.octant=req.octant; self_change.value=req.value;
+        self_change.due=(plat.uptime_ms?plat.uptime_ms():0)+(req.delay_ms?req.delay_ms:1);
+        reply(AMV_ST_OK); break;
+    }
+    // ---- mice: the same replies as the ESP32-P4 (amv_proto.c) ----
     case AMV_CMD_GET_MOUSE: {
         if (!len) { reply(AMV_ST_BAD_LEN); break; }
         amv_mouse_info_t r={}; r.index=p[0];
-        uint8_t s=amv_proto_mouse_get_info(plat.mouse,p[0],&r);
+        uint8_t s=plat.mouse ? plat.mouse->info(p[0],&r) : AMV_ST_NO_MOUSE;
         reply(s,&r,s==AMV_ST_OK ? sizeof r : 2); break;
+    }
+    case AMV_CMD_GET_MOUSE_CAPS: {
+        if (!len) { reply(AMV_ST_BAD_LEN); break; }
+        amv_mouse_caps_t r={}; r.index=p[0];
+        uint8_t s=plat.mouse ? plat.mouse->caps(p[0],&r) : AMV_ST_NO_MOUSE;
+        reply(s,&r,s==AMV_ST_OK ? sizeof r : 0); break;
     }
     case AMV_CMD_GET_MOUSE_DESC: {
         if (len < sizeof(amv_mouse_desc_req_t)) { reply(AMV_ST_BAD_LEN); break; }
         amv_mouse_desc_req_t req; memcpy(&req,p,sizeof req);
-        amv_mouse_info_t info;
-        uint8_t status=amv_proto_mouse_get_info(plat.mouse,req.index,&info);
-        if (status!=AMV_ST_OK) { reply(status); break; }
         amv_mouse_desc_rep_t r={}; r.index=req.index; r.offset=req.offset;
-        uint16_t total=0;
-        const uint8_t *data=plat.mouse->descriptor ? plat.mouse->descriptor(req.index,&total) : nullptr;
-        r.total=total;
-        if (data && req.offset<r.total) {
-            r.len=uint8_t(r.total-req.offset>48 ? 48 : r.total-req.offset);
-            memcpy(r.data,data+req.offset,r.len);
-        }
-        reply(AMV_ST_OK,&r,sizeof r); break;
+        uint8_t s=plat.mouse ? plat.mouse->desc(req.index,req.offset,&r) : AMV_ST_NO_MOUSE;
+        reply(s,&r,s==AMV_ST_OK ? sizeof r : 0); break;
     }
     case AMV_CMD_GET_MOUSE_MODEL: {
         if (!len) { reply(AMV_ST_BAD_LEN); break; }
-        amv_mouse_info_t info;
-        uint8_t status=amv_proto_mouse_get_info(plat.mouse,p[0],&info);
-        if (status!=AMV_ST_OK) { reply(status); break; }
         amv_mouse_model_t r={}; r.index=p[0];
-        const auto *entry=amv_catalog_find(info.vid,info.pid);
-        if (entry) {
-            r.state=info.driver ? AMV_MODEL_DRIVER : AMV_MODEL_KNOWN;
-            strncpy(r.brand,amv_catalog_brand(entry),sizeof r.brand-1);
-            strncpy(r.model,entry->model,sizeof r.model-1);
-        }
-        reply(AMV_ST_OK,&r,sizeof r); break;
+        uint8_t s=plat.mouse ? plat.mouse->model(p[0],&r) : AMV_ST_NO_MOUSE;
+        reply(s,&r,s==AMV_ST_OK ? sizeof r : 0); break;
     }
-    case AMV_CMD_GET_MOUSE_SETTINGS:
-    case AMV_CMD_GET_MOUSE_OPTIONS:
-    case AMV_CMD_SET_MOUSE_SETTING:
-    case AMV_CMD_SET_MOUSE_POLLING: {
-        unsigned need=cmd==AMV_CMD_GET_MOUSE_SETTINGS?1:cmd==AMV_CMD_GET_MOUSE_OPTIONS?2:4;
-        if (len<need) { reply(AMV_ST_BAD_LEN); break; }
-        if (job.active) { reply(AMV_ST_BUSY); break; }
-        amv_mouse_info_t info={};
-        uint8_t status=amv_proto_mouse_get_info(plat.mouse,p[0],&info);
-        if (status!=AMV_ST_OK) { reply(status); break; }
-        if (info.vid!=0x361d || info.pid!=0x0100) { reply(AMV_ST_UNSUPPORTED); break; }
-        if (cmd!=AMV_CMD_GET_MOUSE_SETTINGS && cmd!=AMV_CMD_SET_MOUSE_POLLING && p[1]!=AMV_SET_POLLING) { reply(AMV_ST_UNSUPPORTED); break; }
-        if (cmd==AMV_CMD_GET_MOUSE_OPTIONS) {
-            amv_options_rep_t r={}; r.index=p[0]; r.setting=p[1]; r.kind=AMV_OPT_LIST; r.unit=AMV_UNIT_HZ; r.n=5;
-            memcpy(r.values,rates,sizeof rates); reply(AMV_ST_OK,&r,16); break;
-        }
-        uint16_t value=0; bool write=cmd!=AMV_CMD_GET_MOUSE_SETTINGS;
-        if (write) {
-            memcpy(&value,p+2,2); bool ok=false;
-            for (auto rate:rates) if (value==rate) ok=true;
-            if (!ok) { reply(AMV_ST_BAD_VALUE); break; }
-        }
-        job={}; job.active=true; job.cmd=cmd; job.seq=seq; job.index=p[0]; job.start=plat.uptime_ms?plat.uptime_ms():0;
-        auto send=plat.mouse->send_finalmouse;
-        job.writing=write;
-        if (!send || !(write ? send(17,p+2,2) : send(96,nullptr,0))) job.failed=true;
-        return 0;
+    case AMV_CMD_GET_MOUSE_SETTINGS: {
+        if (!len) { reply(AMV_ST_BAD_LEN); break; }
+        amv_settings_rep_t r={}; r.index=p[0];
+        uint8_t s=plat.mouse ? plat.mouse->settings(p[0],&r) : AMV_ST_NO_MOUSE;
+        reply(s,&r,s==AMV_ST_OK ? uint8_t(4+4*r.count) : 0); break;
+    }
+    case AMV_CMD_GET_MOUSE_OPTIONS: {
+        if (len < sizeof(amv_options_req_t)) { reply(AMV_ST_BAD_LEN); break; }
+        amv_options_rep_t r={}; r.index=p[0]; r.setting=p[1];
+        uint8_t s=plat.mouse ? plat.mouse->options(p[0],p[1],&r) : AMV_ST_NO_MOUSE;
+        reply(s,&r,s==AMV_ST_OK ? uint8_t(6+2*r.n) : 0); break;
+    }
+    case AMV_CMD_SET_MOUSE_CPI:
+    case AMV_CMD_SET_MOUSE_POLLING:
+    case AMV_CMD_SET_MOUSE_SETTING: {
+        if (len < 4) { reply(AMV_ST_BAD_LEN); break; }
+        uint8_t index=p[0], setting=cmd==AMV_CMD_SET_MOUSE_CPI ? AMV_SET_CPI : cmd==AMV_CMD_SET_MOUSE_POLLING ? AMV_SET_POLLING : p[1];
+        uint16_t value; memcpy(&value,p+2,2);
+        if (!plat.mouse) { reply(AMV_ST_NO_MOUSE); break; }
+        if (deferred.active) { reply(AMV_ST_BUSY); break; }
+        uint8_t s=plat.mouse->write(index,setting,value);
+        if (s==AMV_ST_PENDING) { deferred.active=true; deferred.cmd=cmd; deferred.seq=seq; deferred.index=index; return 0; }
+        deferred.cmd=cmd; deferred.seq=seq; deferred.index=index;
+        amv_proto_mouse_reply(out,s);
+        break;
     }
     case AMV_CMD_SAVE_PROFILE: case AMV_CMD_LOAD_PROFILE:
     case AMV_CMD_GET_SLOTS: case AMV_CMD_FACTORY_RESET: {
@@ -230,11 +226,11 @@ size_t amv_proto_handle(const uint8_t *input, uint8_t *out, uint8_t source) {
         amv_profile_t profile; memcpy(profile.w,state.w,32);
         if (cmd==AMV_CMD_SAVE_PROFILE) {
             if (!s->save(p[0],&profile)) st(AMV_ST_STORE_ERR);
-            else { if (state.active_slot!=p[0]) { state.active_slot=p[0]; changed(source); } st(AMV_ST_OK); }
+            else { counters.saves++; if (state.active_slot!=p[0]) { state.active_slot=p[0]; changed(source); } st(AMV_ST_OK); }
         } else {
             if (!(s->valid_mask() & (1u<<p[0]))) st(AMV_ST_EMPTY);
             else if (!s->load(p[0],&profile) || !valid(profile.w)) st(AMV_ST_STORE_ERR);
-            else { memcpy(state.w,profile.w,32); state.active_slot=p[0]; changed(AMV_SRC_LOAD); st(AMV_ST_OK); }
+            else { memcpy(state.w,profile.w,32); state.active_slot=p[0]; changed(AMV_SRC_LOAD); counters.loads++; st(AMV_ST_OK); }
         }
         break;
     }

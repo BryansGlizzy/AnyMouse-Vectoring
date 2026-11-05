@@ -172,10 +172,28 @@ bool dongle_guard_active(void) {
     return false;
 }
 
+const char *dongle_model_name(uint16_t caps) {
+    return (caps & AMV_CAP_PRO) ? "AnyMouse Pro Dongle" : "AnyMouse Dongle";
+}
+
+const char *dongle_link_text(int hz) {
+    if (hz >= 8000) return "8000 Hz (High-Speed USB)";
+    if (hz >= 1000) return "1000 Hz (Full-Speed USB)";
+    if (hz > 0) return "125 Hz (Low-Speed USB)";
+    return "unknown";
+}
+
 bool dongle_get_status(dongle_status_t *out) {
     pthread_mutex_lock(&s_mtx);
     *out = s_status;
+    int measured = s_pc_link_hz;
     pthread_mutex_unlock(&s_mtx);
+    if (out->link != DONGLE_NONE) {
+        out->pro = (out->caps & AMV_CAP_PRO) != 0;
+        snprintf(out->model, sizeof(out->model), "%s", dongle_model_name(out->caps));
+        /* What Linux negotiated for the dongle's USB port is the truth; without it (one-shot CLI) the model says */
+        out->pc_link_hz = measured > 0 ? measured : (out->link == DONGLE_LINKED ? (out->pro ? 8000 : 1000) : 0);
+    }
     return out->link == DONGLE_LINKED;
 }
 
@@ -1008,8 +1026,10 @@ int dongle_cli(const char *action, const char *arg) {
             format_status_line(&st, line, sizeof(line));
             dongle_status_t cur;
             dongle_get_status(&cur);
-            printf("AnyMouse dongle on %s\n", st.node);
+            printf("%s on %s\n", dongle_model_name(st.caps), st.node);
             printf("  Identity   : %s\n", line);
+            /* The one-shot has no negotiated-speed lookup: the model says what the PC link is */
+            printf("  Polling    : to the PC up to %s\n", dongle_link_text((st.caps & AMV_CAP_PRO) ? 8000 : 1000));
             printf("  Vectoring  : %s\n", st.vectoring ? "in hardware (software engine stays idle)" : "off");
             printf("  Weights    : gen %u, slot %u, bypass %s\n", cur.gen, cur.active_slot, cur.bypass ? "on" : "off");
             printf("  ");

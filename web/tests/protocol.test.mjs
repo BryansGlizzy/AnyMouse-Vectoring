@@ -187,6 +187,20 @@ test('listMice() on firmware without mouse commands returns null', async () => {
   assert.equal(await c.listMice(), null);
 });
 
+test('the capability bit tells the Pro dongle from the standard one', async () => {
+  for (const [profile, pro, name, fw] of [['esp32', false, 'AnyMouse Dongle', '0.5.0'], ['pro', true, 'AnyMouse Pro Dongle', '0.2.1']]) {
+    const mock = new MockHid({}, { profile });
+    const c = new DongleClient(mock, { timeoutMs: 300 });
+    await c.open();
+    const hello = await c.hello();
+    assert.equal(hello.pro, pro, profile);
+    assert.equal(hello.fw, fw);
+    assert.equal(mock.productName, name);
+    // the Pro profile has every optional command, unlike the early Teensy firmware
+    assert.notEqual(await c.getMouseCaps(0), null);
+  }
+});
+
 test('Teensy-like mock: optional commands are unsupported without breaking the link', async () => {
   const mock = new MockHid({}, { profile: 'teensy' });
   const c = new DongleClient(mock, { timeoutMs: 300 });

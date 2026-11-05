@@ -1,5 +1,5 @@
 // Offline shell: network first (so updates arrive), cache as the fallback.
-const CACHE = 'anymouse-studio-v1';
+const CACHE = 'anymouse-studio-v2';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'dongle.js', 'proto.js', 'presets.js', 'radar.js', 'mock_device.js', 'icon.svg', 'manifest.webmanifest'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', (e) => {

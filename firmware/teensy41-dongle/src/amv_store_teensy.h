@@ -5,25 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#if __has_include("amv_proto_teensy.h")
 #include "amv_proto_teensy.h"
-#endif
-
-#if !defined(AMV_STORE_OPS_DEFINED) && !defined(AMV_PROTO_TEENSY_H)
-#define AMV_STORE_OPS_DEFINED
-typedef struct {
-    float w[8];
-} amv_profile_t;
-
-typedef struct {
-    bool (*load)(uint8_t slot, amv_profile_t *p);
-    bool (*save)(uint8_t slot, const amv_profile_t *p);
-    uint8_t (*valid_mask)(void);
-    bool (*factory_reset)(void);
-    bool (*load_boot)(uint8_t *active_slot, amv_profile_t *p);
-    bool (*save_boot)(uint8_t active_slot, const amv_profile_t *p, bool bypass);
-} amv_store_ops_t;
-#endif
 
 #define AMV_STORE_EEPROM_SIZE 4284
 #define AMV_STORE_SLOT_MAGIC  0x50564D41u /* 'AMVP' little-endian */

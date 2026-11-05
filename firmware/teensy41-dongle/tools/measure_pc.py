@@ -1,7 +1,7 @@
 #!/usr/bin/env python3 -I
 """Measure what the PC actually receives from the Teensy bridge's mouse (the 'PC side' of the 8 kHz check).
 
-   measure_pc.py [SECONDS] [--vid 16c0] [--pid 0487]
+   measure_pc.py [SECONDS] [--vid 16c0] [--pid 0489]
 
 Reads the kernel input node of the bridge's mouse (no grab, it does not steal the pointer) and reports, per
 second: events (SYN frames) per second, the spacing between frames from the kernel's own timestamps, and the
@@ -13,7 +13,7 @@ import os, sys, struct, time, glob, select, collections, argparse
 ap = argparse.ArgumentParser()
 ap.add_argument('seconds', nargs='?', type=float, default=10)
 ap.add_argument('--vid', default='16c0')
-ap.add_argument('--pid', default='0487')
+ap.add_argument('--pid', default='0489')
 ap.add_argument('--event', help='explicit /dev/input/eventN')
 a = ap.parse_args()
 

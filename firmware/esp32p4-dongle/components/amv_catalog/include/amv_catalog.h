@@ -1,6 +1,6 @@
 #pragma once
 /*
- * Catalog of every device OpenMouse knows (see firmware/esp32p4-dongle/README.md, Mouse discovery and information), generated from a pinned
+ * Catalog of every device OpenMouse knows (see firmware/esp32p4-dongle/esp32p4-dongle_README.md, Mouse discovery and information), generated from a pinned
  * OpenMouse checkout by tools/openmouse/gen_catalog.sh. Pure C with no ESP-IDF dependency, so it
  * is also built by the host tests.
  */

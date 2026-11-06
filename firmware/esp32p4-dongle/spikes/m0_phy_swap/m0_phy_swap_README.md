@@ -1,6 +1,6 @@
 # M0 spike: PC-facing USB on the "other" USB-C
 
-Proves that the ESP32-P4's Full-Speed OTG controller can be moved, in software, onto the board's second USB-C connector (normally USB Serial/JTAG) and used as a USB device. Part of milestone M0 in [../../PLAN.md](../../PLAN.md).
+Proves that the ESP32-P4's Full-Speed OTG controller can be moved, in software, onto the board's second USB-C connector (normally USB Serial/JTAG) and used as a USB device. This was the first milestone (M0) of the ESP32 dongle; the result is now the PC link of the full firmware in [../../README.md](../../esp32p4-dongle_README.md).
 
 ## What it does
 - Calls `usb_wrap_ll_phy_select(&USB_WRAP, 0)` before `tinyusb_driver_install()`, routing the Full-Speed OTG controller to GPIO24/25.
@@ -9,10 +9,10 @@ Proves that the ESP32-P4's Full-Speed OTG controller can be moved, in software, 
 - Logs `mounted`/`ready` state every 2 s on UART0 (the CH343 USB-C).
 
 ## Result (2026-10-25)
-The Mac saw both HID devices; 20/20 vendor echoes were correct, median round trip about 5 ms. No eFuse was touched. The mouse-side host half has **not** been tested.
+The Mac saw both HID devices; 20/20 vendor echoes were correct, median round trip about 5 ms. No eFuse was touched. The mouse-side host half is not part of the spike; the full firmware has it.
 
 ## Build and flash
-Needs ESP-IDF v5.5.4 (`~/esp/esp-idf`, see [README.md](../../README.md#toolchain-and-quickstart)), plus `cmake` and `ninja`.
+Needs ESP-IDF v5.5.4 (`~/esp/esp-idf`, see [the dongle README](../../esp32p4-dongle_README.md#toolchain-and-quickstart)), plus `cmake` and `ninja`.
 ```bash
 . ~/esp/esp-idf/export.sh
 cd firmware/esp32p4-dongle/spikes/m0_phy_swap
@@ -30,4 +30,4 @@ Vendor echo test: open the `0xFF4D` interface with `hidapi`, write a 64-byte rep
 
 ## Notes
 - Uses `espressif/esp_tinyusb` 3.0.0 (new API: `TINYUSB_CONFIG_FULL_SPEED`, `tinyusb_port_t`). `managed_components/`, `build/` and `sdkconfig` are git-ignored.
-- The VID `0x303A` with this placeholder PID is for development only; see PLAN.md section 8.
+- The VID `0x303A` with this placeholder PID is for development only.

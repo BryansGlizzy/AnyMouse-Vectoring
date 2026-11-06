@@ -6,14 +6,14 @@ Anisotropic, 8-octant polar sensitivity calibration driven by real-time ballisti
 
 | Document | What it covers |
 |:---|:---|
-| **README.md** (this file) | Concept, math, calibration algorithm, the Linux engine (`./anymouse`), and the hardware-dongle overview |
-| [PROGRESS.md](PROGRESS.md) | Dated log of milestones, current status per phase, handoff notes and the roadmap checklist |
+| **README.md** (this file) | Concept, math, calibration algorithm, the Linux engine (`./anymouse`), the hardware-dongle overview and the [repository layout](#14-repository-layout) |
+| [context.md](context.md) | The reading list for a new contributor or agent |
 | [LICENSE](LICENSE) | GNU AGPL-3.0, the license for this whole repository (see the License section at the end of this file) |
-| [web/README.md](web/README.md) | AnyMouse Studio, the no-install WebHID front-end for the dongle: run, use, files, tests, and where the public copy is hosted (`root@webserver.lan:/opt/webserver/anymouse-webhid/`, synced with `tools/deploy-web.sh`) |
-| [firmware/esp32p4-dongle/README.md](firmware/esp32p4-dongle/README.md) | ESP32-P4 dongle as built: status, verified hardware, architecture, mouse tiers and OpenMouse coverage, protocol, quickstart, tests |
-| [firmware/teensy41-dongle/README.md](firmware/teensy41-dongle/README.md) | **AnyMouse Pro Dongle** (Teensy 4.1, firmware 0.2.1): the ESP32 dongle's features with **8 kHz** to the PC, OpenMouse in QuickJS-ng; build, flash, console, measurements |
-| [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md) | ESP32-P4 dongle open work only: Linux and calibration items, OpenMouse coverage, mouse-side experiments, Windows, stretch goals, risks |
-| [firmware/esp32p4-dongle/spikes/m0_phy_swap/README.md](firmware/esp32p4-dongle/spikes/m0_phy_swap/README.md) | The M0 proof-of-concept: PC-facing USB on the board's second USB-C |
+| [web/web_README.md](web/web_README.md) | AnyMouse Studio, the no-install WebHID front-end for the dongle: run, use, files, tests, and where the public copy is hosted (`root@webserver.lan:/opt/webserver/anymouse-webhid/`, synced with `tools/deploy-web.sh`) |
+| [firmware/esp32p4-dongle/esp32p4-dongle_README.md](firmware/esp32p4-dongle/esp32p4-dongle_README.md) | **AnyMouse Dongle** (ESP32-P4, firmware 0.7.0) as built: verified hardware, architecture, mouse tiers and OpenMouse coverage, protocol, quickstart, tests |
+| [firmware/teensy41-dongle/teensy41-dongle_README.md](firmware/teensy41-dongle/teensy41-dongle_README.md) | **AnyMouse Pro Dongle** (Teensy 4.1, firmware 0.2.1): the ESP32 dongle's features with **8 kHz** to the PC, OpenMouse in QuickJS-ng; build, flash, console, measurements |
+| [firmware/esp32p4-dongle/spikes/m0_phy_swap/m0_phy_swap_README.md](firmware/esp32p4-dongle/spikes/m0_phy_swap/m0_phy_swap_README.md) | The M0 proof of concept: PC-facing USB on the ESP32-P4's second USB-C |
+| [firmware/esp32p4-dongle/tools/openmouse/qjs_suite/qjs_suite_README.md](firmware/esp32p4-dongle/tools/openmouse/qjs_suite/qjs_suite_README.md) | Runs OpenMouse's own test suite under the dongle's JavaScript engine |
 | [faf/AnyMouse.bundle.json](faf/AnyMouse.bundle.json) | The `FpsAimForge` calibration scenarios |
 
 ---
@@ -24,7 +24,7 @@ Anisotropic, 8-octant polar sensitivity calibration driven by real-time ballisti
 3. [Sensor Hardware Realities: Why Vector Scaling?](#3-sensor-hardware-realities-why-vector-scaling)
 4. [Mathematical Foundations & Formulas](#4-mathematical-foundations--formulas)
    - [4.1 Coordinate Space & Octant Mapping](#41-coordinate-space--octant-mapping)
-   - [4.2 Continuous Angular Interpolation (Cosine C¹ Continuity)](#42-continuous-angular-interpolation-cosine-c-continuity)
+   - [4.2 Continuous Angular Interpolation (Cosine C¹ Continuity)](#42-continuous-angular-interpolation-cosine-c1-continuity)
    - [4.3 Sub-Pixel Remainder Accumulation (Error Diffusion)](#43-sub-pixel-remainder-accumulation-error-diffusion)
    - [4.4 Reference Implementation (C / Embedded C)](#44-reference-implementation-c--embedded-c)
 5. [Telemetry & Calibration Algorithm (Phase 2)](#5-telemetry--calibration-algorithm-phase-2)
@@ -35,12 +35,11 @@ Anisotropic, 8-octant polar sensitivity calibration driven by real-time ballisti
 6. [Why Motion Sync is Mandatory](#6-why-motion-sync-is-mandatory)
 7. [System Architecture & 4-Phase Roadmap](#7-system-architecture--4-phase-roadmap)
    - [Phase 1: OS-Level Input Interception (CachyOS / Linux evdev + uinput)](#phase-1-os-level-input-interception-cachyos--linux-evdev--uinput)
-   - [Phase 2: 2D Radial Calibration Engine](#phase-2-2d-radial-calibration-engine)
+   - [Phase 2: `FpsAimForge` (FAF) Native Telemetry Plugin & 8-Octant Calibration Engine](#phase-2-fpsaimforge-faf-native-telemetry-plugin--8-octant-calibration-engine)
    - [Phase 3: Mouse MCU Firmware Integration (Attack Shark R3 / nRF52840)](#phase-3-mouse-mcu-firmware-integration-attack-shark-r3--nrf52840)
-   - [Phase 4: Universal USB-HID Hardware Pass-Through (ESP32-P4 MitM Dongle)](#phase-4-universal-usb-hid-hardware-pass-through-esp32-p4-mitm-dongle)
+   - [Phase 4: Universal USB-HID Hardware Pass-Through (MitM Dongle)](#phase-4-universal-usb-hid-hardware-pass-through-mitm-dongle)
 8. [Reverse Engineering Proprietary Firmware (`morluto/rea`)](#8-reverse-engineering-proprietary-firmware-morlutorea)
    - [Reconstruction Pitfalls vs. Binary Trampoline Patching](#reconstruction-pitfalls-vs-binary-trampoline-patching)
-   - [Workflow with Ghidra & Vendor DFU Updaters](#workflow-with-ghidra--vendor-dfu-updaters)
 9. [Hardware Profiles & Linux Configuration Setup](#9-hardware-profiles--linux-configuration-setup)
    - [Device Telemetry & Verified USB Hardware IDs](#device-telemetry--verified-usb-hardware-ids)
    - [WebHID Browser Requirements & Sandboxing Warnings](#webhid-browser-requirements--sandboxing-warnings)
@@ -49,7 +48,8 @@ Anisotropic, 8-octant polar sensitivity calibration driven by real-time ballisti
 10. [Developer & Agent Context Reference](#10-developer--agent-context-reference)
 11. [Unified C Engine Architecture (`./anymouse`)](#11-unified-c-engine-architecture-anymouse)
 12. [Native GTK4 + Cairo Studio & `FpsAimForge` Phase 2 Telemetry](#12-native-gtk4--cairo-studio--fpsaimforge-phase-2-telemetry)
-13. [ESP32-P4 Hardware Dongle (Phase 4)](#13-esp32-p4-hardware-dongle-phase-4)
+13. [Hardware Dongles (Phase 4): AnyMouse Dongle and AnyMouse Pro Dongle](#13-hardware-dongles-phase-4-anymouse-dongle-and-anymouse-pro-dongle)
+14. [Repository Layout](#14-repository-layout)
 
 ---
 
@@ -62,7 +62,7 @@ Traditional mouse sensitivity allows only a single uniform scalar or, at best, a
 The system is designed to scale across three tiers:
 1. **Software Prototype (Linux/CachyOS):** Low-latency kernel input capture via `evdev` and `uinput`.
 2. **On-Device Firmware:** Direct execution inside mouse MCUs (Nordic nRF52840).
-3. **Universal Hardware Dongle:** A transparent USB pass-through device (ESP32-P4, see [Section 13](#13-esp32-p4-hardware-dongle-phase-4)) running hardware-level vector interpolation for any commercial mouse without host software or driver requirements.
+3. **Universal Hardware Dongle:** A transparent USB pass-through device (ESP32-P4 or Teensy 4.1, see [Section 13](#13-hardware-dongles-phase-4-anymouse-dongle-and-anymouse-pro-dongle)) running hardware-level vector interpolation for any commercial mouse without host software or driver requirements.
 
 ---
 
@@ -370,12 +370,12 @@ Deploy vectoring directly to the internal microcontroller:
 - **Path B1 (Open Firmware Port via Project UFA / ZMK):** [aroum/ufa](https://github.com/aroum/ufa) provides open ZMK + Enhanced ShockBurst (ESB) firmware for Chinese nRF52840 + PAW3395 mice. Flash via SWD solder pads (`VDD`, `GND`, `DIO`, `CLK`). Full C source access.
 - **Path B2 (Binary Trampoline Patching via `morluto/rea`):** Binary patch stock firmware image to maintain stock 2.4GHz receiver compatibility (see Section 8).
 
-### Phase 4: Universal USB-HID Hardware Pass-Through (ESP32-P4 MitM Dongle)
-The earlier RP2040 concept was replaced by an **ESP32-P4** (Waveshare ESP32-P4-Module-DEV-KIT) on 2026-10-25. The mouse or its 2.4 GHz receiver plugs into the board's USB-A port (High-Speed host); the board connects to the PC over USB-C and appears as an ordinary USB mouse. See [Section 13](#13-esp32-p4-hardware-dongle-phase-4) for the summary, [firmware/esp32p4-dongle/README.md](firmware/esp32p4-dongle/README.md) for how it is built and [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md) for what is still to do.
+### Phase 4: Universal USB-HID Hardware Pass-Through (MitM Dongle)
+The earlier RP2040 concept was replaced by an **ESP32-P4** (Waveshare ESP32-P4-Module-DEV-KIT) on 2026-10-25, and a **Teensy 4.1** version followed on 2026-11-04. The mouse or its 2.4 GHz receiver plugs into the board's USB host port; the board connects to the PC over USB and appears as an ordinary USB mouse. See [Section 13](#13-hardware-dongles-phase-4-anymouse-dongle-and-anymouse-pro-dongle) for the summary and [firmware/esp32p4-dongle/esp32p4-dongle_README.md](firmware/esp32p4-dongle/esp32p4-dongle_README.md) and [firmware/teensy41-dongle/teensy41-dongle_README.md](firmware/teensy41-dongle/teensy41-dongle_README.md) for how each is built.
 - **USB Host:** reads raw HID reports at the mouse's native rate (an 8 kHz Finalmouse ULX receiver is read by the Teensy 4.1 version at up to 7.9k reports/s).
 - **Core 0:** extracts the deltas, runs the same octant math as `scale_vector()`, and emits the transformed report to the PC.
 - **Core 1:** vendor-HID control channel for weights, profiles and the attached mouse's settings.
-- **Limit:** on the ESP32-P4 (the **AnyMouse Dongle**) the PC-facing controller is Full-Speed, so output to the PC is capped at 1000 Hz. The **AnyMouse Pro Dongle** (Teensy 4.1, [firmware/teensy41-dongle/](firmware/teensy41-dongle/README.md)) has High-Speed USB on both sides and sends 8000 Hz.
+- **Limit:** on the ESP32-P4 (the **AnyMouse Dongle**) the PC-facing controller is Full-Speed, so output to the PC is capped at 1000 Hz. The **AnyMouse Pro Dongle** (Teensy 4.1, [firmware/teensy41-dongle/](firmware/teensy41-dongle/teensy41-dongle_README.md)) has High-Speed USB on both sides and sends 8000 Hz.
 
 ---
 
@@ -510,7 +510,7 @@ The repository compiles into a single, self-contained, multi-threaded POSIX C bi
 - [`src/hid_driver.c`](src/hid_driver.c): Native C `/dev/hidraw*` OpenMouse protocol driver (the GUI calls it from a dedicated `hw-io` worker thread, because the Attack Shark relay takes seconds) for **Finalmouse UltralightX** (`0x361D:0x0100`) and **Attack Shark R3 / GearHub** (`0x3151:0x402D`). It controls whichever mouse the engine holds and picks the vendor configuration interface from the HID report descriptor (usage page `0xFF00`/`0x01` for Finalmouse, `0xFFFF`/`0x02` for GearHub).
   - **Finalmouse:** reads CPI, polling rate, battery, Motion Sync and RSSI; writes CPI and polling rate (500 to 8000 Hz).
   - **Attack Shark R3:** reads and writes polling rate (125 to 8000 Hz) through the 2.4G receiver relay (`F6 05` → `F7` → command → `FC`, feature report `0x00`). The write is a read-modify-write of the `OPTIONPARAM0` settings block that is verified by reading it back. CPI writing is not implemented for the R3 yet.
-- [`src/dongle.c`](src/dongle.c): **ESP32-P4 dongle link** (see [Section 13](#13-esp32-p4-hardware-dongle-phase-4)). Finds the dongle by its vendor HID interface and proves it with a `HELLO` handshake (never by USB VID:PID), keeps weights in sync with it (adopt on connect, push edits, apply events from the web page) and guards against double scaling: the dongle's own mouse is never auto-grabbed. CLI: `--dongle-status`, `--dongle-bypass on|off`. Tests: `make test-dongle`.
+- [`src/dongle.c`](src/dongle.c): **Dongle link** for the AnyMouse and AnyMouse Pro Dongles (see [Section 13](#13-hardware-dongles-phase-4-anymouse-dongle-and-anymouse-pro-dongle)). Finds the dongle by its vendor HID interface and proves it with a `HELLO` handshake (never by USB VID:PID), keeps weights in sync with it (adopt on connect, push edits, apply events from the web page) and guards against double scaling: the dongle's own mouse is never auto-grabbed. CLI: `--dongle-status`, `--dongle-bypass on|off`. Tests: `make test-dongle`.
 - [`src/devices.c`](src/devices.c) & [`src/config.c`](src/config.c): Universal mouse discovery, ranking, identify-by-motion, the persisted device choice (`~/.config/anymouse/config`) and the auto-saved octant profile (`~/.config/anymouse/profile.json`). Both files are owned by the invoking user even under `sudo`.
 - [`src/steam_install.c`](src/steam_install.c): Finds FpsAimForge (Steam app `5165380`) in every Steam library and installs, repairs or removes the integration (see below).
 - [`src/faf_telemetry.h`](src/faf_telemetry.h), [`src/faf_plugin.c`](src/faf_plugin.c) (`libanymouse_faf.so`), & [`src/faf_launcher.c`](src/faf_launcher.c): **Phase 2 `FpsAimForge` (FAF) Native In-Process Telemetry Plugin** — Hooks `FpsAimForge`'s 13 `Scenario` / `BaseScenario` vtables in-process to capture $1000\text{ Hz}$ 3D camera `(yaw, pitch)` trajectories, exact 3D target coordinates from `TargetManager`, and round lifecycle events (`MENU`, `WAITING_FOR_CLICK`, `START_COUNTDOWN`, `RUNNING`, `DONE`) over POSIX shared memory (`/dev/shm/anymouse_faf_telemetry`). Includes custom calibration scenarios in [`faf/AnyMouse.bundle.json`](faf/AnyMouse.bundle.json) (`AnyMouse 8-Octant Center-Out`, `AnyMouse 8-Octant Center-Out Ghost`, `AnyMouse 8-Octant Wide Flick`).
@@ -586,59 +586,117 @@ The built-in GTK4 + Cairo studio ([`src/gui_gtk4.c`](src/gui_gtk4.c)) provides a
 
 ---
 
-## 13. ESP32-P4 Hardware Dongle (Phase 4)
+## 13. Hardware Dongles (Phase 4): AnyMouse Dongle and AnyMouse Pro Dongle
 
-**Status: in development, working with real mice** (ESP32-P4 firmware 0.7.0, which runs OpenMouse's own drivers unchanged in QuickJS-ng, flashed 2026-11-05; Teensy 4.1 firmware 0.2.1). A real Finalmouse UltralightX is recognised, read and written through the OpenMouse engine on both boards; the Razer and the G Pro were last verified on firmware 0.6.0. The dongle reads a real mouse, vectors it, is tuned from the Studio, and reports (and for some models sets) the mouse's CPI and polling rate. How it is built: [firmware/esp32p4-dongle/README.md](firmware/esp32p4-dongle/README.md). What is still to do: [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md). This section is the summary.
+**Status: working with real mice.** ESP32-P4 firmware 0.7.0 and Teensy 4.1 firmware 0.2.1 (both 2026-11-05). A real Finalmouse UltralightX is recognised, read and written through the OpenMouse engine on both boards. The Razer Basilisk Ultimate and the Logitech G Pro were verified on the ESP32's earlier C-port drivers (0.6.0), not yet on the engine. How each board is built: [firmware/esp32p4-dongle/esp32p4-dongle_README.md](firmware/esp32p4-dongle/esp32p4-dongle_README.md) and [firmware/teensy41-dongle/teensy41-dongle_README.md](firmware/teensy41-dongle/teensy41-dongle_README.md). This section is the summary.
 
 ### What it is
-Two boards run this dongle: the **AnyMouse Dongle** (ESP32-P4: Full-Speed toward the PC, 1000 Hz) and the **AnyMouse Pro Dongle** (Teensy 4.1: High-Speed on both sides, 8 kHz). Same protocol and the same Studio and `./anymouse`; the Pro announces itself with the `AMV_CAP_PRO` bit in its `HELLO` reply.
-
 A small USB man-in-the-middle board. The user plugs their mouse (or its 2.4 GHz receiver) into the board, and the board plugs into the PC. The board scales every movement with the same 8-octant, cosine-interpolated weights as `./anymouse` and appears to the PC as a normal USB mouse, so it works on any OS (including Windows) with no driver and no input interception. The weights are stored on the board.
 
+Two boards run it, with the same protocol, the same Studio and the same `./anymouse`:
+
+| | PC link | Output to the PC | Mouse side |
+|:---|:---|:---|:---|
+| **AnyMouse Dongle**: Waveshare ESP32-P4-Module-DEV-KIT | Full-Speed (the P4's second USB-C) | 1000 Hz | High-Speed host (USB-A) |
+| **AnyMouse Pro Dongle**: Teensy 4.1 | High-Speed (main micro-USB) | **8000 Hz** | High-Speed host (pigtail on the host pads) |
+
+The Pro announces itself with the `AMV_CAP_PRO` bit in its `HELLO` reply; the Studio, the desktop app and the CLI name the board from that bit, not from the USB product string.
+
 ### How it is configured
-Over a vendor HID channel on the same USB cable. No Wi-Fi, no USB networking.
+Over a vendor HID channel on the same USB cable (usage page `0xFF4D`). No Wi-Fi, no USB networking.
 - **Web page (WebHID):** nothing to install; open it in Chrome, Edge or Brave and click Connect. Handles weights, presets, profiles, and the attached mouse's information and settings. Chromium only.
 - **`./anymouse`:** pairs with the dongle automatically. It is the only front-end that can do live `FpsAimForge` auto-calibration, because the game telemetry lives on the PC.
 - Once a profile is saved, the dongle keeps vectoring with no software running.
-- There is no over-the-air firmware update: the board is reflashed over its UART USB-C (the DFU milestone was closed on 2026-10-27).
+- There is no over-the-air firmware update, by decision: the ESP32 is reflashed over its UART USB-C and the Teensy through its main micro-USB (Teensy Loader).
 
-### Hardware
-Waveshare **ESP32-P4-Module-DEV-KIT** (ESP32-P4 rev v1.3, 16 MB flash, 32 MB PSRAM), flashed with ESP-IDF v5.5.4.
-
+### ESP32-P4 wiring
 | Connector | Role |
 |:---|:---|
 | USB-A, port 1 (jumper on **HOST**) | Mouse or receiver in (P4 High-Speed host) |
 | USB-C, **non-UART** | To the PC. The P4's Full-Speed OTG controller is moved onto this connector in software; it normally carries USB Serial/JTAG |
 | USB-C, **UART** (CH343) | Flashing and serial console; always works for recovery |
 
-Limit: the PC-facing controller is Full-Speed, so output to the PC is capped at 1000 Hz. The mouse is still read at its native rate, so no motion is lost.
+The PC-facing controller is Full-Speed, so output is capped at 1000 Hz; the mouse is still read at its native rate and no motion is lost. Chip, flash and PSRAM details are in the ESP32 README; the Teensy's wiring is in its README.
 
-### Built and verified
-- **Link and control plane:** the second USB-C enumerates as a HID mouse plus a vendor HID channel (`0xFF4D`) through a software PHY swap, with no eFuse burned. Octant weights are stored in flash (4 profile slots, auto-save, CRC), updated from the host with stale-write detection, and pushed back as events. [`tools/dongle_test.py`](firmware/esp32p4-dongle/tools/dongle_test.py) runs 68 checks over the vendor channel (its last full run was on firmware 0.5.0). The wire protocol is [`common/amv_dongle_proto.h`](common/amv_dongle_proto.h) and the shared scaling math is [`common/amv_octant.h`](common/amv_octant.h).
-- **Mouse side (M0 and M1, signed off 2026-10-27):** report-descriptor parser, High-Speed USB host, per-report scaling, summed 1 ms frames with a button-edge queue and a 16-bit/16-button mouse report. A **Razer Basilisk Ultimate** in the direct USB-A port (jumper on HOST) is read at about 1000 reports/s with no errors, vectored, and works as a normal mouse on the Mac.
-- **Studio:** [`web/`](web/README.md) is AnyMouse Studio, a static WebHID page (radar chart, sliders, presets, profile slots, JSON import/export, a Mouse card with the attached mouse's information and settings) with a built-in demo mode. 25 Node tests pass, including checks against frames recorded from the real board. Used in Chrome on macOS against the board.
-- **Mouse information in three tiers:** known mice are queried over their own protocol (ported from OpenMouse, AGPL-3.0), generic HID mice show name, VID:PID, nominal and measured polling rate and layout (plus a CPI you enter once), and unusable descriptors fall back to the boot protocol or are listed as not used.
-- **OpenMouse coverage so far (firmware 0.6.0):** a generated catalog names all 810 OpenMouse device ids. Drivers: Razer, Finalmouse ULX, Attack Shark R3 (GearHub) and Logitech HID++ 2.0. A **Logitech G Pro behind its Lightspeed receiver** shows name, CPI, rate and battery in the Studio, and its CPI and polling rate can be set from it. Writes follow a rule: a model may be written only when OpenMouse marks it verified and its C port passes transcript tests; until that harness exists only the Razer Basilisk Ultimate and the G Pro are writable.
-- **OpenMouse on the dongle (firmware 0.7.0):** rather than porting each family to C, the dongle runs OpenMouse's TypeScript drivers unchanged in the QuickJS-ng engine (`firmware/esp32p4-dongle/components/amv_js`), so every family OpenMouse supports works without a port. OpenMouse's own tests pass under the engine on a PC (185 of 188 runnable files). On the board the bundle loads in 1.2 s and uses 4.3 MB of PSRAM; the image is 2.3 MB. Not yet tried with a real mouse.
-- **Desktop app link:** [`src/dongle.c`](src/dongle.c) identifies the dongle with a `HELLO` nonce handshake instead of USB IDs, syncs weights both ways, keeps the software engine from re-scaling the dongle's output, and routes the CPI and polling controls through the dongle. The desktop app now matches the Studio's profile handling: it shows the four stored slots (saved or empty, which is active), loads and saves them (asking before overwriting another slot), toggles bypass, and lists every device plugged into the dongle with what it reports (CPI, set rate, USB interval, measured rate, battery, Motion Sync, link state, catalog name). CLI: `--dongle-status` (now with slots and settings) and `--dongle-slot load|save N`. 104 link and guard checks pass on Linux against a fake dongle and the whole app compiles on Linux. **Linked as root against the real board on 2026-11-04 (the GUI showed "Vectoring: Dongle"); the new slot panel is not yet checked against the board or seen on screen. A normal user cannot open the dongle's hidraw nodes until the udev rule is installed (see the dongle README, Linux permissions).**
+### What works
+- **Link and control plane:** weights in flash or EEPROM (4 profile slots, auto-save, CRC), updated from the host with stale-write detection and pushed back as events. The wire protocol is [`common/amv_dongle_proto.h`](common/amv_dongle_proto.h), the shared scaling math [`common/amv_octant.h`](common/amv_octant.h). [`dongle_test.py`](firmware/esp32p4-dongle/tools/dongle_test.py) runs the protocol checks against either board (ESP32: 68, its last full run was on firmware 0.5.0; Teensy: 55 with no mouse, 66 with a Finalmouse).
+- **Mouse side:** report-descriptor parser, High-Speed USB host, per-report scaling, a button-edge queue and a 16-bit/16-button mouse report; several mice are merged. A Razer Basilisk Ultimate on the ESP32 is read at about 1000 reports/s with no errors; a Finalmouse ULX set to 8000 Hz is read by the Teensy at up to 7.9k reports/s and sent on at 8000 frames/s with motion in equal to motion out.
+- **Mouse information in three tiers:** known mice are queried over their own protocol, generic HID mice show name, VID:PID, nominal and measured polling rate and layout (plus a CPI you enter once), and unusable descriptors fall back to the boot protocol or are listed as not used.
+- **OpenMouse:** a generated catalog names all 810 OpenMouse device ids. Since firmware 0.7.0 (ESP32) and 0.2.0 (Teensy) the dongle runs OpenMouse's own TypeScript drivers unchanged in a QuickJS-ng engine, so every family OpenMouse supports works without a C port (OpenMouse's own tests pass under the engine on a PC: 185 of 188 runnable files). The bundle loads in 1.2 s on the ESP32 and 2.2 s on the Teensy and keeps its heap in PSRAM (about 4.3 MB). Writes are allowed only for models verified through a dongle: the Razer Basilisk Ultimate wired, the Logitech G Pro's receiver and the Finalmouse ULX dongle.
+- **Studio:** [`web/`](web/web_README.md) is AnyMouse Studio, a static WebHID page (radar chart, sliders, presets, profile slots, JSON import/export, a Mouse card with the attached mice's information and settings) with a demo mode (`?demo`, `?demo=pro`). 25 Node tests pass, including checks against frames recorded from the real board. Public copy: https://anymouse.futurelabz.dev.
+- **Desktop app link:** [`src/dongle.c`](src/dongle.c) identifies the dongle with a `HELLO` nonce handshake instead of USB IDs, syncs weights both ways, keeps the software engine from re-scaling the dongle's output, and routes the CPI and polling controls through the dongle. The GUI shows the model, the dongle's polling rates, the four slots (load, save, bypass) and every device plugged into the dongle. CLI: `--dongle-status`, `--dongle-bypass on|off`, `--dongle-slot load|save N`. 104 link and guard checks pass on Linux against a fake dongle. A normal user cannot open the dongle's hidraw nodes until the udev rule is installed (see the ESP32 README, Linux permissions).
 
-- **AnyMouse Pro Dongle (Teensy 4.1, firmware 0.2.1, 2026-11-05):** the same dongle on a board with two High-Speed USB ports, so the PC gets an **8 kHz** mouse. Same vendor protocol (`dongle_test.py` 55/55; the Studio and `./anymouse` work unchanged), EEPROM profiles, several mice, and OpenMouse's own drivers in QuickJS-ng (the full bundle in 8 MB of PSRAM). Verified with a real Finalmouse ULX dongle (recognised through OpenMouse, writes land, `dongle_test.py` 66/66). [firmware/teensy41-dongle/README.md](firmware/teensy41-dongle/README.md).
-
-### Still open
-Details and priorities in [PLAN.md](firmware/esp32p4-dongle/PLAN.md): the Linux-box checks (`./anymouse` against the board, `src/evdev_rt.c` on the shared math), calibration with the dongle in the loop, the Razer and the G Pro on the OpenMouse engine (0.7.0; the Finalmouse is verified), then the write policy for more models, the Windows spike, and stretch goals. A low-priority item is tuning `FpsAimForge` calibration from the Studio.
+### Not yet verified
+- Weights other than 1.0 against a live mouse on the Teensy build, and long runs.
+- The Razer and the G Pro on the OpenMouse engine; the Attack Shark R3 receiver on the Teensy; a USB hub behind either board.
+- The ESP32's new "AnyMouse Dongle" USB name on the bus (its PC-facing USB-C was not connected after the reflash).
+- The desktop app's slot actions against a real board, and Studio use in Chrome on Windows.
+- Calibration through the dongle (`FpsAimForge` tuning from the Studio is not built).
 
 ### Where to go next
 | I want to... | Read |
 |:---|:---|
-| Build, flash and cable the board, or see how it works | [firmware/esp32p4-dongle/README.md](firmware/esp32p4-dongle/README.md) |
-| See what is still to do | [firmware/esp32p4-dongle/PLAN.md](firmware/esp32p4-dongle/PLAN.md) |
-| See what was tested and when | [PROGRESS.md](PROGRESS.md) |
-| Use or hack on the web front-end | [web/README.md](web/README.md) |
+| Build, flash and cable the ESP32 board, or see how the dongle works | [firmware/esp32p4-dongle/esp32p4-dongle_README.md](firmware/esp32p4-dongle/esp32p4-dongle_README.md) |
+| Build and flash the Teensy, read its console and measurements | [firmware/teensy41-dongle/teensy41-dongle_README.md](firmware/teensy41-dongle/teensy41-dongle_README.md) |
+| Use or hack on the web front-end | [web/web_README.md](web/web_README.md) |
+
+---
+
+## 14. Repository Layout
+
+Build outputs (`anymouse`, `libanymouse_faf.so`, `faf_launcher`), `logs/`, `.pio/`, `managed_components/` and `sdkconfig` are git-ignored and not listed.
+
+```
+AnyMouse-Vectoring/
+├── README.md                     this file
+├── context.md                    reading list for a new contributor or agent
+├── LICENSE                       GNU AGPL-3.0
+├── Makefile, start_daemon.sh     build the Linux engine, launch it with the right privileges and display env
+├── src/                          the Linux engine (./anymouse), Section 11
+│   ├── core.h, main.c            shared state (atomic weights, SPSC ring), CLI, profile persistence
+│   ├── evdev_rt.c                real-time evdev grab + uinput output, scale_vector()
+│   ├── hid_driver.c              /dev/hidraw OpenMouse protocol: Finalmouse ULX, Attack Shark R3
+│   ├── dongle.c                  link to the AnyMouse / AnyMouse Pro Dongle (HELLO handshake, sync, guard)
+│   ├── devices.c, config.c       mouse discovery and ranking; saved device choice and profile
+│   ├── calibration.c             ballistic-submovement calibration engine
+│   ├── faf_plugin.c, faf_launcher.c, faf_telemetry.h, kovaaks_offsets.h   FpsAimForge integration
+│   ├── steam_install.c           finds FpsAimForge in Steam libraries, installs / repairs the plugin
+│   └── gui_gtk4.c                GTK4 + Cairo Studio
+├── tests/test_dongle_link.c      dongle link and guard tests against a fake dongle (make test-dongle)
+├── common/                       shared by the engine, both firmwares and the web generator
+│   ├── amv_dongle_proto.h        the vendor-HID wire protocol (the reference)
+│   └── amv_octant.h              octant scaling math
+├── faf/AnyMouse.bundle.json      FpsAimForge calibration scenarios
+├── logs/                         flick CSV logs (git-ignored)
+├── tools/deploy-web.sh           rsync web/ to the public host
+├── web/                          AnyMouse Studio (WebHID), static files; see web/web_README.md
+│   ├── index.html, app.js, style.css, radar.js, presets.js
+│   ├── dongle.js, proto.js       protocol client; proto.js is generated from common/amv_dongle_proto.h
+│   ├── mock_device.js            JavaScript twin of the firmware (demo mode and tests)
+│   ├── sw.js, manifest.webmanifest, icon.svg, package.json
+│   └── tests/                    Node tests and frames recorded from the real board
+└── firmware/
+    ├── esp32p4-dongle/           AnyMouse Dongle (ESP-IDF 5.5.4 / PlatformIO)
+    │   ├── main/, components/    amv_vector, amv_ctrl, amv_store, amv_proto, amv_usb_device, amv_usb_host,
+    │   │                         amv_hid_parse, amv_catalog, amv_js (QuickJS-ng + OpenMouse bundle), amv_common
+    │   ├── tools/                dongle_test.py, gen_proto_js.py, capture_fixtures.py, openmouse/ (catalog, bundle, qjs_suite)
+    │   ├── tests/                C unit tests, js_bridge/ fake-mouse tests, descriptors/ captured from real mice
+    │   ├── spikes/m0_phy_swap/   the PC-link proof of concept
+    │   └── platformio.ini, CMakeLists.txt, partitions.csv, sdkconfig.defaults
+    └── teensy41-dongle/          AnyMouse Pro Dongle (PlatformIO, Teensy 4.1)
+        ├── src/                  main, host (USBHost_t36), pc_out (8 kHz output), mice, amv_proto_teensy,
+        │                         amv_store_teensy, js_engine + qjs_*.c + psram_heap (OpenMouse engine), fake_mouse
+        ├── tools/                make_core.sh, console.py, measure_pc.py
+        ├── tests/                host tests for the protocol handler and the EEPROM store
+        └── platformio.ini, Makefile, teensy41_flash_js.ld
+```
+
+The Teensy firmware compiles the ESP32 project's parser, catalog, JavaScript bundle and bridge in place, so those directories under `firmware/esp32p4-dongle/` are shared by both boards.
 
 ---
 
 ## License
 
-AnyMouse-Vectoring is licensed under the **GNU Affero General Public License v3.0** ([LICENSE](LICENSE)), the same license as the [OpenMouse protocol library](https://github.com/OpenMouse-Project/mouse-protocol) whose codecs and device catalog this project builds on for mouse detection and control (see [the dongle README](firmware/esp32p4-dongle/README.md#mouse-discovery-and-information)). In short: you may use, study, modify and share it, but a modified version that you distribute or offer to users over a network must make its source available under the same license. This is a summary, not legal advice; the LICENSE file governs.
+AnyMouse-Vectoring is licensed under the **GNU Affero General Public License v3.0** ([LICENSE](LICENSE)), the same license as the [OpenMouse protocol library](https://github.com/OpenMouse-Project/mouse-protocol) whose codecs and device catalog this project builds on for mouse detection and control (see [the dongle README](firmware/esp32p4-dongle/esp32p4-dongle_README.md#mouse-discovery-and-information)). In short: you may use, study, modify and share it, but a modified version that you distribute or offer to users over a network must make its source available under the same license. This is a summary, not legal advice; the LICENSE file governs.
 
 Hosting `web/` on a public site counts as offering it over a network, so the source must stay available to its users (this repository does that).

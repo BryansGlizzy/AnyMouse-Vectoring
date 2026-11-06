@@ -354,7 +354,7 @@ function setEnabled(on) {
 function hint(e) {
   const m = String(e?.message || e);
   if (/denied|NotAllowed|access/i.test(m)) {
-    return `<b>Could not open the dongle.</b>Close any other program using it (the AnyMouse app, another browser tab). On Linux, add the udev rule from <code>web/README.md</code> so the browser may open <code>/dev/hidraw*</code>; Flatpak and Snap browsers cannot see it at all.`;
+    return `<b>Could not open the dongle.</b>Close any other program using it (the AnyMouse app, another browser tab). On Linux, add the udev rule from <code>web/web_README.md</code> so the browser may open <code>/dev/hidraw*</code>; Flatpak and Snap browsers cannot see it at all.`;
   }
   return `<b>Could not talk to the dongle.</b>${esc(m)}`;
 }

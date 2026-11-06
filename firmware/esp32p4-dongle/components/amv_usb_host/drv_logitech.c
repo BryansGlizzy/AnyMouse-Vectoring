@@ -492,7 +492,7 @@ static esp_err_t probe(amv_drv_ctx_t *c)
     scan_dpi(c, 0, NULL);                               /* CPI range for the options reply and write validation */
     c->verified = is_verified(c->pid);
     c->can_set_cpi = c->verified && e == ESP_OK && c->cpi_max > 0;
-    /* A rate write once seemed to silence the receiver until it was replugged; it was the mouse asleep (PROGRESS.md, 2026-10-26). */
+    /* A rate write once seemed to silence the receiver until it was replugged; it was the mouse asleep (2026-10-26). */
     c->can_set_rate = c->verified && e == ESP_OK && c->n_rates > 0;
     ESP_LOGI(TAG, "features: dpi %02x%s rate %02x%s onboard %02x; CPI range %u..%u step %u; %u rates", c->priv[P_DPI],
              c->priv[P_DPI_LEGACY] ? " legacy" : "", c->priv[P_RATE], c->priv[P_RATE_LEGACY] ? " legacy" : "", c->priv[P_ONBOARD],

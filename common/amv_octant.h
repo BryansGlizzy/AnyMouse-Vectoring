@@ -6,9 +6,8 @@
  * remainder diffusion. Weights are passed in, so the caller decides how they are
  * stored (atomics on the Linux engine, a seqlock snapshot on the dongle).
  *
- * NOTE: src/evdev_rt.c still carries its own copy. Switching it to this header is
- * planned (PLAN.md, M2) but is not done yet because it cannot be built or tested
- * off-Linux.
+ * NOTE: src/evdev_rt.c still carries its own copy of this math (scale_vector()); it
+ * does not include this header yet.
  */
 #ifndef AMV_OCTANT_H
 #define AMV_OCTANT_H

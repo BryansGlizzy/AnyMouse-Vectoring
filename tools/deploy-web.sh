@@ -7,7 +7,7 @@
 #   tools/deploy-web.sh        dry run: lists what would change, changes nothing
 #   tools/deploy-web.sh --go   do it
 #
-# Not synced: tests/ and README.md (development files). This is an assumption about what the host
+# Not synced: tests/ and web_README.md (development files). This is an assumption about what the host
 # should serve; the dry run shows exactly what differs. Nothing is ever deleted on the host.
 set -e
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -16,5 +16,5 @@ mode=-n
 [ "$1" = "--go" ] && mode=
 # shellcheck disable=SC2086
 exec rsync $mode -rlt --itemize-changes --no-perms --no-owner --no-group \
-    --exclude tests/ --exclude README.md --exclude package.json \
+    --exclude tests/ --exclude web_README.md --exclude package.json \
     "$here/web/" "$dest"

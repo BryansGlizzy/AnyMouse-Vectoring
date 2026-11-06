@@ -2,7 +2,7 @@
 
 The no-install front-end for the AnyMouse dongle. It tunes the eight direction weights, manages the four profile slots stored on the dongle, and shows the dongle's state, all over the dongle's USB vendor-HID channel using WebHID. Static files, no build step, no server component, nothing leaves your computer.
 
-**Verified** in Chrome against the real board (2026-10-26): connect, live state, weight changes taking effect on the cursor. **Mouse card:** shows every device plugged into the dongle: its tier (known protocol, generic HID, boot fallback, not used), name, VID:PID, polling rate (what the mouse reports, its USB interval, and a live measured rate while you move it), CPI (read from the mouse, or entered by you for mice without a protocol), battery and firmware where the mouse reports them, plus the report layout. Controls appear only where the dongle allows a write (today the Razer Basilisk Ultimate wired and the Logitech G Pro behind its Lightspeed receiver): CPI and polling for those, and a **Lift-off** dropdown and a **Motion Sync** switch for any mouse whose driver offers them as writable; anything read-only is listed as a row. The card also shows the catalog's model name, the receiver link state (wired, connected, asleep) and charging. A write to a sleeping wireless mouse fails until you move it. **Download descriptor** saves the mouse's raw HID report descriptor as a `.hex` file.
+Used in Chrome against the real ESP32 board (connect, live state, weight changes taking effect on the cursor); the Pro Dongle (Teensy 4.1) is driven through the same protocol and has a demo profile. **Mouse card:** shows every device plugged into the dongle: its tier (known protocol, generic HID, boot fallback, not used), name, VID:PID, polling rate (what the mouse reports, its USB interval, and a live measured rate while you move it), CPI (read from the mouse, or entered by you for mice without a protocol), battery and firmware where the mouse reports them, plus the report layout. Controls appear only where the dongle allows a write (today the Razer Basilisk Ultimate wired, the Logitech G Pro behind its Lightspeed receiver and the Finalmouse UltralightX dongle): CPI and polling for those, and a **Lift-off** dropdown and a **Motion Sync** switch for any mouse whose driver offers them as writable; anything read-only is listed as a row. The card also shows the catalog's model name, the receiver link state (wired, connected, asleep) and charging. A write to a sleeping wireless mouse fails until you move it. **Download descriptor** saves the mouse's raw HID report descriptor as a `.hex` file.
 
 **Needs** Chrome, Edge, Brave or Opera on a computer. Firefox, Safari and phones have no WebHID; they use the native app (`./anymouse`, Linux). The page says so if the browser cannot do it.
 
@@ -10,7 +10,7 @@ The no-install front-end for the AnyMouse dongle. It tunes the eight direction w
 The public Studio is **https://anymouse.futurelabz.dev**, served from `root@webserver.lan:/opt/webserver/anymouse-webhid/`. That directory is a plain copy of this folder, so **every change under `web/` must be rsynced there** or the public page drifts from the repository (a stale `proto.js` against newer firmware is the likeliest harm). Use the script, which does a dry run unless told otherwise:
 ```bash
 tools/deploy-web.sh          # lists what would change, changes nothing
-tools/deploy-web.sh --go     # syncs (never deletes on the host; skips tests/, README.md and package.json)
+tools/deploy-web.sh --go     # syncs (never deletes on the host; skips tests/, web_README.md and package.json)
 ```
 Run the tests first (`cd web && node --test tests/*.test.mjs`). The skipped files are an assumption about what the host should serve; the dry run shows what differs. The host needs the usual HTTPS (WebHID requires a secure context); the Linux permission rule for the browser is under **Linux** below.
 
@@ -70,9 +70,9 @@ They check that `proto.js` is current, that the client's requests are byte-ident
 
 **Not covered by automated tests:** the browser's WebHID permission prompt and a real drag on the chart. Those need a person in Chrome.
 
-## Not in the Studio (yet)
-- **Live direction needle and calibration mirror** (per-octant landing ratios from FpsAimForge): low priority, planned as [PLAN.md section 9](../firmware/esp32p4-dongle/PLAN.md#9-low-priority-webhid-studio-and-fpsaimforge-tuning). A browser cannot read the game's shared memory, so it needs a native relay.
-- **Firmware update:** not built; the dongle is reflashed over its UART USB-C.
-- **A Measure CPI wizard** for mice with no known protocol, and a Chrome check on Windows and Linux with a static HTTPS deployment: see [PLAN.md](../firmware/esp32p4-dongle/PLAN.md#2-needs-the-linux-box-cachyos).
+## Not in the Studio
+- **Live direction needle and calibration mirror** (per-octant landing ratios from FpsAimForge): a browser cannot read the game's shared memory, so it would need a native relay.
+- **Firmware update:** the ESP32 is reflashed over its UART USB-C and the Teensy through its main micro-USB.
+- **A Measure CPI wizard** for mice with no known protocol, and a Chrome check on Windows and Linux against the static HTTPS deployment.
 
-How the dongle and its protocol are built: [firmware/esp32p4-dongle/README.md](../firmware/esp32p4-dongle/README.md). What is still to do: [firmware/esp32p4-dongle/PLAN.md](../firmware/esp32p4-dongle/PLAN.md).
+How the dongles and their protocol are built: [firmware/esp32p4-dongle/esp32p4-dongle_README.md](../firmware/esp32p4-dongle/esp32p4-dongle_README.md) (AnyMouse Dongle) and [firmware/teensy41-dongle/teensy41-dongle_README.md](../firmware/teensy41-dongle/teensy41-dongle_README.md) (AnyMouse Pro Dongle).

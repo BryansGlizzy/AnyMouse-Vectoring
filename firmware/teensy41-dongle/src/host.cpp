@@ -101,6 +101,44 @@ static AmvParser *const parsers[N_PARSERS] = {&p0, &p1, &p2, &p3, &p4, &p5, &p6,
 // Receive buffers big enough for any interrupt endpoint, four per interface so an 8 kHz stream survives a late
 // interrupt (USBHost_t36's default is two, carved from the descriptor buffer).
 DMAMEM static uint8_t rxbuf[N_PARSERS][4][1024] __attribute__((aligned(32)));
+// Dedicated aligned DTCM transmit buffers so USBHIDParser::sendPacket never carves unaligned buffers out of _bigBuffer.
+static uint8_t txbuf[N_PARSERS][2][64] __attribute__((aligned(32)));
+
+// Compute the declared payload size (in bytes, excluding report ID) of an Output report (`want_id`) from the HID
+// report descriptor. A device with multiple output report IDs of different lengths on one endpoint (e.g. Keychron's
+// 0xffc1 interface: 0xb3 is 63 bytes, 0xb5 is 20 bytes) rejects reports padded to the endpoint's wMaxPacketSize (64).
+static uint16_t output_report_bytes(const uint8_t *d, size_t n, uint8_t want_id) {
+    uint32_t rsize = 0, rcount = 0, rid = 0, bits = 0;
+    uint32_t gstack[4][3];
+    int gdepth = 0;
+    size_t i = 0;
+    while (i < n) {
+        uint8_t b = d[i];
+        if (b == 0xFE) {
+            if (i + 2 >= n) break;
+            i += 3 + (size_t)d[i + 1];
+            continue;
+        }
+        size_t sz = b & 3;
+        if (sz == 3) sz = 4;
+        uint8_t type = (b >> 2) & 3;
+        uint8_t tag = b >> 4;
+        if (i + 1 + sz > n) break;
+        uint32_t v = 0;
+        for (unsigned k = 0; k < sz; k++) v |= (uint32_t)d[i + 1 + k] << (8 * k);
+        i += 1 + sz;
+        if (type == 1) {
+            if (tag == 0x7) rsize = v;
+            else if (tag == 0x8) rid = v;
+            else if (tag == 0x9) rcount = v;
+            else if (tag == 0xA && gdepth < 4) { gstack[gdepth][0] = rsize; gstack[gdepth][1] = rcount; gstack[gdepth][2] = rid; gdepth++; }
+            else if (tag == 0xB && gdepth > 0) { gdepth--; rsize = gstack[gdepth][0]; rcount = gstack[gdepth][1]; rid = gstack[gdepth][2]; }
+        } else if (type == 0 && tag == 0x9) { // Output (Main item 0x90)
+            if (rid == want_id) bits += rsize * rcount;
+        }
+    }
+    return (uint16_t)((bits + 7) / 8);
+}
 
 static AmvParser *parser_of(host_if_t *h) {
     int s = (int)(h - host_ifs);
@@ -130,6 +168,7 @@ public:
         uint32_t len = t->length - ((t->qtd.token >> 16) & 0x7FFF);     // bytes actually received
         if (len > t->length) len = 0;
         const uint8_t *data = (const uint8_t *)t->buffer;
+        if ((uint32_t)data >= 0x20200000u && len) arm_dcache_delete((void *)data, len);
         if ((h->role == HOST_ROLE_MOUSE || h->role == HOST_ROLE_BOOT) && h->src >= 0) {
             amv_hid_report_t r;
             if (amv_hid_decode(&h->layout, data, len, &r)) {
@@ -228,8 +267,11 @@ static void isr_wrap() {
 
 void host_begin(void) {
     for (int i = 0; i < 7; i++) hist_edge_cyc[i] = HIST_EDGE_US[i] * (F_CPU_ACTUAL / 1000000u);
-    for (int i = 0; i < N_PARSERS; i++)
+    arm_dcache_delete(rxbuf, sizeof rxbuf);
+    for (int i = 0; i < N_PARSERS; i++) {
         parsers[i]->setRXBuffers(rxbuf[i][0], rxbuf[i][1], 255, rxbuf[i][2], rxbuf[i][3]);
+        parsers[i]->setTXBuffers(txbuf[i][0], txbuf[i][1], 64);
+    }
     USBHIDParser::driver_ready_for_hid_collection(&allhid);
     usbhost.begin();
     orig_isr = _VectorsRam[IRQ_USBHS + 16];
@@ -302,6 +344,14 @@ int host_get_report(host_if_t *h, uint8_t type, uint8_t id, uint8_t *data, uint1
 }
 
 int host_send_output(host_if_t *h, uint8_t id, const uint8_t *data, uint16_t len) {
+    uint16_t want = output_report_bytes(h->desc, h->desc_len, id);
+    uint8_t padded[1024];
+    if (want > len && want <= sizeof padded) {
+        memset(padded, 0, want);
+        memcpy(padded, data, len);
+        data = padded;
+        len = want;
+    }
     if (!h->has_out) return host_set_report(h, 2, id, data, len);
     AmvParser *p = parser_of(h);
     if (!p || !host_if_alive(h)) return -3;
@@ -311,20 +361,18 @@ int host_send_output(host_if_t *h, uint8_t id, const uint8_t *data, uint16_t len
     buf[0] = id;
     memcpy(buf + off, data, len);
     uint16_t n = len + off;
-    // Interrupt OUT transfers are a whole report; a short report is padded to the endpoint size as the OS does.
-    if (h->out_mps && n < h->out_mps && h->out_mps <= sizeof buf) { memset(buf + n, 0, h->out_mps - n); n = h->out_mps; }
     uint32_t start = millis();
     for (;;) {
         p->out_busy = true;
         if (p->sendPacket(buf, n)) break;
         p->out_busy = false;
         if (!host_if_alive(h)) return -3;
-        if (millis() - start > 200) return -2;
+        if (millis() - start > 200) return host_set_report(h, 2, id, data, len);
         usbhost.Task();
     }
     while (p->out_busy) {
         if (!host_if_alive(h)) return -3;
-        if (millis() - start > 200) { p->out_busy = false; return -2; }
+        if (millis() - start > 200) { p->out_busy = false; return host_set_report(h, 2, id, data, len); }
         usbhost.Task();
     }
     return 0;
@@ -356,11 +404,40 @@ int host_set_boot_protocol(host_if_t *h) {
 
 bool host_poll(void) {
     bool changed = false;
+    bool any_alive = false;
     for (auto &h : host_ifs) {
-        if (!h.used || !h.gone) continue;
+        if (!h.used) continue;
+        if (!h.gone) { any_alive = true; continue; }
         if (h.src >= 0) { pc_out_release((unsigned)h.src); h.src = -1; }
         changed = true;
         // the mouse manager frees the record once it has seen it go (h.announced)
     }
+
+    // Watchdog for hot-plug enumeration failures: USBHost_t36's enumeration_error() retries 25 times in the ISR
+    // with zero delay and gives up permanently if a newly inserted receiver's MCU is still booting or bounces.
+    // If a physical device is connected (CCS=1) but zero interfaces are claimed after 1.5 s, cycle port power so
+    // USBHost_t36 tears down the half-enumerated rootdev and runs a fresh reset + High-Speed chirp handshake.
+    static uint32_t unclaimed_since = 0;
+    static uint8_t  retry_count = 0;
+    uint32_t portsc = USB2_PORTSC1;
+    if ((portsc & USB_PORTSC1_CCS) && !any_alive) {
+        uint32_t now = millis();
+        if (!unclaimed_since) {
+            unclaimed_since = now ? now : 1;
+        } else if (retry_count < 4 && now - unclaimed_since >= 1500) {
+            retry_count++;
+            GPIO8_DR_CLEAR = 1u << 26;
+            USB2_PORTSC1 &= ~USB_PORTSC1_PP;
+            uint32_t t0 = millis();
+            while (millis() - t0 < 80) usbhost.Task();
+            USB2_PORTSC1 |= USB_PORTSC1_PP;
+            GPIO8_DR_SET = 1u << 26;
+            unclaimed_since = millis() ? millis() : 1;
+        }
+    } else {
+        unclaimed_since = 0;
+        if (any_alive || !(portsc & USB_PORTSC1_CCS)) retry_count = 0;
+    }
+
     return changed;
 }

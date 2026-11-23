@@ -397,12 +397,9 @@ bool udev_install_rules(char *msg, size_t msg_sz) {
         "# Seat user may read mice and create the virtual output mouse.\n"
         "KERNEL==\"uinput\", SUBSYSTEM==\"misc\", MODE=\"0660\", GROUP=\"input\", TAG+=\"uaccess\", OPTIONS+=\"static_node=uinput\"\n"
         "SUBSYSTEM==\"input\", KERNEL==\"event*\", ENV{ID_INPUT_MOUSE}==\"1\", TAG+=\"uaccess\"\n"
-        "# Vendor configuration interfaces (CPI / polling rate)\n"
-        "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"361d\", TAG+=\"uaccess\"\n"
-        "SUBSYSTEM==\"hidraw\", ATTRS{idVendor}==\"3151\", TAG+=\"uaccess\"\n"
-        "# AnyMouse dongle control channel (also used by AnyMouse Studio in the browser).\n"
-        "# Access only: the app identifies the dongle by its protocol handshake, not by this match.\n"
-        "SUBSYSTEM==\"hidraw\", ATTRS{manufacturer}==\"AnyMouse\", TAG+=\"uaccess\"\n";
+        "# Grant permanent WebHID (Brave/Chromium) & AnyMouse access to all HID devices (/dev/hidraw*),\n"
+        "# including any new mouse, 8K wireless receiver, or the AnyMouse hardware dongle.\n"
+        "KERNEL==\"hidraw*\", SUBSYSTEM==\"hidraw\", MODE=\"0666\", TAG+=\"uaccess\"\n";
 
     if (!write_text("/etc/udev/rules.d/70-anymouse.rules", RULES)) {
         snprintf(msg, msg_sz, "Failed writing /etc/udev/rules.d/70-anymouse.rules: %s", strerror(errno));

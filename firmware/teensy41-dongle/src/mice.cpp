@@ -20,8 +20,8 @@ extern "C" void amv_log(const char *fmt, ...);
 
 /* Writes allowed (VID << 16 | PID): models verified through a dongle on real hardware, the same list as the
  * ESP32-P4 (drv_openmouse.c): Basilisk Ultimate wired, the G Pro's Lightspeed receiver, the Finalmouse
- * UltralightX dongle. Every other model is read-only (README, write policy). */
-static const uint32_t VERIFIED[] = { 0x15320086, 0x046dc547, 0x361d0100 };
+ * UltralightX dongle, and Keychron G6 HE 8K / TurboLink 8K receiver. Every other model is read-only. */
+static const uint32_t VERIFIED[] = { 0x15320086, 0x046dc547, 0x361d0100, 0x3434d05a, 0x3434d09d };
 
 struct ifref_t { host_if_t *h; uint32_t serial; };
 
@@ -409,7 +409,21 @@ static void schedule() {
             uint32_t reports = m->r.h->motion_reports + m->r.h->other_reports;
             bool activity = reports != s->retry_reports;
             if (!activity && !s->n_cfg) { s->next_ms = now + REFRESH_MS; continue; }
-            if (s->fail_n >= 4 && (s->fail_n % 6) != 0) { s->fail_n++; s->next_ms = now + REFRESH_MS; continue; }
+            if (!activity && s->fail_n >= 4 && (s->fail_n % 6) != 0) { s->fail_n++; s->next_ms = now + REFRESH_MS; continue; }
+            // Recreate the JS client session before retrying an unprobed device so drivers that cache null identity
+            // or model on a failed first query (e.g. Keychron8kHidClient) re-query cleanly when the mouse wakes up.
+            host_if_t *mh = m->r.h;
+            js_iface_t ifs[1 + MAX_CFG];
+            int n = 0;
+            ifs[n++] = { -1, mh->desc, mh->desc_len };
+            for (int k = 0; k < s->n_cfg; k++) {
+                if (host_if_t *ch = iface_of(s, k)) ifs[n++] = { k, ch->desc, ch->desc_len };
+            }
+            for (int k = -1; k < s->n_cfg; k++) if (host_if_t *ch = iface_of(s, k)) host_flush_input(ch);
+            js_forget(s->sid);
+            char brand[16];
+            s->sid = js_open(&s_transport, s, mh->vid, mh->pid, mh->product, ifs, n, brand, sizeof brand);
+            if (!s->sid) { s->no_driver = true; continue; }
         }
         if (js_call_start(s->sid, JS_OP_PROBE, 0, 0)) { s_job = JOB_PROBE; s_job_sess = i; }
         return;

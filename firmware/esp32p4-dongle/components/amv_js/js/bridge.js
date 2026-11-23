@@ -121,7 +121,12 @@ globalThis.amv = {
     const s = session(sid);
     await ensureOpen(s);
     const read = s.client.readStatus ?? s.client.getStatus;
-    return flatten(await read.call(s.client), s);
+    const raw = await read.call(s.client);
+    const flat = flatten(raw, s);
+    if (raw?.ui?.settingsReady === false && flat.cpi === 0 && flat.hz === 0) {
+      throw new Error(raw.ui.statusNote || "Mouse did not answer through receiver.");
+    }
+    return flat;
   },
 
   /* id: AMV_SET_CPI 1, POLLING 2, LOD 3, MOTION_SYNC 4. Resolves to the status read back. */

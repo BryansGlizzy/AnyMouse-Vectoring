@@ -91,7 +91,14 @@ export class AmvHidDevice {
   async forget() { this.opened = false; }
 
   async sendReport(reportId, data) {
-    N.send(this._sid, this._x, 2, reportId, bytesOf(data).buffer);
+    let b = bytesOf(data);
+    const want = reportBytes(this.collections, "outputReports", reportId);
+    if (want > b.byteLength) {
+      const padded = new Uint8Array(want);
+      padded.set(b);
+      b = padded;
+    }
+    N.send(this._sid, this._x, 2, reportId, b.buffer);
   }
 
   async sendFeatureReport(reportId, data) {

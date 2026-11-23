@@ -122,15 +122,24 @@ bool devices_is_hw_supported(uint16_t vid, uint16_t pid) {
            (vid == 0x3151 && pid == 0x402D);    /* Attack Shark R3 / GearHub 2.4G */
 }
 
+static bool is_known_gaming_mouse(uint16_t vid, uint16_t pid) {
+    if (devices_is_hw_supported(vid, pid)) return true;
+    /* Keychron M/G-series gaming mice & Link/TurboLink 4K/8K receivers */
+    if (vid == 0x3434 && pid >= 0xD020 && pid <= 0xD0FF) return true;
+    return false;
+}
+
 static int score_device(const mouse_device_t *d, const char *rel, const char *key, bool kbd_sibling) {
     int score = 0;
     if (devices_is_hw_supported(d->vid, d->pid)) score += 100;
+    else if (is_known_gaming_mouse(d->vid, d->pid)) score += 60;
     if (strcasestr(d->name, "mouse")) score += 10;
     if (sys_cap_has_bit(rel, REL_WHEEL)) score += 5;
     if (sys_cap_has_bit(key, BTN_RIGHT)) score += 5;
     if (d->byid_path[0]) score += 2;
-    /* Keyboards / macro pads that expose an auxiliary mouse interface */
-    if (kbd_sibling) score -= 40;
+    /* Keyboards / macro pads that expose an auxiliary mouse interface (skip penalty for known gaming mice
+     * that expose a secondary macro-keyboard HID interface). */
+    if (kbd_sibling && !is_known_gaming_mouse(d->vid, d->pid)) score -= 40;
     return score;
 }
 

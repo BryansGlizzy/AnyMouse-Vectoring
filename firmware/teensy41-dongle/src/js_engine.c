@@ -448,7 +448,13 @@ int js_call_poll(js_status_t *st)
         ret = -1;
     } else {
         if (st && JS_IsObject(r)) read_status(r, st);
-        ret = 1;
+        if (s_call_op == JS_OP_PROBE && st && st->cpi == 0 && st->hz == 0) {
+            /* Driver returned an unreachable/asleep receiver placeholder (e.g. Keychron unreachableStatus) */
+            if (s_log) amv_log("[js] readStatus: mouse did not answer through receiver\n");
+            ret = -1;
+        } else {
+            ret = 1;
+        }
     }
     JS_FreeValue(s_ctx, r);
     if (s_call_op == JS_OP_CLOSE) {

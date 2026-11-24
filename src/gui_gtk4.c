@@ -1154,7 +1154,7 @@ static void refresh_dongle_panel(void) {
     if (g_ui.dg_feedback_ticks == 0 && !g_ui.dg_busy) {
         char msg[160];
         snprintf(msg, sizeof(msg), "The dongle is working from slot %d%s. ● = saved on the dongle, ○ = empty.",
-                 sl.active + 1, sl.bypass ? " · BYPASS ON (all directions 1.0)" : "");
+                 sl.active + 1, sl.bypass ? " · GHOST / BYPASS ON (1.0×, cloaked as mouse)" : "");
         gtk_label_set_text(GTK_LABEL(g_ui.lbl_dg_status), msg);
     }
     refresh_dongle_mice();
@@ -1171,7 +1171,7 @@ static gboolean on_dg_job_done(gpointer data) {
         switch (j->kind) {
         case DG_LOAD:   snprintf(msg, sizeof(msg), "✅ Loaded slot %d; the radar shows its weights", j->arg + 1); g_ui.dg_sel = -1; break;
         case DG_SAVE:   snprintf(msg, sizeof(msg), "💾 Saved the weights in effect to slot %d", j->arg + 1); g_ui.dg_sel = -1; break;
-        case DG_BYPASS: snprintf(msg, sizeof(msg), j->arg ? "⏸ Bypass on: all directions 1.0, profile kept" : "▶ Bypass off: your profile is active"); break;
+        case DG_BYPASS: snprintf(msg, sizeof(msg), j->arg ? "👻 Ghost / Bypass on: 1.0× & cloaked as mouse" : "▶ Ghost / Bypass off: your profile is active"); break;
         }
     } else if (j->status == AMV_ST_EMPTY) {
         snprintf(msg, sizeof(msg), "⚠️ Slot %d is empty: nothing was ever saved there", j->arg + 1);
@@ -1731,8 +1731,8 @@ static void on_app_activate(GtkApplication *app, gpointer user_data) {
     gtk_widget_set_tooltip_text(g_ui.btn_dg_save, "Store the weights now in effect in the selected slot and make it the active one");
     g_signal_connect(g_ui.btn_dg_save, "clicked", G_CALLBACK(on_dg_save_clicked), NULL);
     flow_add(dg_actions, g_ui.btn_dg_save);
-    g_ui.chk_dg_bypass = gtk_check_button_new_with_label("Bypass (all directions 1.0)");
-    gtk_widget_set_tooltip_text(g_ui.chk_dg_bypass, "Disables the vectoring without touching the saved profile. Not saved: it resets when the dongle powers up.");
+    g_ui.chk_dg_bypass = gtk_check_button_new_with_label("Bypass / Ghost Mode");
+    gtk_widget_set_tooltip_text(g_ui.chk_dg_bypass, "Disables vectoring (1.0×) without touching your saved profile and cloaks the dongle as the attached mouse so vendor software can configure it directly. Resets on power-up.");
     g_signal_connect(g_ui.chk_dg_bypass, "toggled", G_CALLBACK(on_dg_bypass_toggled), NULL);
     flow_add(dg_actions, g_ui.chk_dg_bypass);
     gtk_box_append(GTK_BOX(dg_vbox), dg_actions);

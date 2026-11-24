@@ -49,7 +49,7 @@ s = s.replace(marker, """#elif defined(USB_AMV_DONGLE)
   #define PRODUCT_NAME          {'A','n','y','M','o','u','s','e',' ','P','r','o',' ','D','o','n','g','l','e'}
   #define PRODUCT_NAME_LEN      19
   #define EP0_SIZE              64
-  #define NUM_ENDPOINTS         5
+  #define NUM_ENDPOINTS         7
   #define NUM_INTERFACE         4
   #define CDC_IAD_DESCRIPTOR    1
   #define CDC_STATUS_INTERFACE  0
@@ -73,10 +73,16 @@ s = s.replace(marker, """#elif defined(USB_AMV_DONGLE)
   #define RAWHID_RX_ENDPOINT    5
   #define RAWHID_RX_SIZE        64
   #define RAWHID_RX_INTERVAL    1
+  #define GHOST0_INTERFACE      4
+  #define GHOST0_ENDPOINT       6
+  #define GHOST1_INTERFACE      5
+  #define GHOST1_ENDPOINT       7
   #define ENDPOINT2_CONFIG      ENDPOINT_RECEIVE_UNUSED + ENDPOINT_TRANSMIT_INTERRUPT
   #define ENDPOINT3_CONFIG      ENDPOINT_RECEIVE_BULK + ENDPOINT_TRANSMIT_BULK
   #define ENDPOINT4_CONFIG      ENDPOINT_RECEIVE_UNUSED + ENDPOINT_TRANSMIT_INTERRUPT
   #define ENDPOINT5_CONFIG      ENDPOINT_RECEIVE_INTERRUPT + ENDPOINT_TRANSMIT_INTERRUPT
+  #define ENDPOINT6_CONFIG      ENDPOINT_RECEIVE_INTERRUPT + ENDPOINT_TRANSMIT_INTERRUPT
+  #define ENDPOINT7_CONFIG      ENDPOINT_RECEIVE_INTERRUPT + ENDPOINT_TRANSMIT_INTERRUPT
 
 """ + marker, 1)
 a = s.index("#elif defined(USB_SERIAL_HID)")
@@ -136,7 +142,153 @@ static uint8_t mouse_report_desc[] = {
 i = s2.index(anchor, s2.index("#else\n" + anchor)) 
 j = s2.index("};", i) + 2
 s2 = s2[:j] + "\n#endif // USB_AMV_DONGLE" + s2[j:]
+# AnyMouse Ghost Mode: expose base descriptors and enlarge usb_descriptor_buffer for cloned HID report descriptors
+assert s2.count("uint8_t usb_descriptor_buffer[CONFIG_DESC_SIZE];") == 1
+s2 = s2.replace("uint8_t usb_descriptor_buffer[CONFIG_DESC_SIZE];",
+                "uint8_t usb_descriptor_buffer[CONFIG_DESC_SIZE < 1024 ? 1024 : CONFIG_DESC_SIZE];", 1)
+pwr_old = """        0xC0,                                   // bmAttributes
+        50,                                     // bMaxPower"""
+pwr_new = """#ifdef USB_AMV_DONGLE
+        0x80,                                   // bmAttributes (bus-powered)
+        250,                                    // bMaxPower (500 mA USB 2.0 max)
+#else
+        0xC0,                                   // bmAttributes
+        50,                                     // bMaxPower
+#endif"""
+assert s2.count(pwr_old) == 2, f"expected 2 bMaxPower blocks, found {s2.count(pwr_old)}"
+s2 = s2.replace(pwr_old, pwr_new)
+assert s2.count("#endif // NUM_ENDPOINTS") == 1
+s2 = s2.replace("#endif // NUM_ENDPOINTS", """const uint8_t *usb_base_device_descriptor(void) { return device_descriptor; }
+uint16_t usb_base_config_desc_len(void) { return CONFIG_DESC_SIZE; }
+#endif // NUM_ENDPOINTS""", 1)
 d.write_text(s2)
+
+# AnyMouse Ghost Mode hooks in usb.c
+u = core / "usb.c"
+su = u.read_text()
+hook_decls = """#ifdef GHOST0_INTERFACE
+int usb_ghost_get_descriptor(uint16_t wValue, uint16_t wIndex, uint8_t high_speed, const uint8_t **data, uint32_t *len);
+void usb_ghost_configure(void);
+int usb_ghost_ep0_setup(uint16_t wRequestAndType, uint16_t wValue, uint16_t wIndex, uint16_t wLength, uint32_t seq);
+void usb_ghost_ep0_set_complete(uint16_t wValue, uint16_t wIndex, uint16_t wLength);
+static volatile uint32_t ghost_ep0_seq = 0;
+#endif
+static uint8_t reply_buffer[8];"""
+assert su.count("static uint8_t reply_buffer[8];") == 1
+su = su.replace("static uint8_t reply_buffer[8];", hook_decls, 1)
+
+setup_hdr = """\tsetup.bothwords = setupdata;
+\t#ifdef GHOST0_INTERFACE
+\tghost_ep0_seq++;
+\t#endif"""
+assert su.count("\tsetup.bothwords = setupdata;") == 1
+su = su.replace("\tsetup.bothwords = setupdata;", setup_hdr, 1)
+
+rawhid_cfg = """\t\t#if defined(RAWHID_INTERFACE)
+\t\tusb_rawhid_configure();
+\t\t#endif
+\t\t#if defined(GHOST0_INTERFACE)
+\t\tusb_ghost_configure();
+\t\t#endif"""
+assert su.count("\t\t#if defined(RAWHID_INTERFACE)\n\t\tusb_rawhid_configure();\n\t\t#endif") == 1
+su = su.replace("\t\t#if defined(RAWHID_INTERFACE)\n\t\tusb_rawhid_configure();\n\t\t#endif", rawhid_cfg, 1)
+
+get_desc_hdr = """\t  case 0x0680: // GET_DESCRIPTOR
+\t  case 0x0681:
+\t\t#ifdef GHOST0_INTERFACE
+\t\t{
+\t\t\tconst uint8_t *gsrc = NULL;
+\t\t\tuint32_t glen = 0;
+\t\t\tif (usb_ghost_get_descriptor(setup.wValue, setup.wIndex, usb_high_speed, &gsrc, &glen)) {
+\t\t\t\tif (glen > setup.wLength) glen = setup.wLength;
+\t\t\t\tif (glen > 1024) glen = 1024;
+\t\t\t\tmemcpy(usb_descriptor_buffer, gsrc, glen);
+\t\t\t\tarm_dcache_flush_delete(usb_descriptor_buffer, glen);
+\t\t\t\tendpoint0_transmit(usb_descriptor_buffer, glen, 0);
+\t\t\t\treturn;
+\t\t\t}
+\t\t}
+\t\t#endif"""
+assert su.count("\t  case 0x0680: // GET_DESCRIPTOR\n\t  case 0x0681:") == 1
+su = su.replace("\t  case 0x0680: // GET_DESCRIPTOR\n\t  case 0x0681:", get_desc_hdr, 1)
+
+stall_anchor = "\t}\n\tprintf(\"endpoint 0 stall\\n\");"
+assert su.count(stall_anchor) == 1
+ghost_ep0_cases = """#if defined(GHOST0_INTERFACE) && !defined(SEREMU_INTERFACE) && !defined(KEYBOARD_INTERFACE) && !defined(MULTITOUCH_INTERFACE)
+\t  case 0x0A21: // HID SET_IDLE
+\t  case 0x0B21: // HID SET_PROTOCOL
+\t\tif (setup.wIndex == GHOST0_INTERFACE || setup.wIndex == GHOST1_INTERFACE) {
+\t\t\tendpoint0_receive(NULL, 0, 0);
+\t\t\treturn;
+\t\t}
+\t\tbreak;
+\t  case 0x0921: // HID SET_REPORT
+\t  case 0x01A1: // HID GET_REPORT
+\t\tif (usb_ghost_ep0_setup(setup.wRequestAndType, setup.wValue, setup.wIndex, setup.wLength, ghost_ep0_seq)) {
+\t\t\treturn;
+\t\t}
+\t\tbreak;
+#endif
+""" + stall_anchor
+su = su.replace(stall_anchor, ghost_ep0_cases, 1)
+
+complete_anchor = "\tsetup.bothwords = endpoint0_setupdata.bothwords;"
+assert su.count(complete_anchor) == 1
+su = su.replace(complete_anchor, complete_anchor + """
+#ifdef GHOST0_INTERFACE
+\tif (setup.wRequestAndType == 0x0921 && (setup.wIndex == GHOST0_INTERFACE || setup.wIndex == GHOST1_INTERFACE)) {
+\t\tusb_ghost_ep0_set_complete(setup.wValue, setup.wIndex, setup.wLength);
+\t}
+#endif""", 1)
+
+ep0_helpers = """
+#ifdef GHOST0_INTERFACE
+void usb_ep0_ghost_receive(void *data, uint32_t len, uint16_t wRequestAndType, uint16_t wValue, uint16_t wIndex, uint16_t wLength)
+{
+\tsetup_t s;
+\ts.wRequestAndType = wRequestAndType;
+\ts.wValue = wValue;
+\ts.wIndex = wIndex;
+\ts.wLength = wLength;
+\tendpoint0_setupdata.bothwords = s.bothwords;
+\tendpoint0_receive(data, len, 1);
+}
+void usb_ep0_ghost_transmit(const void *data, uint32_t len, uint32_t seq)
+{
+\tNVIC_DISABLE_IRQ(IRQ_USB1);
+\tif (seq == ghost_ep0_seq && !(USB1_ENDPTSETUPSTAT & 1)) {
+\t\tif (data == NULL && len == 0xFFFFFFFFu) {
+\t\t\tUSB1_ENDPTCTRL0 = 0x00010001;
+\t\t} else {
+\t\t\tendpoint0_transmit(data, len, 0);
+\t\t}
+\t}
+\tNVIC_ENABLE_IRQ(IRQ_USB1);
+}
+void usb_soft_disconnect(void)
+{
+\tNVIC_DISABLE_IRQ(IRQ_USB1);
+\tUSB1_USBCMD &= ~USB_USBCMD_RS;
+\tUSB1_DEVICEADDR = 0;
+\twhile (USB1_ENDPTPRIME) ;
+\tUSB1_ENDPTFLUSH = 0xFFFFFFFFu;
+\twhile (USB1_ENDPTFLUSH) ;
+\tUSB1_ENDPTSETUPSTAT = USB1_ENDPTSETUPSTAT;
+\tUSB1_ENDPTCOMPLETE = USB1_ENDPTCOMPLETE;
+\tusb_configuration = 0;
+\tendpointN_notify_mask = 0;
+\tendpoint0_notify_mask = 0;
+\tNVIC_ENABLE_IRQ(IRQ_USB1);
+}
+void usb_soft_connect(void)
+{
+\tUSB1_USBCMD |= USB_USBCMD_RS;
+}
+#endif
+#else // defined(NUM_ENDPOINTS)"""
+assert su.count("#else // defined(NUM_ENDPOINTS)") == 1
+su = su.replace("#else // defined(NUM_ENDPOINTS)", ep0_helpers, 1)
+u.write_text(su)
 
 c = core / "usb_mouse.c"
 s3 = c.read_text()

@@ -14,7 +14,10 @@ extern "C" void amv_log(const char *fmt, ...);
 #define MAX_CFG       5
 #define SETTLE_MS     400       // a device's interfaces arrive one by one; wait this long after the last
 #define SETTLE_READ_MS 700      // re-read this long after a write
-#define REFRESH_MS    5000      // KNOWN mice: readStatus again (battery, a rate changed on the mouse, ...)
+#define REFRESH_MS    5000      // sleeping/unprobed retry interval
+#define KNOWN_REFRESH_MS 30000  // KNOWN mice: periodic telemetry refresh (battery, DPI button changes)
+#define IDLE_DEFER_MS 2000      // defer background telemetry polling while actively moving the mouse
+#define MAX_DEFER_MS  120000    // still refresh at least every 2 minutes even during nonstop motion
 #define RATE_WINDOW   10        // measured rate: highest of the last 10 one-second samples
 #define BIT_OF(id)    (1u << (id))
 
@@ -41,6 +44,7 @@ struct session_t {
     ifref_t  cfg[MAX_CFG];     // x = 0..
     int      n_cfg;
     uint32_t next_ms;          // next refresh or retry
+    uint32_t last_motion_reports, last_motion_ms, last_probe_ms;
     uint8_t  fail_n;
     uint32_t retry_reports;    // the mouse's report count at the last failed probe
     // what the driver reported (apply())
@@ -78,6 +82,7 @@ static ignored_t s_ign[MAX_IGNORED];
 static session_t s_sess[MAX_SESS];
 static uint16_t  s_next_uid;
 static bool      s_engine;
+static bool      s_paused;
 
 // the engine's one running call
 enum { JOB_NONE, JOB_PROBE, JOB_WRITE, JOB_CLOSE };
@@ -325,7 +330,15 @@ static void lifecycle() {
 static void measure() {
     uint32_t now = millis();
     for (auto &m : s_mice) {
-        if (!m.used || !alive(m.r) || now - m.sample_ms < 1000) continue;
+        if (!m.used || !alive(m.r)) continue;
+        if (m.sess >= 0 && m.sess < MAX_SESS && s_sess[m.sess].used) {
+            session_t *s = &s_sess[m.sess];
+            if (m.r.h->motion_reports != s->last_motion_reports) {
+                s->last_motion_reports = m.r.h->motion_reports;
+                s->last_motion_ms = now;
+            }
+        }
+        if (now - m.sample_ms < 1000) continue;
         uint32_t reports = m.r.h->motion_reports;
         uint32_t hz = (reports - m.sample_reports) * 1000u / (now - m.sample_ms);
         m.hist[m.hslot++ % RATE_WINDOW] = (uint16_t)(hz > 65535 ? 65535 : hz);
@@ -372,7 +385,8 @@ static void finish_job(int r, const js_status_t *st) {
     }
     // A mouse may apply a write after the driver's own read-back (the Finalmouse does, about a second later), so
     // look again shortly after a write instead of waiting a whole period.
-    s->next_ms = millis() + (job == JOB_WRITE ? SETTLE_READ_MS : REFRESH_MS);
+    s->last_probe_ms = millis();
+    s->next_ms = s->last_probe_ms + (job == JOB_WRITE ? SETTLE_READ_MS : (s->probed ? KNOWN_REFRESH_MS : REFRESH_MS));
     if (job == JOB_WRITE) {
         s_write.done = true;
         s_write.status = r > 0 ? AMV_ST_OK : AMV_ST_DEVICE_ERR;
@@ -387,7 +401,7 @@ static void schedule() {
         if (r != 0) finish_job(r, &st);
         return;
     }
-    if (s_job != JOB_NONE) return;
+    if (s_paused || s_job != JOB_NONE) return;
     if (s_write.pending && !s_write.started) {
         session_t *s = &s_sess[s_write.sess];
         s_write.started = true;
@@ -403,6 +417,15 @@ static void schedule() {
         session_t *s = &s_sess[i];
         if (!s->used || !s->sid || s->dying || (int32_t)(now - s->next_ms) < 0) continue;
         mouse_t *m = mouse_of_session(i);
+        if (s->probed && m && m->r.h->motion_reports != s->last_motion_reports) {
+            s->last_motion_reports = m->r.h->motion_reports;
+            s->last_motion_ms = now;
+        }
+        if (s->probed && s->last_motion_ms && (now - s->last_motion_ms) < IDLE_DEFER_MS &&
+            (now - s->last_probe_ms) < MAX_DEFER_MS) {
+            s->next_ms = now + IDLE_DEFER_MS;
+            continue;
+        }
         if (!s->probed && s->fail_n > 0 && m) {
             // A failed first probe is retried when the mouse has produced reports since (it is awake and in use)
             // or, for a receiver with configuration interfaces, every period; after four failures only every sixth.
@@ -603,6 +626,7 @@ static uint8_t op_options(uint8_t index, uint8_t setting, amv_options_rep_t *o) 
 }
 
 static uint8_t op_write(uint8_t index, uint8_t setting, uint16_t value) {
+    if (s_paused) return AMV_ST_BUSY;
     int count, slot = resolve(index, &count);
     if (slot == INT32_MIN) return AMV_ST_NO_MOUSE;
     if (slot < 0) return AMV_ST_UNSUPPORTED;
@@ -662,6 +686,22 @@ static const amv_mouse_ops_t s_ops = {
 const amv_mouse_ops_t *mice_ops(void) { return &s_ops; }
 
 void mice_begin(bool engine) { s_engine = engine; }
+
+void mice_set_paused(bool paused) { s_paused = paused; }
+bool mice_busy(void) { return js_call_busy() || s_job != JOB_NONE; }
+void mice_refresh_now(void) {
+    uint32_t soon = millis() + 200;
+    for (auto &s : s_sess) {
+        if (!s.used || s.no_driver) continue;
+        s.next_ms = soon;
+        for (int k = -1; k < s.n_cfg; k++) {
+            if (host_if_t *h = iface_of(&s, k)) {
+                h->listen = true;
+                host_flush_input(h);
+            }
+        }
+    }
+}
 
 void mice_poll(void) {
     host_poll();

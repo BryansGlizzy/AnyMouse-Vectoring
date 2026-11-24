@@ -990,7 +990,7 @@ int dongle_cli(const char *action, const char *arg) {
             if (request(&l, AMV_CMD_SET_BYPASS, &on, 1, REQUEST_TIMEOUT_MS, rep, NULL) == 1 &&
                 ((amv_hdr_t *)rep)->status == AMV_ST_OK && state_from_reply(rep, &p)) {
                 adopt_state(&l, &p, false);
-                printf("Bypass %s.\n", p.bypass ? "on (all weights 1.0, profile kept)" : "off");
+                printf("Bypass / Ghost Mode %s.\n", p.bypass ? "on (1.0x, cloaked as attached mouse)" : "off");
             } else {
                 printf("Setting bypass failed.\n");
                 rc = 1;

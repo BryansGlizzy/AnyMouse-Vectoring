@@ -34,6 +34,7 @@ struct host_if_t {
     uint16_t vid, pid;
     uint16_t nominal_hz;            // from bInterval and bus speed
     uint16_t in_mps, out_mps;
+    uint8_t  in_interval, out_interval;
     bool     has_out;               // interrupt OUT endpoint (else output reports go through SET_REPORT)
     uint16_t desc_len;
     uint8_t  desc[928];
@@ -64,6 +65,10 @@ bool host_if_alive(const host_if_t *h);
 int host_send_output(host_if_t *h, uint8_t id, const uint8_t *data, uint16_t len);
 int host_set_report(host_if_t *h, uint8_t type, uint8_t id, const uint8_t *data, uint16_t len);
 int host_get_report(host_if_t *h, uint8_t type, uint8_t id, uint8_t *data, uint16_t cap, int *actual);
+// Raw wire-exact passthrough helpers (Ghost Mode): data includes report ID byte if used; no padding.
+int host_send_output_raw(host_if_t *h, const uint8_t *raw, uint16_t len);
+int host_set_report_raw(host_if_t *h, uint8_t type, uint8_t id, const uint8_t *raw, uint16_t len);
+int host_get_report_raw(host_if_t *h, uint8_t type, uint8_t id, uint8_t *raw, uint16_t cap, int *actual);
 // Next queued input report (raw: report ID first when the interface uses IDs), 0 if none.
 int host_pop_input(host_if_t *h, uint8_t *raw, int cap);
 void host_flush_input(host_if_t *h);
@@ -85,3 +90,4 @@ void host_take_stats(host_stats_t *out);
 void host_set_weights(const float w[8], bool bypass);
 void host_set_itc(unsigned microframes);
 unsigned host_get_itc(void);
+void host_print_port_log(void);

@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include "esp_err.h"
@@ -32,6 +33,7 @@ typedef struct {
 } amv_usb_host_mouse_t;
 
 esp_err_t amv_usb_host_start(void);
+void      amv_usb_host_set_ghost(bool on);
 
 /* Devices the host library has enumerated (any class, hubs included), or -1. */
 int amv_usb_host_device_count(void);

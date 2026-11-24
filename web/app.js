@@ -24,6 +24,10 @@ const S = {
   inFlight: false, dirty: false,
   slotsMask: 0, selSlot: 0, demo: DEMO,
   mice: null,                // null: firmware without mouse info; else [{...info, caps}]
+  ghostWait: null,           // { target: bool, deadline: number } while re-enumerating for Ghost Mode
+  attaching: false,
+  ghostDisconnected: false,
+  ghostBanner: false,
   cpi: store.get('cpi', 800), linkLR: store.get('linkLR', false), linkUD: store.get('linkUD', false),
 };
 
@@ -34,8 +38,9 @@ function toast(msg, kind = '') {
   t.textContent = msg; t.className = 'toast ' + kind; t.hidden = false;
   clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, kind === 'bad' ? 6000 : 3200);
 }
-function banner(html, bad = false) {
+function banner(html, bad = false, { ghost = false } = {}) {
   const b = $('#banner');
+  S.ghostBanner = !!html && ghost;
   if (!html) { b.hidden = true; return; }
   b.innerHTML = html; b.className = 'banner' + (bad ? ' bad' : ''); b.hidden = false;
 }
@@ -156,6 +161,7 @@ function onDeviceState(ev) {
     }
   }
   refreshSlots();
+  syncModeUi();
   render();
 }
 
@@ -359,43 +365,87 @@ function hint(e) {
   return `<b>Could not talk to the dongle.</b>${esc(m)}`;
 }
 
-async function attach(hid, demo = false) {
-  if (S.client) await detach(true);
-  const client = new DongleClient(hid);
-  try {
-    await client.open();
-    S.client = client; S.hid = hid; S.demo = demo;
-    S.hello = await client.hello();
-    S.info = await client.getInfo();
-    S.dev = await client.getState();
-    S.w = S.dev.w.slice(); S.selSlot = S.dev.slot;
-    S.slotsMask = await client.getSlotsMask();
-    client.addEventListener('state', onDeviceState);
-    client.addEventListener('mouse', onMouseEvent);
-    banner('');
+function syncModeUi() {
+  if (connected()) {
     const product = dongleModel();
-    setState(demo ? 'demo' : 'connected', demo ? `Demo (${product})` : `Connected · ${product} · firmware ${S.info.fw}`);
-    setEnabled(true);
-    render();
-    await refreshMice();
-    clearInterval(miceTimer);
-    miceTimer = setInterval(() => { if (!document.hidden) refreshMice(); }, 2000);   // measured rate, CPI changed on the mouse
-  } catch (e) {
-    S.client = null; S.dev = null;
-    try { await client.close(); } catch { /* ignore */ }
-    setState('error', 'Not connected'); setEnabled(false);
-    banner(hint(e), true);
-    render();
+    const ghost = !!S.dev?.bypass;
+    document.body.dataset.ghost = ghost ? '1' : '0';
+    setState(
+      S.demo ? 'demo' : 'connected',
+      S.demo
+        ? `Demo (${product})${ghost ? ' · Ghost Mode' : ''}`
+        : ghost
+          ? `Ghost Mode · ${product} · firmware ${S.info.fw}`
+          : `Connected · ${product} · firmware ${S.info.fw}`,
+    );
+    if (ghost) {
+      banner('<b>Ghost Mode active.</b>Vectoring is bypassed (1.0×) and the dongle is cloaked as your mouse for vendor software. <button id="btnExitGhost" type="button" class="inline-btn">Exit Ghost Mode</button>', false, { ghost: true });
+    } else if (S.ghostBanner) {
+      banner('');
+    }
+  } else if (!S.ghostWait && !S.ghostDisconnected) {
+    document.body.dataset.ghost = '0';
+    if (S.ghostBanner) banner('');
+  }
+}
+
+async function attach(hid, demo = false) {
+  if (S.attaching) return;
+  if (S.client && S.hid === hid) return;
+  S.attaching = true;
+  try {
+    if (S.client) await detach(true);
+    const client = new DongleClient(hid);
+    try {
+      await client.open();
+      S.client = client; S.hid = hid; S.demo = demo;
+      S.hello = await client.hello();
+      S.info = await client.getInfo();
+      S.dev = await client.getState();
+      S.w = S.dev.w.slice(); S.selSlot = S.dev.slot;
+      S.slotsMask = await client.getSlotsMask();
+      client.addEventListener('state', onDeviceState);
+      client.addEventListener('mouse', onMouseEvent);
+      banner('');
+      const gw = S.ghostWait;
+      S.ghostWait = null;
+      S.ghostDisconnected = false;
+      setEnabled(true);
+      syncModeUi();
+      render();
+      if (gw) {
+        toast(S.dev?.bypass ? 'Ghost Mode active — vendor apps can now see your mouse.' : 'Normal mode restored.', 'good');
+      }
+      await refreshMice();
+      clearInterval(miceTimer);
+      miceTimer = setInterval(() => { if (!document.hidden) refreshMice(); }, 2000);   // measured rate, CPI changed on the mouse
+    } catch (e) {
+      S.client = null; S.hid = null; S.dev = null;
+      try { await client.close(); } catch { /* ignore */ }
+      document.body.dataset.ghost = '0';
+      setState('error', 'Not connected'); setEnabled(false);
+      banner(hint(e), true);
+      render();
+    }
+  } finally {
+    S.attaching = false;
   }
 }
 
 async function detach(silent = false) {
   const c = S.client;
   clearInterval(miceTimer); miceTimer = null;
-  S.client = null; S.dev = null; S.info = null; S.inFlight = false; S.dirty = false; S.mice = null;
+  S.client = null; S.hid = null; S.dev = null; S.info = null; S.inFlight = false; S.dirty = false; S.mice = null;
   renderMice();
   try { await c?.close(); } catch { /* already gone */ }
-  if (!silent) { setState('disconnected', 'Not connected'); setEnabled(false); render(); }
+  if (!silent) {
+    S.ghostDisconnected = false;
+    document.body.dataset.ghost = '0';
+    setState('disconnected', 'Not connected');
+    setEnabled(false);
+    syncModeUi();
+    render();
+  }
 }
 
 function failure(e) {
@@ -409,6 +459,7 @@ function failure(e) {
 }
 
 async function connectClicked() {
+  S.ghostWait = null;
   if (DEMO) { await attach(new MockHid({ gen: 7, w: [1, 1.15, 1.3, 1.15, 1, 1, 1, 1], filledSlots: [0, 2], slot: 0, mice: [MOCK_RAZER, MOCK_GENERIC, MOCK_KEYBOARD] }, { latencyMs: 3, profile: DEMO_PROFILE }), true); return; }
   try {
     const [dev] = await navigator.hid.requestDevice({ filters: [FILTER] });
@@ -430,13 +481,57 @@ async function act(fn) {
   try { await idle(); await fn(); } catch (e) { failure(e); }
 }
 
+const matchesDongle = (d) => d.collections.some((c) => c.usagePage === FILTER.usagePage);
+
+async function pollGhostReconnect(oldHid) {
+  while (S.ghostWait && Date.now() < S.ghostWait.deadline) {
+    if (!S.client && !S.attaching) {
+      try {
+        const ds = await navigator.hid.getDevices();
+        const d = ds.find((x) => x !== oldHid && matchesDongle(x));
+        if (d) { await attach(d); return; }
+      } catch { /* ignore while re-enumerating */ }
+    }
+    await sleep(250);
+  }
+  if (!S.ghostWait || S.client) return;
+  const target = S.ghostWait.target;
+  S.ghostWait = null;
+  if (target) {
+    S.ghostDisconnected = true;
+    document.body.dataset.ghost = '1';
+    setState('disconnected', 'Ghost Mode active');
+    banner('<b>Ghost Mode active.</b>Your dongle is cloaked as your mouse so vendor software can talk to it directly. Click <i>Connect dongle</i> once to grant browser access to its cloaked USB ID (only needed once per mouse), then untoggle <i>Ghost / Bypass</i> when you want to return to AnyMouse mode.', false, { ghost: true });
+  } else {
+    S.ghostDisconnected = false;
+    document.body.dataset.ghost = '0';
+    setState('disconnected', 'Not connected');
+    banner('<b>Dongle re-enumerated.</b>Click <i>Connect dongle</i> if your browser did not reconnect automatically.');
+  }
+}
+
+$('#banner').addEventListener('click', (e) => {
+  if (e.target.id === 'btnExitGhost' && connected() && !$('#bypass').disabled) {
+    $('#bypass').checked = false;
+    $('#bypass').dispatchEvent(new Event('change'));
+  }
+});
+
 $('#btnConnect').addEventListener('click', connectClicked);
-$('#btnDisconnect').addEventListener('click', () => detach());
+$('#btnDisconnect').addEventListener('click', () => { S.ghostWait = null; detach(); });
 
 $('#bypass').addEventListener('change', (e) => act(async () => {
-  const r = await S.client.setBypass(e.target.checked);
+  const want = e.target.checked;
+  const oldHid = S.hid;
+  const r = await S.client.setBypass(want);
   if (r.state) { S.dev = r.state; }
+  syncModeUi();
   render();
+  if (S.demo) return;
+  S.ghostWait = { target: want, deadline: Date.now() + 4500 };
+  toast(want ? 'Entering Ghost Mode — re-enumerating as attached mouse…'
+             : 'Exiting Ghost Mode — restoring AnyMouse Dongle…');
+  pollGhostReconnect(oldHid);
 }));
 
 $('#master').addEventListener('input', (e) => {
@@ -541,7 +636,9 @@ function render({ skipRadar = false, keepMaster = false } = {}) {
   const rows = [];
   if (on) {
     const pending = S.inFlight || S.dirty;
-    rows.push(['Device', dongleModel()], ['Firmware', `${S.info.fw} (protocol ${S.info.proto})`],
+    rows.push(['Device', dongleModel()],
+      ['Mode', S.dev.bypass ? 'Ghost Mode (1.0× bypass, cloaked as mouse)' : 'Vectoring active'],
+      ['Firmware', `${S.info.fw} (protocol ${S.info.proto})`],
       ['Polling to the PC', pcLinkText()], ['Polling from the mouse', mouseSideText()],
       ['Chip revision', S.info.chipRev ? `v${(S.info.chipRev / 100).toFixed(2)}` : 'not reported'],
       ['Serial (MAC)', S.info.mac], ['Active profile', `slot ${S.dev.slot + 1}`], ['Revision', `#${S.dev.gen}${pending ? ' (sending…)' : ''}`],
@@ -568,11 +665,20 @@ function init() {
     banner('<b>This browser cannot talk to USB devices.</b>AnyMouse Studio needs WebHID: use Chrome, Edge, Brave or Opera on a computer (not Firefox, Safari or a phone). You can still <a href="?demo">try the demo</a>.', true);
     return;
   }
-  const matches = (d) => d.collections.some((c) => c.usagePage === FILTER.usagePage);
-  navigator.hid.getDevices().then((ds) => { const d = ds.find(matches); if (d) attach(d); }).catch(() => {});
-  navigator.hid.addEventListener('connect', (e) => { if (matches(e.device) && !S.client) attach(e.device); });
+  navigator.hid.getDevices().then((ds) => { const d = ds.find(matchesDongle); if (d) attach(d); }).catch(() => {});
+  navigator.hid.addEventListener('connect', (e) => { if (matchesDongle(e.device) && !S.client && !S.attaching) attach(e.device); });
   navigator.hid.addEventListener('disconnect', (e) => {
-    if (e.device === S.hid) { detach(); setState('disconnected', 'Dongle unplugged or rebooting…'); }
+    if (e.device === S.hid) {
+      if (S.ghostWait) {
+        detach(true);
+        setState('disconnected', S.ghostWait.target ? 'Switching to Ghost Mode…' : 'Restoring AnyMouse mode…');
+        setEnabled(false);
+        render();
+      } else {
+        detach();
+        setState('disconnected', 'Dongle unplugged or rebooting…');
+      }
+    }
   });
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
     navigator.serviceWorker.register('sw.js').catch(() => {});

@@ -9,8 +9,8 @@
 #include "../../../common/amv_dongle_proto.h"
 #pragma pop_macro("_Static_assert")
 #define AMV_TEENSY_FW_MAJOR 0
-#define AMV_TEENSY_FW_MINOR 2
-#define AMV_TEENSY_FW_PATCH 1
+#define AMV_TEENSY_FW_MINOR 3
+#define AMV_TEENSY_FW_PATCH 0
 
 typedef struct { float w[8]; } amv_profile_t;
 typedef struct {

@@ -1,5 +1,8 @@
 #include "amv_usb_device.h"
+#include <stdio.h>
 #include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_log.h"
 #include "soc/usb_wrap_struct.h"
 #include "hal/usb_wrap_ll.h"
@@ -40,17 +43,23 @@ static const uint8_t vendor_report_desc[] = {
     0xC0,
 };
 
-enum { ITF_MOUSE = 0, ITF_VENDOR, ITF_COUNT };
+static const uint8_t ghost_fallback_desc[] = {
+    0x06, 0x00, 0xFF, 0x09, 0x01, 0xA1, 0x01,
+    0x09, 0x02, 0x15, 0x00, 0x26, 0xFF, 0x00, 0x75, 0x08, 0x95, 0x40, 0x81, 0x02,
+    0x09, 0x03, 0x91, 0x02, 0xC0,
+};
 
-#define CFG_TOTAL_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN + TUD_HID_INOUT_DESC_LEN)
+enum { ITF_MOUSE = 0, ITF_VENDOR, ITF_GHOST0, ITF_GHOST1, ITF_MAX };
 
-static const uint8_t fs_config_desc[] = {
-    TUD_CONFIG_DESCRIPTOR(1, ITF_COUNT, 0, CFG_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+#define BASE_CFG_LEN (TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN + TUD_HID_INOUT_DESC_LEN)
+
+static uint8_t fs_config_desc[TUD_CONFIG_DESC_LEN + TUD_HID_DESC_LEN + 3 * TUD_HID_INOUT_DESC_LEN] = {
+    TUD_CONFIG_DESCRIPTOR(1, 2, 0, BASE_CFG_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
     TUD_HID_DESCRIPTOR(ITF_MOUSE, 4, HID_ITF_PROTOCOL_MOUSE, sizeof(mouse_report_desc), 0x81, 8, 1),
     TUD_HID_INOUT_DESCRIPTOR(ITF_VENDOR, 5, HID_ITF_PROTOCOL_NONE, sizeof(vendor_report_desc), 0x02, 0x82, 64, 1),
 };
 
-static const tusb_desc_device_t device_desc = {
+static tusb_desc_device_t device_desc = {
     .bLength            = sizeof(tusb_desc_device_t),
     .bDescriptorType    = TUSB_DESC_DEVICE,
     .bcdUSB             = 0x0200,
@@ -67,23 +76,119 @@ static const tusb_desc_device_t device_desc = {
     .bNumConfigurations = 1,
 };
 
+static char s_mfg_str[AMV_GHOST_STR_MAX]  = "AnyMouse";
+static char s_prod_str[AMV_GHOST_STR_MAX] = "AnyMouse Dongle";
+
 static const char *string_desc[] = {
     (const char[]){0x09, 0x04},     /* 0: English */
-    "AnyMouse",                     /* 1 */
-    "AnyMouse Dongle",              /* 2 */
+    s_mfg_str,                      /* 1 */
+    s_prod_str,                     /* 2 */
     "DEV-0001",                     /* 3 */
     "AnyMouse Mouse",               /* 4 */
     "AnyMouse Control",             /* 5 */
+    "Mouse Vendor",                 /* 6 */
+    "Mouse Vendor 2",               /* 7 */
 };
+
+static uint8_t  s_ghost_n_if = 0;
+static uint8_t  s_ghost_desc[AMV_GHOST_MAX_IFS][AMV_GHOST_DESC_MAX];
+static uint16_t s_ghost_desc_len[AMV_GHOST_MAX_IFS];
+static amv_ghost_ops_t s_ghost_ops;
+
+static void build_config_desc(const amv_ghost_cfg_t *cfg)
+{
+    uint8_t n_if = (cfg && cfg->n_if) ? (cfg->n_if > AMV_GHOST_MAX_IFS ? AMV_GHOST_MAX_IFS : cfg->n_if) : 0;
+    uint16_t total = (uint16_t)(BASE_CFG_LEN + n_if * TUD_HID_INOUT_DESC_LEN);
+    uint8_t base[] = {
+        TUD_CONFIG_DESCRIPTOR(1, 2 + n_if, 0, total, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+        TUD_HID_DESCRIPTOR(ITF_MOUSE, 4, HID_ITF_PROTOCOL_MOUSE, sizeof(mouse_report_desc), 0x81, 8, 1),
+        TUD_HID_INOUT_DESCRIPTOR(ITF_VENDOR, 5, HID_ITF_PROTOCOL_NONE, sizeof(vendor_report_desc), 0x02, 0x82, 64, 1),
+    };
+    memcpy(fs_config_desc, base, sizeof base);
+    uint16_t off = sizeof base;
+    for (uint8_t s = 0; s < n_if; s++) {
+        uint8_t ep_out = (uint8_t)(0x03 + s);
+        uint8_t ep_in  = (uint8_t)(0x83 + s);
+        uint16_t mps = cfg->ifs[s].mps_in > cfg->ifs[s].mps_out ? cfg->ifs[s].mps_in : cfg->ifs[s].mps_out;
+        if (mps == 0 || mps > 64) mps = 64;
+        uint8_t iv = cfg->ifs[s].interval_in ? cfg->ifs[s].interval_in : 1;
+        uint8_t g[] = {
+            TUD_HID_INOUT_DESCRIPTOR(ITF_GHOST0 + s, 6 + s, HID_ITF_PROTOCOL_NONE,
+                                     s_ghost_desc_len[s], ep_out, ep_in, mps, iv),
+        };
+        memcpy(fs_config_desc + off, g, sizeof g);
+        off += sizeof g;
+    }
+    s_ghost_n_if = n_if;
+}
+
+void amv_usb_device_set_ghost_ops(const amv_ghost_ops_t *ops)
+{
+    if (ops) s_ghost_ops = *ops;
+    else memset(&s_ghost_ops, 0, sizeof s_ghost_ops);
+}
+
+void amv_usb_device_set_ghost(const amv_ghost_cfg_t *cfg)
+{
+    tud_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(60));
+    if (cfg && cfg->n_if > 0) {
+        device_desc.idVendor = cfg->vid;
+        device_desc.idProduct = cfg->pid;
+        snprintf(s_mfg_str, sizeof s_mfg_str, "%s", cfg->manufacturer[0] ? cfg->manufacturer : "USB");
+        snprintf(s_prod_str, sizeof s_prod_str, "%s", cfg->product[0] ? cfg->product : "USB Mouse");
+        uint8_t n = cfg->n_if > AMV_GHOST_MAX_IFS ? AMV_GHOST_MAX_IFS : cfg->n_if;
+        for (uint8_t s = 0; s < n; s++) {
+            uint16_t dlen = cfg->ifs[s].desc_len;
+            if (dlen > AMV_GHOST_DESC_MAX) dlen = AMV_GHOST_DESC_MAX;
+            memcpy(s_ghost_desc[s], cfg->ifs[s].desc, dlen);
+            s_ghost_desc_len[s] = dlen;
+        }
+        build_config_desc(cfg);
+    } else {
+        device_desc.idVendor = AMV_USB_VID;
+        device_desc.idProduct = AMV_USB_PID;
+        snprintf(s_mfg_str, sizeof s_mfg_str, "AnyMouse");
+        snprintf(s_prod_str, sizeof s_prod_str, "AnyMouse Dongle");
+        build_config_desc(NULL);
+    }
+    tud_connect();
+}
+
+bool amv_usb_device_ghost_send(uint8_t slot, const uint8_t *data, uint16_t len)
+{
+    if (slot >= s_ghost_n_if || !tud_mounted()) return false;
+    uint8_t inst = (uint8_t)(ITF_GHOST0 + slot);
+    if (!tud_hid_n_ready(inst)) return false;
+    return tud_hid_n_report(inst, 0, data, len);
+}
 
 uint8_t const *tud_hid_descriptor_report_cb(uint8_t instance)
 {
-    return instance == ITF_MOUSE ? mouse_report_desc : vendor_report_desc;
+    if (instance == ITF_MOUSE) return mouse_report_desc;
+    if (instance == ITF_VENDOR) return vendor_report_desc;
+    uint8_t slot = (uint8_t)(instance - ITF_GHOST0);
+    if (slot < s_ghost_n_if && s_ghost_desc_len[slot] > 0) return s_ghost_desc[slot];
+    return ghost_fallback_desc;
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type,
                                uint8_t *buffer, uint16_t reqlen)
 {
+    if ((instance == ITF_GHOST0 || instance == ITF_GHOST1) && s_ghost_ops.get_report) {
+        uint8_t slot = (uint8_t)(instance - ITF_GHOST0);
+        uint8_t raw[128];
+        uint16_t want = (uint16_t)(reqlen + (report_id ? 1 : 0));
+        if (want > sizeof raw) want = sizeof raw;
+        int n = s_ghost_ops.get_report(slot, (uint8_t)report_type, report_id, raw, want);
+        if (n <= 0) return 0;
+        int off = (report_id && n > 0 && raw[0] == report_id) ? 1 : 0;
+        int copy = n - off;
+        if (copy < 0) copy = 0;
+        if (copy > reqlen) copy = reqlen;
+        memcpy(buffer, raw + off, (size_t)copy);
+        return (uint16_t)copy;
+    }
     (void)instance; (void)report_id; (void)report_type; (void)buffer; (void)reqlen;
     return 0;
 }
@@ -91,8 +196,14 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_t
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type,
                            uint8_t const *buffer, uint16_t bufsize)
 {
-    (void)report_id; (void)report_type;
-    if (instance == ITF_VENDOR) amv_proto_on_rx(buffer, bufsize);
+    if (instance == ITF_VENDOR) {
+        amv_proto_on_rx(buffer, bufsize);
+        return;
+    }
+    if ((instance == ITF_GHOST0 || instance == ITF_GHOST1) && s_ghost_ops.set_report) {
+        uint8_t slot = (uint8_t)(instance - ITF_GHOST0);
+        s_ghost_ops.set_report(slot, (uint8_t)report_type, report_id, buffer, bufsize);
+    }
 }
 
 static void (*s_mouse_done_cb)(void);

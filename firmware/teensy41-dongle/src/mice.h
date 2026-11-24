@@ -18,6 +18,9 @@
 
 void mice_begin(bool engine);
 void mice_poll(void);
+void mice_set_paused(bool paused);
+bool mice_busy(void);
+void mice_refresh_now(void);
 const amv_mouse_ops_t *mice_ops(void);
 uint8_t mice_count(void);
 // Console: one line per entry.

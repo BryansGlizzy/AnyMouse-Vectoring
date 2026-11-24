@@ -31,6 +31,7 @@ static uint8_t s_self_octant;
 static float s_self_value;
 
 static esp_timer_handle_t s_reboot_timer;
+static bool s_ghost_pending, s_ghost_target;
 
 /* ---------- frame helpers ---------- */
 
@@ -174,6 +175,8 @@ static void handle_request(const uint8_t *in, uint8_t out[AMV_FRAME_SIZE])
     case AMV_CMD_SET_BYPASS: {
         if (len != 1) { build_frame(out, cmd, seq, AMV_ST_BAD_LEN, NULL, 0); break; }
         amv_ctrl_set_bypass(pl[0] != 0, AMV_SRC_HOST, &st);
+        s_ghost_pending = true;
+        s_ghost_target = (pl[0] != 0);
         reply_state(out, cmd, seq, AMV_R_OK, &st);
         break;
     }
@@ -351,6 +354,11 @@ static void proto_task(void *arg)
             if (is_event) s_events_sent++;
         } else if (is_event) {
             s_events_dropped++;
+        }
+        if (!it.is_tx && s_ghost_pending) {
+            s_ghost_pending = false;
+            vTaskDelay(pdMS_TO_TICKS(20));
+            amv_usb_host_set_ghost(s_ghost_target);
         }
     }
 }

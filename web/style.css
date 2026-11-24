@@ -28,6 +28,7 @@ a { color: var(--accent); }
 .chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel2); font-size: 13px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
 body[data-state="connected"] .dot { background: var(--good); box-shadow: 0 0 8px var(--good); }
+body[data-ghost="1"] .dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
 body[data-state="demo"] .dot { background: var(--warn); }
 body[data-state="error"] .dot { background: var(--bad); }
 
@@ -41,6 +42,7 @@ button:disabled, input:disabled { opacity: .45; cursor: not-allowed; }
 .banner { margin: 12px var(--gutter) 0; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--warn); background: color-mix(in srgb, var(--warn) 12%, var(--panel)); }
 .banner.bad { border-color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, var(--panel)); }
 .banner b { display: block; margin-bottom: 2px; }
+.inline-btn { margin-left: 8px; padding: 3px 10px; font-size: 13px; vertical-align: baseline; }
 
 main { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--gutter); padding: var(--gutter); max-width: 1180px; margin: 0 auto; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; min-width: 0; }

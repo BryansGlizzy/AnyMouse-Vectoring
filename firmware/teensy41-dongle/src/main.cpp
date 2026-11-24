@@ -20,6 +20,7 @@
 #include "amv_octant.h"
 #include "amv_vendor_usb.h"
 #include "amv_store_teensy.h"
+#include "ghost.h"
 #include "host.h"
 #include "js_engine.h"
 #include "mice.h"
@@ -48,7 +49,10 @@ extern "C" void amv_js_idle_hook(void) { host_task(); pc_out_poll(); }
 // ---------------------------------------------------------------------------------------------------------------
 // protocol platform: every callback runs in loop()
 
-static void apply_state(const float w[8], bool bypass) { host_set_weights(w, bypass); }
+static void apply_state(const float w[8], bool bypass) {
+    host_set_weights(w, bypass);
+    ghost_set_wanted(bypass);
+}
 static void unit_id(uint8_t mac[6]) {
     uint32_t hi = HW_OCOTP_MAC1, lo = HW_OCOTP_MAC0;
     mac[0] = hi >> 8; mac[1] = hi;
@@ -114,6 +118,7 @@ static void handle_line(char *line) {
                 ((pc >> 26) & 3) == 2 ? "high speed" : ((pc >> 26) & 3) == 0 ? "full speed" : "low speed", host_get_itc(),
                 usb_configuration ? "configured" : "not configured", external_psram_size);
         mice_print();
+        host_print_port_log();
     }
     else if (!strcmp(line, "m")) mice_print();
     else if (!strcmp(line, "fake")) fake_mouse_test();
@@ -189,7 +194,7 @@ void setup() {
     plat.store = amv_store_teensy_ops();
     amv_proto_init(&plat);
     uint8_t slot; amv_profile_t profile;
-    if (plat.store->load_boot(&slot, &profile)) amv_proto_restore(slot, &profile, amv_store_boot_bypass());
+    if (plat.store->load_boot(&slot, &profile)) amv_proto_restore(slot, &profile, false);
 
     host_begin();
     bool engine = js_begin();      // about a second; motion already flows (interrupts), enumeration continues
@@ -213,6 +218,7 @@ void loop() {
     if (reply_pending && amv_vendor_send(reply)) reply_pending = false;
     if (!reply_pending && amv_proto_reboot_pending() && usb_rawhid_tx_idle()) amv_proto_run_deferred();
     if (!reply_pending && amv_proto_take_event(frame)) amv_proto_count_event(amv_vendor_send(frame));   // events may drop
+    ghost_poll();
 
     poll_console();
 

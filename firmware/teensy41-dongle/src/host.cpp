@@ -71,8 +71,8 @@ protected:
             if (i && d[i + 1] == 4) break;    // the next interface
             if (d[i + 1] == 5 && d[i] >= 7) {
                 uint16_t mps = (uint16_t)(d[i + 4] | (d[i + 5] << 8)) & 0x7FF;
-                if (d[i + 2] & 0x80) { h->in_mps = mps; h->nominal_hz = nominal_rate(h->speed, d[i + 6]); }
-                else { h->out_mps = mps; h->has_out = true; }
+                if (d[i + 2] & 0x80) { h->in_mps = mps; h->in_interval = d[i + 6]; h->nominal_hz = nominal_rate(h->speed, d[i + 6]); }
+                else { h->out_mps = mps; h->out_interval = d[i + 6]; h->has_out = true; }
             }
         }
         copy_string(dev, strbuf_t::STR_ID_PROD, h->product, sizeof h->product);
@@ -245,10 +245,22 @@ private:
 };
 static AllHid allhid;
 
+extern "C" void amv_log(const char *fmt, ...);
+
+// Persistent USB2 port-change event ring buffer (captures disconnects/overcurrent/disable in ISR)
+#define PORT_LOG_SIZE 16
+struct port_ev_t { uint32_t ms; uint32_t portsc; };
+static port_ev_t s_port_log[PORT_LOG_SIZE];
+static uint32_t  s_port_ev_total = 0;
+
 // Count interrupts and how many reports each delivered (the 8 kHz checks).
 static void (*orig_isr)(void);
 static uint32_t isr_last;
 static void isr_wrap() {
+    if (USBHS_USBSTS & USBHS_USBSTS_PCI) {
+        s_port_log[s_port_ev_total % PORT_LOG_SIZE] = { millis(), USBHS_PORTSC1 };
+        s_port_ev_total++;
+    }
     uint32_t now = cyc();
     uint32_t before = hs.rx;
     orig_isr();
@@ -274,11 +286,35 @@ void host_begin(void) {
     }
     USBHIDParser::driver_ready_for_hid_collection(&allhid);
     usbhost.begin();
+    // Raise High-Speed disconnect detector threshold to max (+12%) to avoid false trips on 8 kHz bursts.
+    USBPHY2_RX = (USBPHY2_RX & ~(0x7u << 4)) | USBPHY_RX_DISCONADJ(3);
     orig_isr = _VectorsRam[IRQ_USBHS + 16];
     attachInterruptVector(IRQ_USBHS, isr_wrap);
     // USBHost_t36 leaves the interrupt threshold at 1 micro-frame, which batches two 8 kHz reports into one
     // interrupt about half the time. Interrupt at once: one report, one interrupt, 125 us apart.
     host_set_itc(0);
+}
+
+void host_print_port_log(void) {
+    port_ev_t copy[PORT_LOG_SIZE];
+    uint32_t p = irq_save();
+    uint32_t total = s_port_ev_total;
+    uint32_t count = total < PORT_LOG_SIZE ? total : PORT_LOG_SIZE;
+    uint32_t start = total < PORT_LOG_SIZE ? 0 : (total - PORT_LOG_SIZE);
+    for (uint32_t i = 0; i < count; i++) copy[i] = s_port_log[(start + i) % PORT_LOG_SIZE];
+    uint32_t phy_rx = USBPHY2_RX;
+    irq_restore(p);
+    amv_log("[usb2] USBPHY2_RX=%08lX (disconadj=%lu) port_changes=%lu\n",
+            (unsigned long)phy_rx, (unsigned long)((phy_rx >> 4) & 7u), (unsigned long)total);
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t sc = copy[i].portsc;
+        amv_log("  @%lu.%03lus PORTSC1=%08lX ccs=%u csc=%u pe=%u pec=%u oca=%u occ=%u hsp=%u\n",
+                (unsigned long)(copy[i].ms / 1000u), (unsigned long)(copy[i].ms % 1000u), (unsigned long)sc,
+                (unsigned)((sc & USB_PORTSC1_CCS) != 0), (unsigned)((sc & USB_PORTSC1_CSC) != 0),
+                (unsigned)((sc & USB_PORTSC1_PE) != 0), (unsigned)((sc & USB_PORTSC1_PEC) != 0),
+                (unsigned)((sc & USB_PORTSC1_OCA) != 0), (unsigned)((sc & USB_PORTSC1_OCC) != 0),
+                (unsigned)((sc & USB_PORTSC1_HSP) != 0));
+    }
 }
 
 void host_task(void) { usbhost.Task(); }
@@ -340,6 +376,47 @@ int host_get_report(host_if_t *h, uint8_t type, uint8_t id, uint8_t *data, uint1
     if (e) return e;
     memcpy(data, ctl_buf + off, cap);
     *actual = cap;
+    return 0;
+}
+
+int host_set_report_raw(host_if_t *h, uint8_t type, uint8_t id, const uint8_t *raw, uint16_t len) {
+    if (len > sizeof ctl_buf) return -4;
+    if (len) memcpy(ctl_buf, raw, len);
+    return control(h, 0x21, 0x09, (uint16_t)((type << 8) | id), h->ifnum, len, 1000);
+}
+
+int host_get_report_raw(host_if_t *h, uint8_t type, uint8_t id, uint8_t *raw, uint16_t cap, int *actual) {
+    if (cap > sizeof ctl_buf) cap = sizeof ctl_buf;
+    memset(ctl_buf, 0, cap);
+    int e = control(h, 0xA1, 0x01, (uint16_t)((type << 8) | id), h->ifnum, cap, 1000);
+    if (e) return e;
+    memcpy(raw, ctl_buf, cap);
+    if (actual) *actual = cap;
+    return 0;
+}
+
+int host_send_output_raw(host_if_t *h, const uint8_t *raw, uint16_t len) {
+    uint8_t id = (h->layout.uses_report_ids && len) ? raw[0] : 0;
+    if (!h->has_out) return host_set_report_raw(h, 2, id, raw, len);
+    AmvParser *p = parser_of(h);
+    if (!p || !host_if_alive(h)) return -3;
+    uint8_t buf[1024];
+    if (len > sizeof buf) return -4;
+    if (len) memcpy(buf, raw, len);
+    uint32_t start = millis();
+    for (;;) {
+        p->out_busy = true;
+        if (p->sendPacket(buf, len)) break;
+        p->out_busy = false;
+        if (!host_if_alive(h)) return -3;
+        if (millis() - start > 200) return host_set_report_raw(h, 2, id, raw, len);
+        usbhost.Task();
+    }
+    while (p->out_busy) {
+        if (!host_if_alive(h)) return -3;
+        if (millis() - start > 200) { p->out_busy = false; return host_set_report_raw(h, 2, id, raw, len); }
+        usbhost.Task();
+    }
     return 0;
 }
 
